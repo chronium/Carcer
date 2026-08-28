@@ -6,11 +6,11 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import QemuProcessController, SerialConnection, SerialError
+from harness import QemuProcessController, SerialConnection, SerialError, ToolClient
 
 
 class SeedBootIntegrationTest(unittest.TestCase):
-    def test_real_seed_boots_and_signals_ready(self) -> None:
+    def test_real_seed_boots_and_lists_no_tools(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         make = shutil.which("make")
         qemu = shutil.which("qemu-system-x86_64")
@@ -77,6 +77,7 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         except TimeoutError:
                             continue
 
+                    self.assertEqual(ToolClient(serial).list_tools(), [])
                     self.assertTrue(controller.is_running)
 
                 with self.assertRaisesRegex(SerialError, "not connected"):

@@ -14,7 +14,8 @@ LIMINE_DIR := third_party/limine
 
 CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding \
 	-fno-stack-protector -fno-pic -fno-pie -fno-asynchronous-unwind-tables \
-	-m64 -march=x86-64 -mno-red-zone -mcmodel=kernel
+	-m64 -march=x86-64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+	-mcmodel=kernel
 LDFLAGS := -static --build-id=none -z max-page-size=0x1000
 REQUIRED_TOOLS := $(CROSS_CC) $(CROSS_LD) $(HOST_CC) xorriso install mkdir rm
 REQUIRED_LIMINE_FILES := limine.c limine-bios.sys limine-bios-cd.bin
@@ -44,7 +45,7 @@ check-tools:
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJECT): seed/kernel.c | $(BUILD_DIR)
+$(OBJECT): seed/kernel.c Makefile | $(BUILD_DIR)
 	$(CROSS_CC) $(CFLAGS) -c $< -o $@
 
 $(KERNEL): $(OBJECT) seed/linker.ld
