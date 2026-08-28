@@ -1,4 +1,4 @@
-"""External AgentOS harness."""
+"""External CodexOS harness."""
 
 from .framing import Frame, FramingError, encode_frame, read_frame
 from .host_service_protocol import (
