@@ -35,6 +35,7 @@ class QemuProcessController:
         stdout_path: str | PathLike[str],
         stderr_path: str | PathLike[str],
         qmp_socket_path: str | PathLike[str] | None = None,
+        serial_socket_path: str | PathLike[str] | None = None,
     ) -> None:
         """Start QEMU with output captured in the given files."""
         self._reap_exited_process()
@@ -48,6 +49,10 @@ class QemuProcessController:
             if qmp_socket_path is not None:
                 command.extend(
                     ["-qmp", f"unix:{qmp_socket_path},server=on,wait=off"]
+                )
+            if serial_socket_path is not None:
+                command.extend(
+                    ["-serial", f"unix:{serial_socket_path},server=on,wait=off"]
                 )
             self._process = subprocess.Popen(
                 command,
