@@ -1,0 +1,12 @@
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "agentos-harness"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.uv.build-backend]
+module-name = "harness"
+module-root = ""
