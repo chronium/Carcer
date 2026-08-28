@@ -98,7 +98,9 @@ __attribute__((noreturn)) static void protocol_loop(void) {
         uint32_t payload_length = read_u32_le(header + 12);
 
         if (payload_length > FRAME_MAX_PAYLOAD) {
-            continue;
+            for (;;) {
+                __asm__ volatile("pause");
+            }
         }
         if (header[0] != 'C' || header[1] != 'X' || header[2] != 'O' ||
             header[3] != 'S' || version != FRAME_PROTOCOL_VERSION) {

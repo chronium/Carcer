@@ -1,5 +1,6 @@
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -10,7 +11,7 @@ from harness import QemuProcessController, SerialConnection, SerialError, ToolCl
 
 
 class SeedBootIntegrationTest(unittest.TestCase):
-    def test_real_seed_boots_and_lists_no_tools(self) -> None:
+    def test_real_seed_lists_no_tools_and_stops_on_oversized_frame(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         make = shutil.which("make")
         qemu = shutil.which("qemu-system-x86_64")
@@ -78,6 +79,15 @@ class SeedBootIntegrationTest(unittest.TestCase):
                             continue
 
                     self.assertEqual(ToolClient(serial).list_tools(), [])
+
+                    oversized = struct.pack(
+                        "<4sHHII", b"CXOS", 1, 0x0001, 2, 16 * 1024 * 1024 + 1
+                    )
+                    valid_request = struct.pack("<4sHHII", b"CXOS", 1, 0x0001, 3, 0)
+                    serial.write(oversized + valid_request)
+                    with self.assertRaises(TimeoutError):
+                        serial.read(1, timeout_seconds=0.25)
+
                     self.assertTrue(controller.is_running)
 
                 with self.assertRaisesRegex(SerialError, "not connected"):
