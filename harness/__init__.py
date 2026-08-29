@@ -6,6 +6,7 @@ from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
 )
+from .generation_runtime import CodexOSRun, RuntimeState
 from .host_service_protocol import (
     HostServiceProtocolError,
     HostServiceRequest,
@@ -29,6 +30,7 @@ __all__ = [
     "BuildResult",
     "BuildStatus",
     "CodexOSHostServices",
+    "CodexOSRun",
     "Frame",
     "FramingError",
     "HostServiceProtocolError",
@@ -37,6 +39,7 @@ __all__ = [
     "QmpError",
     "QemuProcessController",
     "PendingGenerationFinish",
+    "RuntimeState",
     "SerialConnection",
     "SerialError",
     "SnapshotFile",
