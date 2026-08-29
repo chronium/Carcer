@@ -63,7 +63,7 @@ class CodexOSHostServices:
         if self._pending_finish is not None:
             return self._finish_response(
                 request,
-                _FINISH_REJECTED,
+                _FINISH_HARNESS_FAILURE,
                 b"generation finish has already been accepted",
             )
         if len(request.arguments) != 2:

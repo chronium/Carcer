@@ -123,7 +123,7 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             second_finish = service.handle_request(
                 HostServiceRequest(62, "finish_generation", (b"replacement", snapshot))
             )
-            self.assertEqual(_response(second_finish.payload)[0], 1)
+            self.assertEqual(_response(second_finish.payload)[0], 2)
             later_build = service.handle_request(
                 HostServiceRequest(63, "build", (snapshot,))
             )

@@ -20,8 +20,8 @@ Response status has these service-specific meanings:
 | Status | Meaning |
 | --- | --- |
 | `0` | The generation finish was accepted |
-| `1` | No matching successful build exists, or a finish was already accepted |
-| `2` | The request was malformed or the trusted harness failed |
+| `1` | No matching successful build exists |
+| `2` | The request was malformed, invalid for the session, or the trusted harness failed |
 
 Success output is empty. Rejection output is a short UTF-8 explanation.
 
