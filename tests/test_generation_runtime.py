@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from harness import CodexOSRun, QmpError, RuntimeState, SourceSnapshotError
+from harness import (
+    TEST_HARDWARE_PROFILE,
+    CodexOSHardwareProfile,
+    CodexOSRun,
+    QmpError,
+    RuntimeState,
+    SourceSnapshotError,
+)
 from harness.generation_runtime import _materialize_snapshot
 
 _TOOLS = [
@@ -44,7 +51,11 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
             initial_iso = temporary_path / "initial.iso"
             shutil.copyfile(image, initial_iso)
             initial_iso_bytes = initial_iso.read_bytes()
-            runtime = CodexOSRun(run_directory, qemu)
+            runtime = CodexOSRun(
+                run_directory,
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             try:
                 runtime.start(initial_iso)
                 self.assertIs(runtime.state, RuntimeState.RUNNING)
@@ -134,11 +145,29 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                         "transition": "initial",
                     },
                 )
+                hardware = json.loads(
+                    (archive / "hardware.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(hardware["profile"], "test-v1")
+                self.assertEqual(hardware["machine"], "q35")
+                self.assertEqual(hardware["vcpus"], 1)
+                self.assertEqual(hardware["memory_mib"], 128)
+                self.assertEqual(hardware["writable_block_devices"], [])
+                self.assertNotIn(
+                    str(run_directory),
+                    json.dumps(hardware),
+                )
+                self.assertTrue(
+                    hardware["qemu_version"].startswith(
+                        "QEMU emulator version "
+                    )
+                )
                 self.assertEqual(
                     {path.name for path in archive.iterdir()},
                     {
                         "boot",
                         "handoff.txt",
+                        "hardware.json",
                         "metadata.json",
                         "source.snapshot",
                         "source",
@@ -236,6 +265,29 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     initial_iso_bytes,
                 )
 
+                # Model a valid older archive produced under a different
+                # trusted profile before exercising rollback. The runtime's
+                # current profile must remain authoritative for the fork.
+                historical_profile = CodexOSHardwareProfile(
+                    profile="historical-test-v1",
+                    machine="q35",
+                    accelerator="kvm:tcg",
+                    cpu_model="qemu64",
+                    vcpus=1,
+                    memory_mib=96,
+                )
+                (archive / "hardware.json").write_text(
+                    json.dumps(
+                        historical_profile.manifest(
+                            hardware["qemu_version"]
+                        ).as_json_object(),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
                 generation_zero_contents = _archive_contents(archive)
                 generation_one_contents = _archive_contents(
                     generation_one_archive
@@ -282,6 +334,37 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                         runtime.fork_from_generation(0)
                 finally:
                     handoff_path.write_bytes(handoff_bytes)
+
+                hardware_path = archive / "hardware.json"
+                hardware_bytes = hardware_path.read_bytes()
+                hidden_hardware = run_directory / ".hardware.json-hidden"
+                hardware_path.rename(hidden_hardware)
+                try:
+                    with self.assertRaisesRegex(FileNotFoundError, "missing"):
+                        runtime.fork_from_generation(0)
+                finally:
+                    hidden_hardware.rename(hardware_path)
+                for invalid_hardware, message in (
+                    (b"not JSON", "malformed"),
+                    (
+                        json.dumps(
+                            {**hardware, "unexpected": True}
+                        ).encode("utf-8"),
+                        "malformed",
+                    ),
+                    (
+                        json.dumps(
+                            {**hardware, "network": "e1000"}
+                        ).encode("utf-8"),
+                        "peripheral",
+                    ),
+                ):
+                    hardware_path.write_bytes(invalid_hardware)
+                    try:
+                        with self.assertRaisesRegex(ValueError, message):
+                            runtime.fork_from_generation(0)
+                    finally:
+                        hardware_path.write_bytes(hardware_bytes)
 
                 self.assertEqual(
                     _archive_contents(archive),
@@ -363,6 +446,18 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     },
                 )
                 self.assertEqual(
+                    json.loads(
+                        (generation_two_archive / "hardware.json").read_text()
+                    )["profile"],
+                    runtime.hardware_profile.profile,
+                )
+                self.assertEqual(
+                    json.loads(
+                        (archive / "hardware.json").read_text()
+                    )["profile"],
+                    "historical-test-v1",
+                )
+                self.assertEqual(
                     (
                         generation_two_archive / "boot" / "codexos.iso"
                     ).read_bytes(),
@@ -419,7 +514,11 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             run_directory = Path(temporary) / "run"
-            runtime = CodexOSRun(run_directory, qemu)
+            runtime = CodexOSRun(
+                run_directory,
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             try:
                 runtime.start(image)
                 generation_zero_pid = runtime.active_pid
@@ -530,6 +629,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     {
                         "boot",
                         "metadata.json",
+                        "hardware.json",
                         "aborted.txt",
                         "qemu.stdout",
                         "qemu.stderr",
@@ -545,6 +645,12 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                         "parent_generation": 0,
                         "transition": "successor",
                     },
+                )
+                self.assertEqual(
+                    json.loads(
+                        (generation_one_archive / "hardware.json").read_text()
+                    )["profile"],
+                    "test-v1",
                 )
                 self.assertEqual(
                     (generation_one_archive / "aborted.txt").read_bytes(),

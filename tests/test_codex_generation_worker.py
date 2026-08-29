@@ -16,6 +16,7 @@ from unittest.mock import Mock
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
     CodexGenerationSession,
     CodexGenerationWorker,
     CodexGenerationWorkerError,
@@ -638,7 +639,11 @@ class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             first_scenario = {
                 "assert_dead_processes_in": str(root / "fake-reviewer"),
                 "tool_calls": [
