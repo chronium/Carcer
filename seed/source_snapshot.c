@@ -1,0 +1,77 @@
+#include "source_snapshot.h"
+
+#include "files.h"
+#include "protocol.h"
+#include "serial.h"
+
+static int build_path_valid(const struct file *file) {
+    static const uint8_t prefix[] = "seed/";
+
+    if (file->path_length <= sizeof(prefix) - 1u) {
+        return 0;
+    }
+    for (uint32_t index = 0; index < sizeof(prefix) - 1u; ++index) {
+        if (file->path[index] != prefix[index]) {
+            return 0;
+        }
+    }
+    for (uint32_t index = 0; index < file->path_length; ++index) {
+        if (file->path[index] == 0) {
+            return 0;
+        }
+    }
+
+    uint32_t component_start = sizeof(prefix) - 1u;
+    for (uint32_t index = component_start; index <= file->path_length; ++index) {
+        if (index != file->path_length && file->path[index] != '/') {
+            continue;
+        }
+        uint32_t component_length = index - component_start;
+        if (component_length == 0 ||
+            (component_length == 1 && file->path[component_start] == '.') ||
+            (component_length == 2 && file->path[component_start] == '.' &&
+             file->path[component_start + 1u] == '.')) {
+            return 0;
+        }
+        component_start = index + 1u;
+    }
+    return 1;
+}
+
+int source_snapshot_measure(
+    uint16_t *selected_count,
+    uint32_t *snapshot_length
+) {
+    uint16_t count = 0;
+    uint32_t length = 2u;
+
+    for (uint32_t index = 0; index < file_count; ++index) {
+        const struct file *file = &files[index];
+        if (!build_path_valid(file)) {
+            continue;
+        }
+        uint32_t entry_length = 2u + file->path_length + 4u + file_size(file);
+        if (entry_length > FRAME_MAX_PAYLOAD - length) {
+            return 0;
+        }
+        length += entry_length;
+        ++count;
+    }
+    *selected_count = count;
+    *snapshot_length = length;
+    return 1;
+}
+
+void source_snapshot_write(uint16_t selected_count) {
+    frame_write_u16(selected_count);
+    for (uint32_t index = 0; index < file_count; ++index) {
+        const struct file *file = &files[index];
+        if (!build_path_valid(file)) {
+            continue;
+        }
+        frame_write_u16(file->path_length);
+        serial_write_bytes(file->path, file->path_length);
+        frame_write_u32(file_size(file));
+        serial_write_bytes(file_content(file), file_size(file));
+    }
+}
