@@ -6,7 +6,10 @@ HOST_CC := cc
 
 BUILD_DIR := build/seed
 ISO_ROOT := $(BUILD_DIR)/iso-root
-OBJECT := $(BUILD_DIR)/kernel.o
+SEED_SOURCES := seed/kernel.c seed/serial.c seed/protocol.c \
+	seed/files.c seed/tools.c
+SEED_HEADERS := seed/serial.h seed/protocol.h seed/files.h seed/tools.h
+OBJECTS := $(patsubst seed/%.c,$(BUILD_DIR)/%.o,$(SEED_SOURCES))
 SOURCE_IMAGE := $(BUILD_DIR)/source-image.o
 KERNEL := $(BUILD_DIR)/kernel.elf
 LIMINE_TOOL := $(BUILD_DIR)/limine
@@ -47,14 +50,14 @@ check-tools:
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJECT): seed/kernel.c Makefile | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: seed/%.c $(SEED_HEADERS) Makefile | $(BUILD_DIR)
 	$(CROSS_CC) $(CFLAGS) -c $< -o $@
 
 $(SOURCE_IMAGE): $(GUEST_SOURCE_INPUTS) | $(BUILD_DIR)
 	$(CROSS_LD) -r -b binary $(GUEST_SOURCE_INPUTS) -o $@
 
-$(KERNEL): $(OBJECT) $(SOURCE_IMAGE) seed/linker.ld
-	$(CROSS_LD) $(LDFLAGS) -T seed/linker.ld $(OBJECT) $(SOURCE_IMAGE) -o $@
+$(KERNEL): $(OBJECTS) $(SOURCE_IMAGE) seed/linker.ld
+	$(CROSS_LD) $(LDFLAGS) -T seed/linker.ld $(OBJECTS) $(SOURCE_IMAGE) -o $@
 
 $(LIMINE_TOOL): $(LIMINE_DIR)/limine.c | $(BUILD_DIR)
 	$(HOST_CC) -std=c99 -O2 $< -o $@
