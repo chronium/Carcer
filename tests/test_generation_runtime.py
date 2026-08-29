@@ -7,8 +7,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
-from harness import CodexOSRun, RuntimeState, SourceSnapshotError
+from harness import CodexOSRun, QmpError, RuntimeState, SourceSnapshotError
 from harness.generation_runtime import _materialize_snapshot
 
 _TOOLS = [
@@ -127,6 +128,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     json.loads((archive / "metadata.json").read_text()),
                     {
                         "generation": 0,
+                        "outcome": "completed",
                         "parent_generation": None,
                         "transition": "initial",
                     },
@@ -223,6 +225,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     ),
                     {
                         "generation": 1,
+                        "outcome": "completed",
                         "parent_generation": 0,
                         "transition": "successor",
                     },
@@ -353,6 +356,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     ),
                     {
                         "generation": 2,
+                        "outcome": "completed",
                         "parent_generation": 0,
                         "transition": "rollback",
                     },
@@ -402,8 +406,248 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
             original_kernel,
         )
 
+    def test_pauses_aborts_and_forks_from_completed_generation(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        image = _build_seed(repository)
+        qemu = shutil.which("qemu-system-x86_64")
+        self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
+        original_kernel = (repository / "seed" / "kernel.c").read_bytes()
+        mutation_a = b"\n/* HUMAN-CONTROL-A */\n"
+        mutation_b = b"\n/* HUMAN-CONTROL-B */\n"
+        handoff = "Generation zero completed before operator recovery."
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_directory = Path(temporary) / "run"
+            runtime = CodexOSRun(run_directory, qemu)
+            try:
+                runtime.start(image)
+                generation_zero_pid = runtime.active_pid
+                self.assertIsNotNone(generation_zero_pid)
+                write = runtime.invoke_tool(
+                    "write",
+                    [
+                        b"seed/kernel.c",
+                        str(len(original_kernel)).encode("ascii"),
+                        mutation_a,
+                    ],
+                )
+                self.assertEqual(write.status, 0)
+                build = runtime.invoke_tool("build", [])
+                self.assertEqual(build.status, 0, build.output.decode())
+
+                runtime.pause()
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertEqual(runtime.active_pid, generation_zero_pid)
+                os.kill(generation_zero_pid, 0)
+                self.assertIsNotNone(runtime._qmp)
+                self.assertEqual(runtime._qmp.query_status(), "paused")
+                with self.assertRaisesRegex(RuntimeError, "not running"):
+                    runtime.list_tools()
+                with self.assertRaisesRegex(RuntimeError, "not running"):
+                    runtime.invoke_tool("read", [b"seed/kernel.c", b"0", b"1"])
+                with self.assertRaisesRegex(RuntimeError, "not running"):
+                    runtime.pause()
+
+                runtime.resume()
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.active_pid, generation_zero_pid)
+                os.kill(generation_zero_pid, 0)
+                self.assertIsNotNone(runtime._qmp)
+                self.assertEqual(runtime._qmp.query_status(), "running")
+                with self.assertRaisesRegex(RuntimeError, "not paused"):
+                    runtime.resume()
+                expected_a = original_kernel + mutation_a
+                read = runtime.invoke_tool(
+                    "read",
+                    [
+                        b"seed/kernel.c",
+                        b"0",
+                        str(len(expected_a)).encode("ascii"),
+                    ],
+                )
+                self.assertEqual(read.status, 0)
+                self.assertEqual(read.output, expected_a)
+
+                finish = runtime.invoke_tool(
+                    "finish_generation",
+                    [handoff.encode("utf-8")],
+                )
+                self.assertEqual(finish.status, 0)
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
+                generation_zero_archive = run_directory / "generation-0000"
+                self.assertEqual(
+                    json.loads(
+                        (generation_zero_archive / "metadata.json").read_text()
+                    )["outcome"],
+                    "completed",
+                )
+                generation_zero_contents = _archive_contents(
+                    generation_zero_archive
+                )
+
+                runtime.continue_generation()
+                self.assertEqual(runtime.generation_number, 1)
+                generation_one_pid = runtime.active_pid
+                self.assertIsNotNone(generation_one_pid)
+                write = runtime.invoke_tool(
+                    "write",
+                    [
+                        b"seed/kernel.c",
+                        str(len(expected_a)).encode("ascii"),
+                        mutation_b,
+                    ],
+                )
+                self.assertEqual(write.status, 0)
+
+                runtime.pause()
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertEqual(runtime.active_pid, generation_one_pid)
+                runtime.abort_generation()
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
+                self.assertEqual(runtime.generation_number, 1)
+                self.assertIsNone(runtime.active_pid)
+                self.assertIsNone(runtime.pending_generation_finish)
+                self.assertIsNone(runtime.previous_handoff)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(generation_one_pid, 0)
+
+                generation_one_archive = run_directory / "generation-0001"
+                self.assertEqual(
+                    {path.name for path in generation_one_archive.iterdir()},
+                    {
+                        "boot",
+                        "metadata.json",
+                        "aborted.txt",
+                        "qemu.stdout",
+                        "qemu.stderr",
+                    },
+                )
+                self.assertEqual(
+                    json.loads(
+                        (generation_one_archive / "metadata.json").read_text()
+                    ),
+                    {
+                        "generation": 1,
+                        "outcome": "aborted",
+                        "parent_generation": 0,
+                        "transition": "successor",
+                    },
+                )
+                self.assertEqual(
+                    (generation_one_archive / "aborted.txt").read_bytes(),
+                    b"Generation aborted by operator.",
+                )
+                self.assertEqual(
+                    (
+                        generation_one_archive / "boot" / "codexos.iso"
+                    ).read_bytes(),
+                    (
+                        generation_zero_archive
+                        / "successor"
+                        / "codexos.iso"
+                    ).read_bytes(),
+                )
+                for absent in (
+                    "source.snapshot",
+                    "source",
+                    "successor",
+                    "handoff.txt",
+                ):
+                    self.assertFalse((generation_one_archive / absent).exists())
+
+                generation_one_contents = _archive_contents(
+                    generation_one_archive
+                )
+                with self.assertRaisesRegex(RuntimeError, "no selected successor"):
+                    runtime.continue_generation()
+                with self.assertRaisesRegex(RuntimeError, "not running"):
+                    runtime.pause()
+                with self.assertRaisesRegex(RuntimeError, "not paused"):
+                    runtime.resume()
+                with self.assertRaisesRegex(RuntimeError, "cannot be aborted"):
+                    runtime.abort_generation()
+                with self.assertRaisesRegex(ValueError, "aborted generation"):
+                    runtime.fork_from_generation(1)
+
+                runtime.fork_from_generation(0)
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.generation_number, 2)
+                generation_two_pid = runtime.active_pid
+                self.assertIsNotNone(generation_two_pid)
+                self.assertEqual(runtime.previous_handoff, handoff)
+                read = runtime.invoke_tool(
+                    "read",
+                    [
+                        b"seed/kernel.c",
+                        b"0",
+                        str(len(expected_a + mutation_b)).encode("ascii"),
+                    ],
+                )
+                self.assertEqual(read.status, 0)
+                self.assertEqual(read.output, expected_a)
+                self.assertIn(mutation_a, read.output)
+                self.assertNotIn(mutation_b, read.output)
+                self.assertEqual(
+                    _archive_contents(generation_zero_archive),
+                    generation_zero_contents,
+                )
+                self.assertEqual(
+                    _archive_contents(generation_one_archive),
+                    generation_one_contents,
+                )
+
+                runtime.pause()
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                runtime.stop()
+                self.assertIs(runtime.state, RuntimeState.STOPPED)
+                self.assertIsNone(runtime.active_pid)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(generation_two_pid, 0)
+                self.assertFalse((run_directory / "generation-0002").exists())
+                self.assertEqual(
+                    _archive_contents(generation_one_archive),
+                    generation_one_contents,
+                )
+            finally:
+                runtime.stop()
+
+        self.assertEqual(
+            (repository / "seed" / "kernel.c").read_bytes(),
+            original_kernel,
+        )
+
 
 class GenerationRuntimeStateTests(unittest.TestCase):
+    def test_qmp_failures_leave_runtime_conservatively_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(Path(temporary) / "run")
+            qmp = Mock()
+            qmp.query_status.side_effect = QmpError("verification failed")
+            runtime._state = RuntimeState.RUNNING
+            runtime._qmp = qmp
+
+            with self.assertRaisesRegex(QmpError, "verification failed"):
+                runtime.pause()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                runtime.list_tools()
+
+            qmp.cont.side_effect = QmpError("continue failed")
+            with self.assertRaisesRegex(QmpError, "continue failed"):
+                runtime.resume()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+
+            qmp.cont.side_effect = None
+            with self.assertRaisesRegex(QmpError, "verification failed"):
+                runtime.resume()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+
     def test_rejects_continuation_from_stopped_and_stop_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = CodexOSRun(Path(temporary) / "run")
@@ -411,6 +655,12 @@ class GenerationRuntimeStateTests(unittest.TestCase):
                 runtime.continue_generation()
             with self.assertRaisesRegex(RuntimeError, "not awaiting"):
                 runtime.fork_from_generation(0)
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                runtime.pause()
+            with self.assertRaisesRegex(RuntimeError, "not paused"):
+                runtime.resume()
+            with self.assertRaisesRegex(RuntimeError, "cannot be aborted"):
+                runtime.abort_generation()
             runtime.stop()
             runtime.stop()
             self.assertIs(runtime.state, RuntimeState.STOPPED)

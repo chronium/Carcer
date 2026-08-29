@@ -21,6 +21,7 @@ from .source_snapshot import decode_source_snapshot
 from .tool_protocol import ToolClient, ToolResult
 
 _READY_MARKER = b"CODEXOS-SEED-READY\n"
+_ABORT_MARKER = b"Generation aborted by operator."
 _STARTUP_TIMEOUT_SECONDS = 10.0
 _QEMU_EXIT_TIMEOUT_SECONDS = 2.0
 
@@ -28,6 +29,7 @@ _QEMU_EXIT_TIMEOUT_SECONDS = 2.0
 class RuntimeState(Enum):
     STOPPED = "stopped"
     RUNNING = "running"
+    PAUSED = "paused"
     AWAITING_NEXT_GENERATION = "awaiting_next_generation"
 
 
@@ -110,6 +112,30 @@ class CodexOSRun:
         self._finish_if_requested()
         return result
 
+    def pause(self) -> None:
+        if self._state is not RuntimeState.RUNNING:
+            raise RuntimeError("CodexOS generation is not running")
+        if self._qmp is None:
+            raise RuntimeError("CodexOS QMP connection is unavailable")
+
+        self._qmp.stop()
+        self._state = RuntimeState.PAUSED
+        status = self._qmp.query_status()
+        if status != "paused":
+            raise QmpError(f"QEMU did not pause; status is {status!r}")
+
+    def resume(self) -> None:
+        if self._state is not RuntimeState.PAUSED:
+            raise RuntimeError("CodexOS generation is not paused")
+        if self._qmp is None:
+            raise RuntimeError("CodexOS QMP connection is unavailable")
+
+        self._qmp.cont()
+        status = self._qmp.query_status()
+        if status != "running":
+            raise QmpError(f"QEMU did not resume; status is {status!r}")
+        self._state = RuntimeState.RUNNING
+
     def continue_generation(self) -> None:
         if self._state is not RuntimeState.AWAITING_NEXT_GENERATION:
             raise RuntimeError("CodexOS run is not awaiting a generation")
@@ -139,10 +165,12 @@ class CodexOSRun:
             raise TypeError("generation number must be an integer")
         if generation_number < 0:
             raise ValueError("generation number must not be negative")
-        if generation_number >= self._generation_number:
+        if generation_number > self._generation_number:
             raise ValueError("fork parent must be an earlier generation")
 
         image, handoff = self._load_fork_generation(generation_number)
+        if generation_number == self._generation_number:
+            raise ValueError("fork parent must be an earlier generation")
         next_generation = self._generation_number + 1
         self._boot_generation(
             next_generation,
@@ -155,10 +183,45 @@ class CodexOSRun:
         self._pending_finish = None
         self._state = RuntimeState.RUNNING
 
+    def abort_generation(self) -> None:
+        if self._state not in {RuntimeState.RUNNING, RuntimeState.PAUSED}:
+            raise RuntimeError("CodexOS generation cannot be aborted")
+        if self._generation_number is None:
+            raise RuntimeError("CodexOS generation number is unavailable")
+
+        archive_staging: Path | None = None
+        try:
+            archive_staging, archive_final = self._prepare_aborted_archive()
+            self._shutdown_qemu()
+            if self._stdout_path is None or self._stderr_path is None:
+                raise RuntimeError("QEMU log paths are unavailable")
+            shutil.copyfile(
+                self._stdout_path,
+                archive_staging / "qemu.stdout",
+            )
+            shutil.copyfile(
+                self._stderr_path,
+                archive_staging / "qemu.stderr",
+            )
+            archive_staging.rename(archive_final)
+            self._pending_finish = None
+            self._previous_handoff = None
+            self._state = RuntimeState.AWAITING_NEXT_GENERATION
+        except BaseException:
+            self._shutdown_qemu()
+            self._pending_finish = None
+            self._previous_handoff = None
+            self._state = RuntimeState.STOPPED
+            raise
+        finally:
+            self._cleanup_workspace()
+            if archive_staging is not None and archive_staging.exists():
+                shutil.rmtree(archive_staging)
+
     def stop(self) -> None:
         if self._state is RuntimeState.STOPPED:
             return
-        if self._state is RuntimeState.RUNNING:
+        if self._state in {RuntimeState.RUNNING, RuntimeState.PAUSED}:
             self._shutdown_qemu()
             self._cleanup_workspace()
         self._pending_finish = None
@@ -179,6 +242,20 @@ class CodexOSRun:
             raise FileNotFoundError(f"generation archive is missing: {archive}")
 
         metadata_path = archive / "metadata.json"
+        if metadata_path.is_symlink() or not metadata_path.is_file():
+            raise FileNotFoundError(
+                f"generation archive artifact is missing: {metadata_path}"
+            )
+        try:
+            metadata = json.loads(metadata_path.read_bytes().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "generation archive metadata is malformed"
+            ) from error
+        outcome = _validate_generation_metadata(metadata, generation_number)
+        if outcome != "completed":
+            raise ValueError("aborted generation cannot be a rollback parent")
+
         handoff_path = archive / "handoff.txt"
         successor = archive / "successor"
         if successor.is_symlink() or not successor.is_dir():
@@ -186,19 +263,11 @@ class CodexOSRun:
                 f"generation archive artifact is missing: {successor}"
             )
         image = successor / "codexos.iso"
-        for required in (metadata_path, handoff_path, image):
+        for required in (handoff_path, image):
             if required.is_symlink() or not required.is_file():
                 raise FileNotFoundError(
                     f"generation archive artifact is missing: {required}"
                 )
-
-        try:
-            metadata = json.loads(metadata_path.read_bytes().decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(
-                "generation archive metadata is malformed"
-            ) from error
-        _validate_generation_metadata(metadata, generation_number)
 
         try:
             handoff = handoff_path.read_bytes().decode("utf-8")
@@ -332,6 +401,7 @@ class CodexOSRun:
             shutil.copyfile(self._current_boot_image, boot / "codexos.iso")
             metadata = {
                 "generation": self._generation_number,
+                "outcome": "completed",
                 "parent_generation": self._current_parent_generation,
                 "transition": self._current_transition,
             }
@@ -354,6 +424,46 @@ class CodexOSRun:
             successor.mkdir()
             shutil.copyfile(pending.kernel_elf, successor / "kernel.elf")
             shutil.copyfile(pending.iso, successor / "codexos.iso")
+        except BaseException:
+            shutil.rmtree(archive_staging)
+            raise
+        return archive_staging, archive_final
+
+    def _prepare_aborted_archive(self) -> tuple[Path, Path]:
+        if self._generation_number is None:
+            raise RuntimeError("CodexOS generation number is unavailable")
+        if self._current_boot_image is None:
+            raise RuntimeError("CodexOS boot image is unavailable")
+        if self._current_transition is None:
+            raise RuntimeError("CodexOS generation transition is unavailable")
+        archive_final = self._run_directory / (
+            f"generation-{self._generation_number:04d}"
+        )
+        if archive_final.exists():
+            raise FileExistsError(archive_final)
+        archive_staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".generation-{self._generation_number:04d}-archive-",
+                dir=self._run_directory,
+            )
+        )
+
+        try:
+            boot = archive_staging / "boot"
+            boot.mkdir()
+            shutil.copyfile(self._current_boot_image, boot / "codexos.iso")
+            metadata = {
+                "generation": self._generation_number,
+                "outcome": "aborted",
+                "parent_generation": self._current_parent_generation,
+                "transition": self._current_transition,
+            }
+            (archive_staging / "metadata.json").write_bytes(
+                (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                )
+            )
+            (archive_staging / "aborted.txt").write_bytes(_ABORT_MARKER)
         except BaseException:
             shutil.rmtree(archive_staging)
             raise
@@ -414,27 +524,32 @@ def _materialize_snapshot(snapshot: bytes, destination: Path) -> None:
 def _validate_generation_metadata(
     metadata: object,
     expected_generation: int,
-) -> None:
+) -> str:
     if not isinstance(metadata, dict) or set(metadata) != {
         "generation",
+        "outcome",
         "parent_generation",
         "transition",
     }:
         raise ValueError("generation archive metadata is malformed")
 
     generation = metadata["generation"]
+    outcome = metadata["outcome"]
     parent = metadata["parent_generation"]
     transition = metadata["transition"]
     if type(generation) is not int or generation != expected_generation:
         raise ValueError("generation archive metadata has the wrong generation")
+    if outcome not in {"completed", "aborted"}:
+        raise ValueError("generation archive metadata is malformed")
     if generation == 0:
         if parent is not None or transition != "initial":
             raise ValueError("generation archive metadata is malformed")
-        return
+        return outcome
     if type(parent) is not int or parent < 0 or parent >= generation:
         raise ValueError("generation archive metadata is malformed")
     if transition not in {"successor", "rollback"}:
         raise ValueError("generation archive metadata is malformed")
+    return outcome
 
 
 def _wait_for_ready(serial: SerialConnection) -> None:
