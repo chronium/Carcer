@@ -245,6 +245,10 @@ class ExperimentObservability:
         except (RuntimeError, TypeError, ValueError) as error:
             self._degrade(f"token metric recording failed: {error}")
 
+    def degrade(self, reason: str) -> None:
+        """Report a telemetry problem without changing experiment behavior."""
+        self._degrade(reason)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -381,12 +385,19 @@ class ExperimentObservability:
         return previous
 
     def _degrade(self, reason: str) -> None:
+        emit_warning = False
         with self._health_lock:
             if self._degraded_reason is None:
                 self._degraded_reason = reason
             if not self._warning_emitted:
-                warnings.warn(f"CodexOS observability degraded: {reason}")
                 self._warning_emitted = True
+                emit_warning = True
+        if emit_warning:
+            try:
+                warnings.warn(f"CodexOS observability degraded: {reason}")
+            except Warning:
+                # Warning policy must not turn telemetry into experiment control.
+                pass
 
 
 def _validate_envelope(value: Any, line_number: int, previous: int) -> None:

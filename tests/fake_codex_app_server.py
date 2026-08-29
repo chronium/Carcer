@@ -263,6 +263,21 @@ for turn_index, turn_scenario in enumerate(turns, 1):
                 },
             }
         )
+    token_usage_params = turn_scenario.get("token_usage_params", [])
+    if isinstance(token_usage_params, list):
+        for extra_params in token_usage_params:
+            if not isinstance(extra_params, dict):
+                continue
+            send(
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        **extra_params,
+                    },
+                }
+            )
 
     if turn_id in interrupted_turns:
         save_record()

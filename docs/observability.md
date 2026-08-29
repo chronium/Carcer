@@ -42,6 +42,10 @@ telemetry ingress and performs the internal Loki/Prometheus routing. The
 harness does not depend on either Alloy instance, Loki, Prometheus, or Grafana
 being available.
 
+Model token counters use positive deltas from the app-server notification's
+cumulative `tokenUsage.total` values. Repeated snapshots add nothing; malformed
+or decreasing snapshots degrade observability without affecting the Codex turn.
+
 Representative PromQL queries:
 
 ```promql

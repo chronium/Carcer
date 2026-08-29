@@ -17,7 +17,7 @@ from .codex_app_server import (
     default_auth_file,
     object_value,
     short_json,
-    token_usage_from_notification,
+    token_usage_delta_from_notification,
 )
 from .codex_review_worker import (
     DEFAULT_REVIEWER_MODEL,
@@ -113,6 +113,7 @@ class CodexGenerationSession:
         self._healthy = True
         self._initial_turn_started = False
         self._turn_number = 0
+        self._token_usage_total = (0, 0)
         self._last_agent_message: str | None = None
         self._active_reviewer: CodexReviewWorker | None = None
 
@@ -392,14 +393,28 @@ class CodexGenerationSession:
         thread_id: str,
         turn_id: str,
     ) -> None:
-        usage = token_usage_from_notification(params, thread_id, turn_id)
         observability = self._runtime.observability
-        if observability is not None:
+        if observability is None:
+            return
+        try:
+            total, delta = token_usage_delta_from_notification(
+                params,
+                thread_id,
+                turn_id,
+                self._token_usage_total,
+            )
+        except CodexAppServerError as error:
+            observability.degrade(
+                f"implementor token usage telemetry was ignored: {error}"
+            )
+            return
+        self._token_usage_total = total
+        if delta != (0, 0):
             observability.record_model_tokens(
                 model=self._model,
                 role="implementor",
-                input_tokens=usage[0],
-                output_tokens=usage[1],
+                input_tokens=delta[0],
+                output_tokens=delta[1],
             )
 
     def _record(self, event: str, data: Mapping[str, object]) -> None:

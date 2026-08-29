@@ -15,7 +15,7 @@ from .codex_app_server import (
     default_auth_file,
     object_value,
     short_json,
-    token_usage_from_notification,
+    token_usage_delta_from_notification,
 )
 from .generation_runtime import CodexOSRun, RuntimeState
 from .tool_protocol import ToolResult
@@ -158,22 +158,35 @@ class CodexReviewWorker:
         model: str,
     ) -> str:
         last_agent_message: str | None = None
+        token_usage_total = (0, 0)
         while True:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
             if method == "thread/tokenUsage/updated":
-                usage = token_usage_from_notification(
-                    params,
-                    thread_id,
-                    turn_id,
-                )
-                if runtime.observability is not None:
-                    runtime.observability.record_model_tokens(
+                observability = runtime.observability
+                if observability is None:
+                    continue
+                try:
+                    token_usage_total, delta = (
+                        token_usage_delta_from_notification(
+                            params,
+                            thread_id,
+                            turn_id,
+                            token_usage_total,
+                        )
+                    )
+                except CodexAppServerError as error:
+                    observability.degrade(
+                        f"reviewer token usage telemetry was ignored: {error}"
+                    )
+                    continue
+                if delta != (0, 0):
+                    observability.record_model_tokens(
                         model=model,
                         role="reviewer",
-                        input_tokens=usage[0],
-                        output_tokens=usage[1],
+                        input_tokens=delta[0],
+                        output_tokens=delta[1],
                     )
                 continue
             if method == "item/completed" and isinstance(params, dict):

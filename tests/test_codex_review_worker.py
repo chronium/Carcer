@@ -4,8 +4,11 @@ import tempfile
 import threading
 import tomllib
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
     CodexGenerationSession,
@@ -14,16 +17,88 @@ from harness import (
     RuntimeState,
     ToolResult,
 )
+from harness.observability import ExperimentObservability
 from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _build_seed,
     _fake_codex,
+    _metric_values,
     _request,
     _wait_for,
 )
 
 
 class CodexReviewerProtocolTests(unittest.TestCase):
+    def test_malformed_token_usage_does_not_fail_review(self) -> None:
+        implementor_scenario = {
+            "tool_calls": [
+                {"namespace": None, "tool": "review", "arguments": {}},
+                {"tool": "list", "arguments": {}},
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "token_usage_params": [
+                {
+                    "tokenUsage": {
+                        "last": {},
+                        "total": {"inputTokens": 1},
+                    }
+                }
+            ],
+            "final_message": "No meaningful issues found.",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            with _fake_codex(implementor_scenario) as implementor:
+                with _fake_codex(reviewer_scenario) as reviewer:
+                    reader = InMemoryMetricReader()
+                    observability = ExperimentObservability(
+                        temporary,
+                        metric_readers=[reader],
+                    )
+                    runtime = _runtime_mock()
+                    runtime.generation_number = 0
+                    runtime.observability = observability
+                    runtime.invoke_tool.return_value = ToolResult(
+                        0, b"seed/kernel.c\n"
+                    )
+                    worker = CodexGenerationWorker(
+                        implementor.executable,
+                        implementor.auth_file,
+                        reviewer_codex_executable=reviewer.executable,
+                        reviewer_auth_file=reviewer.auth_file,
+                    )
+
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error")
+                        result = worker.run_generation(runtime)
+
+                    tool_results = implementor.record()["tool_results"]
+                    self.assertEqual(result.turn_status, "completed")
+                    self.assertTrue(tool_results[0]["result"]["success"])
+                    self.assertIn(
+                        "No meaningful issues found.",
+                        tool_results[0]["result"]["contentItems"][0]["text"],
+                    )
+                    self.assertTrue(tool_results[1]["result"]["success"])
+                    runtime.invoke_tool.assert_called_once_with("list", [])
+                    self.assertIs(runtime.state, RuntimeState.RUNNING)
+                    runtime.pause.assert_not_called()
+                    runtime.stop.assert_not_called()
+                    self.assertFalse(observability.healthy)
+                    self.assertIn(
+                        "reviewer token usage telemetry was ignored",
+                        observability.degraded_reason or "",
+                    )
+                    self.assertFalse(
+                        any(
+                            name.startswith("codexos_model_")
+                            for name in _metric_values(reader)
+                        )
+                    )
+                    observability.close()
+
     def test_active_review_is_cancelled_before_implementor_interrupt(self) -> None:
         implementor_scenario = {
             "turns": [
