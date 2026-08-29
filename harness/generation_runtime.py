@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -16,6 +17,7 @@ from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
 )
+from .observability import ExperimentObservability
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
 from .serial import SerialConnection
@@ -52,10 +54,20 @@ class CodexOSRun:
         self,
         run_directory: str | Path,
         qemu_executable: str = "qemu-system-x86_64",
+        *,
+        observability: ExperimentObservability | None = None,
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
         self._feature_request_store = FeatureRequestStore(self._run_directory)
+        self._observability = observability
+        if observability is not None:
+            observability.set_feature_requests_pending(
+                sum(
+                    request.status == "pending"
+                    for request in self._feature_request_store.requests()
+                )
+            )
         self._qemu_executable = qemu_executable
         self._state = RuntimeState.STOPPED
         self._generation_number: int | None = None
@@ -64,6 +76,8 @@ class CodexOSRun:
         self._current_transition: str | None = None
         self._previous_handoff: str | None = None
         self._pending_finish: PendingGenerationFinish | None = None
+        self._generation_started_at: float | None = None
+        self._run_started = False
 
         self._workspace: tempfile.TemporaryDirectory[str] | None = None
         self._stdout_path: Path | None = None
@@ -81,6 +95,10 @@ class CodexOSRun:
     @property
     def run_directory(self) -> Path:
         return self._run_directory
+
+    @property
+    def observability(self) -> ExperimentObservability | None:
+        return self._observability
 
     @property
     def generation_number(self) -> int | None:
@@ -113,11 +131,15 @@ class CodexOSRun:
 
     def approve_feature_request(self, request_id: int) -> FeatureRequest:
         self._require_feature_decision_gate()
-        return self._feature_request_store.approve(request_id)
+        request = self._feature_request_store.approve(request_id)
+        self._record_feature_decision("feature_approved", request)
+        return request
 
     def deny_feature_request(self, request_id: int) -> FeatureRequest:
         self._require_feature_decision_gate()
-        return self._feature_request_store.deny(request_id)
+        request = self._feature_request_store.deny(request_id)
+        self._record_feature_decision("feature_denied", request)
+        return request
 
     def archived_generations(self) -> list[ArchivedGeneration]:
         generations: list[ArchivedGeneration] = []
@@ -157,6 +179,10 @@ class CodexOSRun:
         self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
         self._state = RuntimeState.RUNNING
+        self._generation_started_at = time.monotonic()
+        self._run_started = True
+        self._record("run_started", None, {})
+        self._record_generation_started()
 
     def list_tools(self) -> list[str]:
         client = self._require_running_client()
@@ -182,9 +208,11 @@ class CodexOSRun:
 
         self._qmp.stop()
         self._state = RuntimeState.PAUSED
+        self._set_observed_state()
         status = self._qmp.query_status()
         if status != "paused":
             raise QmpError(f"QEMU did not pause; status is {status!r}")
+        self._record("generation_paused", self._generation_number, {})
 
     def resume(self) -> None:
         if self._state is not RuntimeState.PAUSED:
@@ -197,6 +225,7 @@ class CodexOSRun:
         if status != "running":
             raise QmpError(f"QEMU did not resume; status is {status!r}")
         self._state = RuntimeState.RUNNING
+        self._record("generation_resumed", self._generation_number, {})
 
     def continue_generation(self) -> None:
         if self._state is not RuntimeState.AWAITING_NEXT_GENERATION:
@@ -215,6 +244,8 @@ class CodexOSRun:
         self._generation_number = next_generation
         self._pending_finish = None
         self._state = RuntimeState.RUNNING
+        self._generation_started_at = time.monotonic()
+        self._record_generation_started()
 
     def fork_from_generation(self, generation_number: int) -> None:
         if self._state is not RuntimeState.AWAITING_NEXT_GENERATION:
@@ -244,6 +275,13 @@ class CodexOSRun:
         self._previous_handoff = handoff
         self._pending_finish = None
         self._state = RuntimeState.RUNNING
+        self._generation_started_at = time.monotonic()
+        self._record(
+            "generation_rollback_started",
+            next_generation,
+            {"parent_generation": generation_number},
+        )
+        self._record_generation_started()
 
     def abort_generation(self) -> None:
         if self._state not in {RuntimeState.RUNNING, RuntimeState.PAUSED}:
@@ -269,6 +307,7 @@ class CodexOSRun:
             self._pending_finish = None
             self._previous_handoff = None
             self._state = RuntimeState.AWAITING_NEXT_GENERATION
+            self._record_generation_outcome("aborted")
         except BaseException:
             self._shutdown_qemu()
             self._pending_finish = None
@@ -292,6 +331,9 @@ class CodexOSRun:
         self._current_parent_generation = None
         self._current_transition = None
         self._state = RuntimeState.STOPPED
+        if self._run_started:
+            self._record("run_stopped", None, {})
+            self._run_started = False
 
     def _require_running_client(self) -> ToolClient:
         if self._state is not RuntimeState.RUNNING or self._tool_client is None:
@@ -443,6 +485,7 @@ class CodexOSRun:
             workspace_path / "builds",
             feature_request_store=self._feature_request_store,
             generation=generation_number,
+            observability=self._observability,
         )
 
         self._workspace = workspace
@@ -511,6 +554,10 @@ class CodexOSRun:
             self._previous_handoff = pending.handoff_message
             self._current_boot_image = None
             self._state = RuntimeState.AWAITING_NEXT_GENERATION
+            self._record_generation_outcome(
+                "completed",
+                source_snapshot=pending.source_snapshot,
+            )
         except BaseException:
             self._shutdown_qemu()
             self._pending_finish = None
@@ -656,6 +703,80 @@ class CodexOSRun:
         self._current_boot_image = None
         self._current_parent_generation = None
         self._current_transition = None
+
+    def _record_generation_started(self) -> None:
+        self._record(
+            "generation_started",
+            self._generation_number,
+            {
+                "transition": self._current_transition,
+                "parent_generation": self._current_parent_generation,
+                "qemu_pid": self.active_pid,
+            },
+        )
+
+    def _record_generation_outcome(
+        self,
+        outcome: str,
+        *,
+        source_snapshot: bytes | None = None,
+    ) -> None:
+        started = self._generation_started_at
+        data: dict[str, object] = {
+            "transition": self._current_transition,
+            "parent_generation": self._current_parent_generation,
+            "duration_seconds": (
+                max(0.0, time.monotonic() - started) if started is not None else 0.0
+            ),
+        }
+        if source_snapshot is not None:
+            data["source_snapshot_sha256"] = hashlib.sha256(
+                source_snapshot
+            ).hexdigest()
+        self._record(
+            f"generation_{outcome}",
+            self._generation_number,
+            data,
+        )
+        self._generation_started_at = None
+
+    def _record_feature_decision(
+        self,
+        event: str,
+        request: FeatureRequest,
+    ) -> None:
+        self._record(
+            event,
+            self._generation_number,
+            {
+                "request_id": request.id,
+                "request_generation": request.generation,
+            },
+        )
+        if self._observability is not None:
+            self._observability.set_feature_requests_pending(
+                sum(
+                    item.status == "pending"
+                    for item in self._feature_request_store.requests()
+                )
+            )
+
+    def _record(
+        self,
+        event: str,
+        generation: int | None,
+        data: dict[str, object],
+    ) -> None:
+        if self._observability is not None:
+            self._observability.record(event, generation, data)
+            self._set_observed_state()
+
+    def _set_observed_state(self) -> None:
+        if self._observability is not None:
+            self._observability.set_runtime_state(
+                self._generation_number,
+                self._state.value,
+            )
 
 
 def _materialize_snapshot(snapshot: bytes, destination: Path) -> None:

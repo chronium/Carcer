@@ -623,3 +623,38 @@ def short_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[
         :MAX_ERROR_OUTPUT
     ]
+
+
+def token_usage_delta_from_notification(
+    params: object,
+    thread_id: str,
+    turn_id: str,
+    previous_total: tuple[int, int],
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Read exact cumulative usage and return its non-duplicating delta."""
+    values = object_value(params, "thread/tokenUsage/updated notification")
+    if values.get("threadId") != thread_id or values.get("turnId") != turn_id:
+        raise CodexAppServerError(
+            "thread/tokenUsage/updated has the wrong thread or turn ID"
+        )
+    token_usage = object_value(values.get("tokenUsage"), "token usage")
+    total = object_value(token_usage.get("total"), "total token usage")
+    input_tokens = total.get("inputTokens")
+    output_tokens = total.get("outputTokens")
+    if (
+        type(input_tokens) is not int
+        or input_tokens < 0
+        or type(output_tokens) is not int
+        or output_tokens < 0
+    ):
+        raise CodexAppServerError("token usage has invalid counts")
+    current_total = (input_tokens, output_tokens)
+    if any(
+        current < previous
+        for current, previous in zip(current_total, previous_total, strict=True)
+    ):
+        raise CodexAppServerError("token usage cumulative total decreased")
+    return current_total, (
+        input_tokens - previous_total[0],
+        output_tokens - previous_total[1],
+    )

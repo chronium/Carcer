@@ -8,9 +8,12 @@ import threading
 import time
 import tomllib
 import unittest
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
+
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
     CodexGenerationSession,
@@ -22,6 +25,7 @@ from harness import (
     ToolResult,
 )
 from harness.codex_app_server import CodexAppServerError
+from harness.observability import ExperimentObservability
 
 _TOOLS = [
     "list",
@@ -36,6 +40,174 @@ _TOOLS = [
 
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
+    def test_malformed_token_usage_degrades_observability_not_session(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "token_usage_params": [
+                        {
+                            "tokenUsage": {
+                                "last": {},
+                                "total": {
+                                    "inputTokens": "invalid",
+                                    "outputTokens": 1,
+                                },
+                            }
+                        }
+                    ]
+                },
+                {"tool_calls": [{"tool": "list", "arguments": {}}]},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            scenario
+        ) as fake:
+            reader = InMemoryMetricReader()
+            observability = ExperimentObservability(
+                temporary,
+                metric_readers=[reader],
+            )
+            runtime = _runtime_mock()
+            runtime.observability = observability
+            runtime.invoke_tool.return_value = ToolResult(0, b"seed/kernel.c\n")
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                first = session.run_initial_turn()
+                second = session.run_continuation_turn()
+
+            self.assertEqual(first.turn_status, "completed")
+            self.assertEqual(second.turn_status, "completed")
+            self.assertTrue(session.healthy)
+            self.assertIs(runtime.state, RuntimeState.RUNNING)
+            runtime.invoke_tool.assert_called_once_with("list", [])
+            runtime.pause.assert_not_called()
+            runtime.stop.assert_not_called()
+            self.assertFalse(observability.healthy)
+            self.assertIn(
+                "implementor token usage telemetry was ignored",
+                observability.degraded_reason or "",
+            )
+            self.assertFalse(
+                any(
+                    name.startswith("codexos_model_")
+                    for name in _metric_values(reader)
+                )
+            )
+            session.close()
+            observability.close()
+
+    def test_authoritative_turn_usage_updates_token_metrics(self) -> None:
+        usage = {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 10,
+            "inputTokens": 123,
+            "outputTokens": 45,
+            "reasoningOutputTokens": 20,
+            "totalTokens": 168,
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            {"token_usage": usage}
+        ) as fake:
+            reader = InMemoryMetricReader()
+            observability = ExperimentObservability(
+                temporary,
+                metric_readers=[reader],
+            )
+            runtime = _runtime_mock()
+            runtime.observability = observability
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+
+            values = {}
+            metrics = reader.get_metrics_data()
+            for resource in metrics.resource_metrics:
+                for scope in resource.scope_metrics:
+                    for metric in scope.metrics:
+                        if metric.name.startswith("codexos_model_"):
+                            values[metric.name] = metric.data.data_points[0].value
+                            self.assertEqual(
+                                dict(metric.data.data_points[0].attributes),
+                                {
+                                    "model": "gpt-5.6-sol",
+                                    "role": "implementor",
+                                },
+                            )
+            self.assertEqual(values["codexos_model_input_tokens_total"], 123)
+            self.assertEqual(values["codexos_model_output_tokens_total"], 45)
+            observability.close()
+
+    def test_cumulative_token_usage_adds_only_positive_deltas(self) -> None:
+        first = {
+            "cachedInputTokens": 10,
+            "inputTokens": 100,
+            "outputTokens": 20,
+            "reasoningOutputTokens": 5,
+            "totalTokens": 120,
+        }
+        second = {
+            "cachedInputTokens": 15,
+            "inputTokens": 150,
+            "outputTokens": 35,
+            "reasoningOutputTokens": 8,
+            "totalTokens": 185,
+        }
+        scenario = {
+            "turns": [
+                {
+                    "token_usage_params": [
+                        {"tokenUsage": {"last": first, "total": first}},
+                        {"tokenUsage": {"last": first, "total": first}},
+                    ]
+                },
+                {
+                    "token_usage_params": [
+                        {"tokenUsage": {"last": second, "total": second}},
+                        {"tokenUsage": {"last": first, "total": first}},
+                    ]
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            scenario
+        ) as fake:
+            reader = InMemoryMetricReader()
+            observability = ExperimentObservability(
+                temporary,
+                metric_readers=[reader],
+            )
+            runtime = _runtime_mock()
+            runtime.observability = observability
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                first_result = session.run_initial_turn()
+                second_result = session.run_continuation_turn()
+
+            self.assertEqual(first_result.turn_status, "completed")
+            self.assertEqual(second_result.turn_status, "completed")
+            self.assertTrue(session.healthy)
+            values = _metric_values(reader)
+            self.assertEqual(values["codexos_model_input_tokens_total"], 150)
+            self.assertEqual(values["codexos_model_output_tokens_total"], 35)
+            self.assertIn(
+                "cumulative total decreased",
+                observability.degraded_reason or "",
+            )
+            session.close()
+            observability.close()
+
     def test_feature_request_bridge_and_approved_prompt_are_concrete(self) -> None:
         approved_title = "Approved title\nraw\r\x1b[2J"
         approved_description = "Approved description\nraw\x07\u009b"
@@ -715,6 +887,17 @@ def _runtime_mock() -> Mock:
     runtime.current_transition = "initial"
     runtime.feature_requests.return_value = ()
     return runtime
+
+
+def _metric_values(reader: InMemoryMetricReader) -> dict[str, int]:
+    values: dict[str, int] = {}
+    metrics = reader.get_metrics_data()
+    for resource in metrics.resource_metrics:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name.startswith("codexos_model_"):
+                    values[metric.name] = metric.data.data_points[0].value
+    return values
 
 
 def _wait_for(condition: Callable[[], bool], timeout: float = 2.0) -> None:
