@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .feature_requests import FeatureRequest, FeatureRequestStore
 from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
@@ -54,6 +55,7 @@ class CodexOSRun:
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
+        self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._qemu_executable = qemu_executable
         self._state = RuntimeState.STOPPED
         self._generation_number: int | None = None
@@ -102,6 +104,20 @@ class CodexOSRun:
     @property
     def pending_generation_finish(self) -> PendingGenerationFinish | None:
         return self._pending_finish
+
+    def feature_requests(self) -> tuple[FeatureRequest, ...]:
+        return self._feature_request_store.requests()
+
+    def feature_request(self, request_id: int) -> FeatureRequest:
+        return self._feature_request_store.request(request_id)
+
+    def approve_feature_request(self, request_id: int) -> FeatureRequest:
+        self._require_feature_decision_gate()
+        return self._feature_request_store.approve(request_id)
+
+    def deny_feature_request(self, request_id: int) -> FeatureRequest:
+        self._require_feature_decision_gate()
+        return self._feature_request_store.deny(request_id)
 
     def archived_generations(self) -> list[ArchivedGeneration]:
         generations: list[ArchivedGeneration] = []
@@ -282,6 +298,12 @@ class CodexOSRun:
             raise RuntimeError("CodexOS generation is not running")
         return self._tool_client
 
+    def _require_feature_decision_gate(self) -> None:
+        if self._state is not RuntimeState.AWAITING_NEXT_GENERATION:
+            raise RuntimeError(
+                "feature requests may be decided only while awaiting a generation"
+            )
+
     def _load_fork_generation(self, generation_number: int) -> tuple[Path, str]:
         archived = self._read_archived_generation(generation_number)
         if archived.outcome != "completed":
@@ -417,7 +439,11 @@ class CodexOSRun:
         controller = QemuProcessController(self._qemu_executable)
         qmp = QmpClient(qmp_path)
         serial = SerialConnection(serial_path)
-        host_services = CodexOSHostServices(workspace_path / "builds")
+        host_services = CodexOSHostServices(
+            workspace_path / "builds",
+            feature_request_store=self._feature_request_store,
+            generation=generation_number,
+        )
 
         self._workspace = workspace
         self._stdout_path = stdout_path

@@ -6,8 +6,9 @@
 #define FRAME_HEADER_SIZE 16u
 #define FRAME_PROTOCOL_VERSION 1u
 #define FINISH_GENERATION_INVOCATION_OVERHEAD 25u
+#define FEATURE_REQUEST_INVOCATION_OVERHEAD 27u
 #define REQUEST_BUFFER_SIZE \
-    (16u * 1024u + FINISH_GENERATION_INVOCATION_OVERHEAD)
+    (16u * 1024u + 256u + FEATURE_REQUEST_INVOCATION_OVERHEAD)
 
 static uint16_t read_u16_le(const uint8_t *bytes) {
     return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);

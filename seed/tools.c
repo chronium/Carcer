@@ -143,16 +143,18 @@ void tools_send_list(uint32_t request_id) {
     static const uint8_t remove_name[] = "remove";
     static const uint8_t build_name[] = "build";
     static const uint8_t finish_generation_name[] = "finish_generation";
+    static const uint8_t request_feature_name[] = "request_feature";
     uint32_t payload_length = 2u + 2u + (sizeof(list_name) - 1u) + 2u +
                               (sizeof(read_name) - 1u) + 2u +
                               (sizeof(write_name) - 1u) + 2u +
                               (sizeof(truncate_name) - 1u) + 2u +
                               (sizeof(remove_name) - 1u) + 2u +
                               (sizeof(build_name) - 1u) + 2u +
-                              (sizeof(finish_generation_name) - 1u);
+                              (sizeof(finish_generation_name) - 1u) + 2u +
+                              (sizeof(request_feature_name) - 1u);
 
     frame_send_header(LIST_TOOLS_RESPONSE, request_id, payload_length);
-    frame_write_u16(7);
+    frame_write_u16(8);
     frame_write_u16(sizeof(list_name) - 1u);
     serial_write_bytes(list_name, sizeof(list_name) - 1u);
     frame_write_u16(sizeof(read_name) - 1u);
@@ -169,6 +171,11 @@ void tools_send_list(uint32_t request_id) {
     serial_write_bytes(
         finish_generation_name,
         sizeof(finish_generation_name) - 1u
+    );
+    frame_write_u16(sizeof(request_feature_name) - 1u);
+    serial_write_bytes(
+        request_feature_name,
+        sizeof(request_feature_name) - 1u
     );
 }
 
@@ -366,6 +373,34 @@ static void invoke_finish_generation(
     );
 }
 
+static void invoke_request_feature(
+    uint32_t request_id,
+    const struct invocation *invocation
+) {
+    if (invocation->argument_count != 2 ||
+        invocation->arguments[0].length == 0u ||
+        invocation->arguments[0].length > FEATURE_REQUEST_TITLE_MAX ||
+        invocation->arguments[1].length > FEATURE_REQUEST_DESCRIPTION_MAX ||
+        !valid_utf8(
+            invocation->arguments[0].data,
+            invocation->arguments[0].length
+        ) ||
+        !valid_utf8(
+            invocation->arguments[1].data,
+            invocation->arguments[1].length
+        )) {
+        tools_send_failure(request_id);
+        return;
+    }
+    request_feature_tool_invoke(
+        request_id,
+        invocation->arguments[0].data,
+        invocation->arguments[0].length,
+        invocation->arguments[1].data,
+        invocation->arguments[1].length
+    );
+}
+
 void tools_handle_invocation(
     uint32_t request_id,
     const uint8_t *payload,
@@ -378,6 +413,7 @@ void tools_handle_invocation(
     static const uint8_t remove_name[] = "remove";
     static const uint8_t build_name[] = "build";
     static const uint8_t finish_generation_name[] = "finish_generation";
+    static const uint8_t request_feature_name[] = "request_feature";
     struct invocation invocation;
 
     if (!parse_invocation(payload, payload_length, &invocation)) {
@@ -433,6 +469,13 @@ void tools_handle_invocation(
                    sizeof(finish_generation_name) - 1u
                )) {
         invoke_finish_generation(request_id, &invocation);
+    } else if (bytes_equal(
+                   invocation.name.data,
+                   invocation.name.length,
+                   request_feature_name,
+                   sizeof(request_feature_name) - 1u
+               )) {
+        invoke_request_feature(request_id, &invocation);
     } else {
         tools_send_failure(request_id);
     }

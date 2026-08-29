@@ -16,6 +16,7 @@ struct response_header {
 
 static const uint8_t build_service_name[] = "build";
 static const uint8_t finish_service_name[] = "finish_generation";
+static const uint8_t feature_service_name[] = "request_feature";
 static uint32_t next_host_request_id = 1u;
 
 static uint16_t read_u16_le(const uint8_t *bytes) {
@@ -73,6 +74,26 @@ static void send_finish_request(
     serial_write_bytes(handoff, handoff_length);
     frame_write_u32(snapshot_length);
     source_snapshot_write(selected_count);
+}
+
+static void send_feature_request(
+    uint32_t request_id,
+    const uint8_t *title,
+    uint32_t title_length,
+    const uint8_t *description,
+    uint32_t description_length
+) {
+    uint32_t payload_length = 2u + (sizeof(feature_service_name) - 1u) + 2u +
+                              4u + title_length + 4u + description_length;
+
+    frame_send_header(HOST_SERVICE_REQUEST, request_id, payload_length);
+    frame_write_u16(sizeof(feature_service_name) - 1u);
+    serial_write_bytes(feature_service_name, sizeof(feature_service_name) - 1u);
+    frame_write_u16(2u);
+    frame_write_u32(title_length);
+    serial_write_bytes(title, title_length);
+    frame_write_u32(description_length);
+    serial_write_bytes(description, description_length);
 }
 
 static void read_response_header(struct response_header *response) {
@@ -178,6 +199,36 @@ void finish_generation_tool_invoke(
         handoff_length,
         selected_count,
         snapshot_length
+    );
+    relay_host_response(host_request_id, tool_request_id);
+}
+
+void request_feature_tool_invoke(
+    uint32_t tool_request_id,
+    const uint8_t *title,
+    uint32_t title_length,
+    const uint8_t *description,
+    uint32_t description_length
+) {
+    uint32_t fixed_payload_length =
+        2u + (sizeof(feature_service_name) - 1u) + 2u + 4u + 4u;
+
+    if (title_length == 0u || title_length > FEATURE_REQUEST_TITLE_MAX ||
+        description_length > FEATURE_REQUEST_DESCRIPTION_MAX ||
+        fixed_payload_length + title_length > FRAME_MAX_PAYLOAD ||
+        description_length >
+            FRAME_MAX_PAYLOAD - fixed_payload_length - title_length) {
+        send_tool_failure(tool_request_id);
+        return;
+    }
+
+    uint32_t host_request_id = allocate_host_request_id();
+    send_feature_request(
+        host_request_id,
+        title,
+        title_length,
+        description,
+        description_length
     );
     relay_host_response(host_request_id, tool_request_id);
 }

@@ -89,6 +89,7 @@ class SeedBootIntegrationTest(unittest.TestCase):
                             "remove",
                             "build",
                             "finish_generation",
+                            "request_feature",
                         ],
                     )
 

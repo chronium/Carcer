@@ -96,6 +96,7 @@ class TrustedBuildIntegrationTests(unittest.TestCase):
                             "remove",
                             "build",
                             "finish_generation",
+                            "request_feature",
                         ],
                     )
                     listed = client.invoke_tool("list", [])
