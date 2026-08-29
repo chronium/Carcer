@@ -13,6 +13,11 @@ from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
 )
+from .generation_git import (
+    GenerationGitRecord,
+    GenerationGitRecorder,
+    GenerationGitRecorderError,
+)
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
 from .host_service_protocol import (
     HostServiceProtocolError,
@@ -45,6 +50,9 @@ __all__ = [
     "CodexReviewWorkerError",
     "CodexOSHostServices",
     "CodexOSRun",
+    "GenerationGitRecord",
+    "GenerationGitRecorder",
+    "GenerationGitRecorderError",
     "Frame",
     "FramingError",
     "HostServiceProtocolError",
