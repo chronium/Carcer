@@ -227,6 +227,8 @@ def _current_seed_files(repository: Path) -> tuple[SnapshotFile, ...]:
         "seed/protocol.h",
         "seed/serial.c",
         "seed/serial.h",
+        "seed/source_snapshot.c",
+        "seed/source_snapshot.h",
         "seed/tools.c",
         "seed/tools.h",
     )

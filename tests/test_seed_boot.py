@@ -81,7 +81,15 @@ class SeedBootIntegrationTest(unittest.TestCase):
                     client = ToolClient(serial)
                     self.assertEqual(
                         client.list_tools(),
-                        ["list", "read", "write", "truncate", "remove", "build"],
+                        [
+                            "list",
+                            "read",
+                            "write",
+                            "truncate",
+                            "remove",
+                            "build",
+                            "finish_generation",
+                        ],
                     )
 
                     paths = [
@@ -96,6 +104,8 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         "seed/protocol.h",
                         "seed/serial.c",
                         "seed/serial.h",
+                        "seed/source_snapshot.c",
+                        "seed/source_snapshot.h",
                         "seed/tools.c",
                         "seed/tools.h",
                     ]
