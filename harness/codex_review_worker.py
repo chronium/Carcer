@@ -1,0 +1,447 @@
+"""Fresh read-only Codex consultation for one running CodexOS generation."""
+
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Mapping
+from pathlib import Path
+
+from .codex_app_server import (
+    CodexAppServer,
+    CodexAppServerError,
+    default_auth_file,
+    object_value,
+    short_json,
+)
+from .generation_runtime import CodexOSRun, RuntimeState
+from .tool_protocol import ToolResult
+
+DEFAULT_REVIEWER_MODEL = "gpt-5.6-luna"
+DEFAULT_REVIEWER_REASONING_EFFORT = "high"
+
+_PERMISSION_PROFILE = "codexos-reviewer"
+
+
+class CodexReviewWorkerError(RuntimeError):
+    """One concrete Codex reviewer consultation failed."""
+
+
+class CodexReviewWorker:
+    """Run one fresh, read-only reviewer turn."""
+
+    def __init__(
+        self,
+        codex_executable: str = "codex",
+        auth_file: str | Path | None = None,
+    ) -> None:
+        self._codex_executable = codex_executable
+        self._auth_file = (
+            Path(auth_file).expanduser()
+            if auth_file is not None
+            else default_auth_file()
+        )
+
+    def run_review(
+        self,
+        runtime: CodexOSRun,
+        *,
+        objective: str | None,
+        focus: str,
+        request: str | None,
+        model: str = DEFAULT_REVIEWER_MODEL,
+        reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+    ) -> str:
+        if runtime.state is not RuntimeState.RUNNING:
+            raise CodexReviewWorkerError("CodexOS generation is not running")
+        try:
+            with CodexAppServer(
+                executable=self._codex_executable,
+                auth_file=self._auth_file,
+                temporary_prefix="codexos-reviewer-",
+                config_text=_reviewer_config(),
+            ) as server:
+                server.validate_model(model, reasoning_effort)
+                thread_id = server.start_thread(
+                    model=model,
+                    permission_profile=_PERMISSION_PROFILE,
+                    dynamic_tools=[_reviewer_tool_namespace()],
+                    require_read_only=True,
+                )
+                turn_id = server.start_turn(
+                    thread_id=thread_id,
+                    prompt=_reviewer_prompt(objective, focus, request),
+                    model=model,
+                    effort=reasoning_effort,
+                    permission_profile=_PERMISSION_PROFILE,
+                )
+                return self._wait_for_turn(
+                    server,
+                    runtime,
+                    thread_id,
+                    turn_id,
+                )
+        except CodexAppServerError as error:
+            raise CodexReviewWorkerError(str(error)) from error
+
+    def _wait_for_turn(
+        self,
+        server: CodexAppServer,
+        runtime: CodexOSRun,
+        thread_id: str,
+        turn_id: str,
+    ) -> str:
+        last_agent_message: str | None = None
+        while True:
+            message = server.read_message()
+            if "id" in message and "method" in message:
+                self._handle_server_request(
+                    server,
+                    runtime,
+                    message,
+                    thread_id,
+                    turn_id,
+                )
+                continue
+            method = message.get("method")
+            params = message.get("params")
+            if method == "item/completed" and isinstance(params, dict):
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") == "agentMessage":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        last_agent_message = text
+                continue
+            if method != "turn/completed":
+                continue
+            values = object_value(params, "turn/completed notification")
+            if values.get("threadId") != thread_id:
+                raise CodexReviewWorkerError(
+                    "review turn/completed has the wrong thread ID"
+                )
+            turn = object_value(values.get("turn"), "completed review turn")
+            if turn.get("id") != turn_id:
+                raise CodexReviewWorkerError(
+                    "review turn/completed has the wrong turn ID"
+                )
+            status = turn.get("status")
+            if status != "completed":
+                if status not in {"interrupted", "failed"}:
+                    raise CodexReviewWorkerError(
+                        f"review turn has invalid status {status!r}"
+                    )
+                raise CodexReviewWorkerError(
+                    f"Codex reviewer turn {status}: {short_json(turn.get('error'))}"
+                )
+            final_message = _final_agent_message(turn) or last_agent_message
+            if final_message is None:
+                raise CodexReviewWorkerError(
+                    "Codex reviewer completed without a final response"
+                )
+            return final_message
+
+    def _handle_server_request(
+        self,
+        server: CodexAppServer,
+        runtime: CodexOSRun,
+        message: Mapping[str, object],
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        if message.get("method") != "item/tool/call":
+            server.reject_server_request(message)
+            return
+        response = self._dynamic_tool_response(
+            runtime,
+            message.get("params"),
+            thread_id,
+            turn_id,
+        )
+        server.write_result(message.get("id"), response)
+
+    def _dynamic_tool_response(
+        self,
+        runtime: CodexOSRun,
+        params: object,
+        thread_id: str,
+        turn_id: str,
+    ) -> dict[str, object]:
+        try:
+            values = object_value(params, "reviewer dynamic tool request")
+            _validate_tool_call(values, thread_id, turn_id)
+            if values.get("namespace") != "codexos":
+                raise ValueError("unsupported reviewer dynamic tool namespace")
+            tool = values.get("tool")
+            if not isinstance(tool, str):
+                raise ValueError("reviewer dynamic tool name must be a string")
+            arguments = _arguments(values.get("arguments"))
+            result = _dispatch_read_only_tool(runtime, tool, arguments)
+            return {
+                "contentItems": [
+                    {"type": "inputText", "text": _format_tool_result(result)}
+                ],
+                "success": True,
+            }
+        except (CodexAppServerError, RuntimeError, TypeError, ValueError) as error:
+            return {
+                "contentItems": [
+                    {"type": "inputText", "text": f"Bridge error: {error}"}
+                ],
+                "success": False,
+            }
+
+
+def _dispatch_read_only_tool(
+    runtime: CodexOSRun,
+    tool: str,
+    arguments: Mapping[str, object],
+) -> ToolResult:
+    if tool == "list":
+        _check_fields(arguments, optional={"prefix"})
+        guest_arguments = (
+            []
+            if "prefix" not in arguments
+            else [_utf8(arguments["prefix"], "prefix")]
+        )
+        return runtime.invoke_tool("list", guest_arguments)
+    if tool == "read":
+        _check_fields(arguments, required={"path", "offset", "length"})
+        return runtime.invoke_tool(
+            "read",
+            [
+                _utf8(arguments["path"], "path"),
+                _unsigned_decimal(arguments["offset"], "offset"),
+                _unsigned_decimal(arguments["length"], "length"),
+            ],
+        )
+    raise ValueError(f"unsupported reviewer CodexOS tool: {tool}")
+
+
+def _reviewer_tool_namespace() -> dict[str, object]:
+    return {
+        "type": "namespace",
+        "name": "codexos",
+        "description": "Read the current mutable CodexOS guest source.",
+        "tools": [
+            _dynamic_function(
+                "list",
+                "List current mutable guest source paths, optionally by prefix.",
+                {"prefix": {"type": "string"}},
+            ),
+            _dynamic_function(
+                "read",
+                "Read exact bytes from a current mutable guest source file.",
+                {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "length": {"type": "integer", "minimum": 0},
+                },
+                ["path", "offset", "length"],
+            ),
+        ],
+    }
+
+
+def _dynamic_function(
+    name: str,
+    description: str,
+    properties: Mapping[str, object],
+    required: list[str] | None = None,
+) -> dict[str, object]:
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": dict(properties),
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "inputSchema": schema,
+    }
+
+
+def _reviewer_prompt(
+    objective: str | None,
+    focus: str,
+    request: str | None,
+) -> str:
+    objective_text = (
+        "No trusted per-generation objective was supplied."
+        if objective is None
+        else "Trusted current objective:\n" + objective
+    )
+    request_text = (
+        "No additional review request was supplied."
+        if request is None
+        else "Implementor review request:\n" + request
+    )
+    return (
+        "You are a read-only reviewer for the current CodexOS generation.\n\n"
+        "CodexOS is an autonomous experiment evolving toward a general-purpose "
+        "operating system. Doom is the first major interactive userland milestone, "
+        "not the final purpose of the OS.\n\n"
+        "Another Codex implementor is actively developing the current mutable "
+        "source. You are here only to inspect that work and provide an independent "
+        "technical review.\n\n"
+        "Read enough of the current source through the available codexos tools to "
+        "understand the work in context.\n\n"
+        "Identify only issues that genuinely matter to the success of the current "
+        "work, including where relevant correctness bugs, logic errors, security "
+        "vulnerabilities, design flaws, incorrect assumptions, unnecessary "
+        "complexity that materially increases risk, performance problems that "
+        "materially matter, and divergence from the stated objective.\n\n"
+        "For every finding, explain the issue, its concrete impact, and a specific "
+        "suggested change. Categorize findings as Blocking, Non-blocking, or "
+        "Suggestions. Blocking findings must be addressed for the current work to "
+        "succeed. Non-blocking findings are real problems worth addressing. "
+        "Suggestions are lower-priority improvements with a real expected impact.\n\n"
+        "Do not report formatting or naming preferences, comment grammar, stylistic "
+        "taste, minor refactors, speculative abstractions, generic best practices "
+        "with no concrete impact, or alternative designs merely because you prefer "
+        "them.\n\n"
+        "Do not redesign CodexOS, prescribe an unrelated architecture, modify "
+        "anything, build anything, or try to finish the generation. If you find no "
+        "meaningful issues, say exactly that clearly. Your findings are advisory; "
+        "the implementor decides what to do with them.\n\n"
+        f"Review focus: {focus}. Prioritize that focus, while still reporting any "
+        "blocking issue you discover.\n\n"
+        + objective_text
+        + "\n\n"
+        + request_text
+    )
+
+
+def _reviewer_config() -> str:
+    return """default_permissions = "codexos-reviewer"
+allow_login_shell = false
+web_search = "disabled"
+
+[agents]
+enabled = false
+
+[features]
+apps = false
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+computer_use = false
+goals = false
+hooks = false
+image_generation = false
+image_tools = false
+memories = false
+multi_agent = false
+plugins = false
+remote_plugin = false
+skill_mcp_dependency_install = false
+skill_search = false
+web_search = false
+web_search_cached = false
+web_search_request = false
+
+[feedback]
+enabled = false
+
+[history]
+persistence = "none"
+
+[shell_environment_policy]
+inherit = "none"
+
+[tools]
+view_image = false
+web_search = false
+
+[permissions.codexos-reviewer.filesystem]
+":root" = "deny"
+":minimal" = "read"
+":tmpdir" = "deny"
+":slash_tmp" = "deny"
+
+[permissions.codexos-reviewer.filesystem.":workspace_roots"]
+"." = "read"
+
+[permissions.codexos-reviewer.network]
+enabled = false
+"""
+
+
+def _validate_tool_call(
+    values: Mapping[str, object],
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    call_id = values.get("callId")
+    if not isinstance(call_id, str) or not call_id:
+        raise ValueError("dynamic tool call ID must be a non-empty string")
+    if values.get("threadId") != thread_id:
+        raise ValueError("dynamic tool request has the wrong thread ID")
+    if values.get("turnId") != turn_id:
+        raise ValueError("dynamic tool request has the wrong turn ID")
+
+
+def _arguments(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError("dynamic tool arguments are not an object")
+    return value
+
+
+def _check_fields(
+    arguments: Mapping[str, object],
+    *,
+    required: set[str] | None = None,
+    optional: set[str] | None = None,
+) -> None:
+    required = required or set()
+    optional = optional or set()
+    missing = required - arguments.keys()
+    if missing:
+        raise ValueError(f"missing argument: {sorted(missing)[0]}")
+    unexpected = arguments.keys() - required - optional
+    if unexpected:
+        raise ValueError(f"unexpected argument: {sorted(unexpected)[0]}")
+
+
+def _utf8(value: object, name: str) -> bytes:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{name} is not valid UTF-8") from error
+
+
+def _unsigned_decimal(value: object, name: str) -> bytes:
+    if type(value) is not int or value < 0:
+        raise TypeError(f"{name} must be a non-negative integer")
+    return str(value).encode("ascii")
+
+
+def _format_tool_result(result: ToolResult) -> str:
+    try:
+        output = result.output.decode("utf-8")
+        encoding = "utf8"
+    except UnicodeDecodeError:
+        output = base64.b64encode(result.output).decode("ascii")
+        encoding = "base64"
+    return json.dumps(
+        {"status": result.status, "encoding": encoding, "output": output},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _final_agent_message(turn: Mapping[str, object]) -> str | None:
+    items = turn.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in reversed(items):
+        if isinstance(item, dict) and item.get("type") == "agentMessage":
+            text = item.get("text")
+            if isinstance(text, str):
+                return text
+    return None

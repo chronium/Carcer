@@ -47,8 +47,19 @@ def request_client(method: str, params: object) -> dict[str, object]:
     return response
 
 
-scenario_path = Path(os.environ["CODEXOS_FAKE_SCENARIO"])
-record_path = Path(os.environ["CODEXOS_FAKE_RECORD"])
+executable_root = Path(sys.argv[0]).resolve().parent
+scenario_path = Path(
+    os.environ.get(
+        "CODEXOS_FAKE_SCENARIO",
+        executable_root / "scenario.json",
+    )
+)
+record_path = Path(
+    os.environ.get(
+        "CODEXOS_FAKE_RECORD",
+        executable_root / "record.json",
+    )
+)
 scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
 messages: list[dict[str, object]] = []
 server_responses: list[dict[str, object]] = []
@@ -87,15 +98,20 @@ respond(
         "requiresOpenaiAuth": True,
     },
 )
+model = scenario.get("model", "gpt-5.6-sol")
+permission_profile = scenario.get(
+    "permission_profile",
+    "codexos-implementor",
+)
 models = expect_request("model/list")
 respond(
     models,
     {
         "data": [
             {
-                "id": "gpt-5.6-sol",
-                "model": "gpt-5.6-sol",
-                "displayName": "GPT-5.6-Sol",
+                "id": model,
+                "model": model,
+                "displayName": model,
                 "description": "fake",
                 "hidden": False,
                 "isDefault": True,
@@ -121,7 +137,7 @@ respond(
             "cwd": thread_params["cwd"],
             "turns": [],
         },
-        "model": "gpt-5.6-sol",
+        "model": model,
         "modelProvider": "openai",
         "cwd": thread_params["cwd"],
         "runtimeWorkspaceRoots": thread_params["runtimeWorkspaceRoots"],
@@ -129,7 +145,7 @@ respond(
         "approvalPolicy": "never",
         "approvalsReviewer": "user",
         "sandbox": {"type": "readOnly", "networkAccess": False},
-        "activePermissionProfile": {"id": "codexos-implementor"},
+        "activePermissionProfile": {"id": permission_profile},
         "reasoningEffort": None,
     },
 )
@@ -145,19 +161,35 @@ for method in scenario.get("server_requests", []):
     request_client(method, {})
 
 tool_results: list[dict[str, object]] = []
+dead_process_checks: list[list[dict[str, object]]] = []
 for index, call in enumerate(scenario.get("tool_calls", []), 1):
+    call_params = {
+        "threadId": call.get("thread_id", thread_id),
+        "turnId": call.get("turn_id", turn_id),
+        "callId": call.get("call_id", f"call-{index}"),
+        "namespace": call.get("namespace", "codexos"),
+        "tool": call["tool"],
+        "arguments": call["arguments"],
+    }
+    if call.get("omit_call_id"):
+        del call_params["callId"]
     response = request_client(
         "item/tool/call",
-        {
-            "threadId": thread_id,
-            "turnId": turn_id,
-            "callId": f"call-{index}",
-            "namespace": call.get("namespace", "codexos"),
-            "tool": call["tool"],
-            "arguments": call["arguments"],
-        },
+        call_params,
     )
     tool_results.append(response)
+    check_root = scenario.get("assert_dead_processes_in")
+    if isinstance(check_root, str):
+        checks: list[dict[str, object]] = []
+        for path in sorted(Path(check_root).glob("record-*.json")):
+            checked_pid = json.loads(path.read_text(encoding="utf-8"))["pid"]
+            try:
+                os.kill(checked_pid, 0)
+                dead = False
+            except ProcessLookupError:
+                dead = True
+            checks.append({"pid": checked_pid, "dead": dead})
+        dead_process_checks.append(checks)
 
 record_path.write_text(
     json.dumps(
@@ -171,8 +203,13 @@ record_path.write_text(
             "messages": messages,
             "server_responses": server_responses,
             "tool_results": tool_results,
+            "dead_process_checks": dead_process_checks,
         }
     ),
+    encoding="utf-8",
+)
+record_path.with_name(f"record-{pid}.json").write_text(
+    record_path.read_text(encoding="utf-8"),
     encoding="utf-8",
 )
 
