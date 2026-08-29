@@ -7,7 +7,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from harness import (
     CodexGenerationWorker,
@@ -113,13 +113,15 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotEqual(thread["cwd"], record["codex_home"])
             self.assertEqual(thread["permissions"], "codexos-implementor")
             self.assertEqual(thread["approvalPolicy"], "never")
-            namespace = thread["dynamicTools"]
-            self.assertEqual(len(namespace), 1)
-            self.assertEqual(namespace[0]["name"], "codexos")
+            dynamic_tools = thread["dynamicTools"]
+            self.assertEqual(len(dynamic_tools), 2)
+            self.assertEqual(dynamic_tools[0]["name"], "codexos")
             self.assertEqual(
-                [tool["name"] for tool in namespace[0]["tools"]],
+                [tool["name"] for tool in dynamic_tools[0]["tools"]],
                 _TOOLS,
             )
+            self.assertEqual(dynamic_tools[1]["type"], "function")
+            self.assertEqual(dynamic_tools[1]["name"], "review")
             config = tomllib.loads(record["config"])
             profile = config["permissions"]["codexos-implementor"]
             self.assertEqual(profile["filesystem"][":root"], "deny")
@@ -229,6 +231,7 @@ class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
             root = Path(temporary)
             runtime = CodexOSRun(root / "run", qemu)
             first_scenario = {
+                "assert_dead_processes_in": str(root / "fake-reviewer"),
                 "tool_calls": [
                     {"tool": "list", "arguments": {}},
                     {
@@ -248,6 +251,14 @@ class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
                             "data": base64.b64encode(mutation).decode("ascii"),
                         },
                     },
+                    {
+                        "namespace": None,
+                        "tool": "review",
+                        "arguments": {
+                            "focus": "correctness",
+                            "request": "Review the live mutation.",
+                        },
+                    },
                     {"tool": "build", "arguments": {}},
                     {
                         "tool": "finish_generation",
@@ -264,17 +275,40 @@ class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
                 ],
                 "final_message": "Generation finished through CodexOS.",
             }
+            reviewer_scenario = {
+                "model": "gpt-5.6-luna",
+                "permission_profile": "codexos-reviewer",
+                "tool_calls": [
+                    {"tool": "list", "arguments": {}},
+                    {
+                        "tool": "read",
+                        "arguments": {
+                            "path": "seed/kernel.c",
+                            "offset": len(original_kernel),
+                            "length": len(mutation),
+                        },
+                    },
+                ],
+                "final_message": "Blocking\n- Advisory finding from reviewer.",
+            }
             try:
                 runtime.start(image)
                 generation_zero_pid = runtime.active_pid
                 self.assertIsNotNone(generation_zero_pid)
                 with _fake_codex(first_scenario, root / "fake-one") as first:
-                    first_worker = CodexGenerationWorker(
-                        first.executable,
-                        first.auth_file,
-                    )
-                    first_result = first_worker.run_generation(runtime)
-                    first_record = first.record()
+                    with _fake_codex(
+                        reviewer_scenario,
+                        root / "fake-reviewer",
+                    ) as reviewer:
+                        first_worker = CodexGenerationWorker(
+                            first.executable,
+                            first.auth_file,
+                            reviewer_codex_executable=reviewer.executable,
+                            reviewer_auth_file=reviewer.auth_file,
+                        )
+                        first_result = first_worker.run_generation(runtime)
+                        first_record = first.record()
+                        reviewer_record = reviewer.record()
 
                 self.assertIs(
                     first_result.runtime_state,
@@ -296,6 +330,22 @@ class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
                     (archive / "handoff.txt").read_text(encoding="utf-8"),
                     handoff,
                 )
+                review_response = first_record["tool_results"][3]["result"]
+                self.assertTrue(review_response["success"])
+                self.assertEqual(
+                    review_response["contentItems"][0]["text"],
+                    "Blocking\n- Advisory finding from reviewer.",
+                )
+                self.assertTrue(
+                    first_record["dead_process_checks"][3][0]["dead"]
+                )
+                reviewed_bytes = json.loads(
+                    reviewer_record["tool_results"][1]["result"]["contentItems"][
+                        0
+                    ]["text"]
+                )
+                self.assertEqual(reviewed_bytes["output"], mutation.decode())
+                _assert_process_dead(self, reviewer_record["pid"])
                 finish_response = first_record["tool_results"][-2]["result"]
                 self.assertTrue(finish_response["success"])
                 after_finish = first_record["tool_results"][-1]["result"]
@@ -385,25 +435,22 @@ class _FakeCodex:
         self.scenario_path = self.root / "scenario.json"
         self.scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
         self.record_path = self.root / "record.json"
-        self.environment = patch.dict(
-            os.environ,
-            {
-                "CODEXOS_FAKE_SCENARIO": str(self.scenario_path),
-                "CODEXOS_FAKE_RECORD": str(self.record_path),
-            },
-        )
 
     def __enter__(self) -> "_FakeCodex":
-        self.environment.start()
         return self
 
     def __exit__(self, *args: object) -> None:
-        self.environment.stop()
         if self._cleanup_root:
             shutil.rmtree(self.root)
 
     def record(self) -> dict[str, object]:
         return json.loads(self.record_path.read_text(encoding="utf-8"))
+
+    def records(self) -> list[dict[str, object]]:
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.root.glob("record-*.json"))
+        ]
 
 
 def _fake_codex(
