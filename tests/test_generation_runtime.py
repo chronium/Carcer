@@ -20,6 +20,7 @@ _TOOLS = [
     "remove",
     "build",
     "finish_generation",
+    "request_feature",
 ]
 
 
@@ -501,6 +502,12 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(write.status, 0)
+                requested = runtime.invoke_tool(
+                    "request_feature",
+                    [b"Persist through recovery", b"Requested by generation one."],
+                )
+                self.assertEqual(requested.status, 0)
+                self.assertEqual(requested.output, b"1")
 
                 runtime.pause()
                 self.assertIs(runtime.state, RuntimeState.PAUSED)
@@ -581,6 +588,8 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 generation_two_pid = runtime.active_pid
                 self.assertIsNotNone(generation_two_pid)
                 self.assertEqual(runtime.previous_handoff, handoff)
+                self.assertEqual(runtime.feature_request(1).generation, 1)
+                self.assertEqual(runtime.feature_request(1).status, "pending")
                 read = runtime.invoke_tool(
                     "read",
                     [

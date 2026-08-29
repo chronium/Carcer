@@ -21,6 +21,7 @@ _TOOLS = [
     "remove",
     "build",
     "finish_generation",
+    "request_feature",
 ]
 _READY = b"CODEXOS-SEED-READY\n"
 
