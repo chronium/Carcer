@@ -88,7 +88,7 @@ class TrustedBuildIntegrationTests(unittest.TestCase):
                     client = ToolClient(serial)
                     self.assertEqual(
                         client.list_tools(),
-                        ["list", "read", "write", "truncate", "remove"],
+                        ["list", "read", "write", "truncate", "remove", "build"],
                     )
                     listed = client.invoke_tool("list", [])
                     self.assertEqual(listed.status, 0)
@@ -187,6 +187,8 @@ class TrustedBuildIntegrationTests(unittest.TestCase):
 
 def _current_seed_files(repository: Path) -> tuple[SnapshotFile, ...]:
     paths = (
+        "seed/build.c",
+        "seed/build.h",
         "seed/files.c",
         "seed/files.h",
         "seed/kernel.c",
