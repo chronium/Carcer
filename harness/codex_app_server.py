@@ -8,12 +8,15 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+from queue import Empty, Full, Queue
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO
 
 _PROCESS_EXIT_TIMEOUT_SECONDS = 2.0
 MAX_ERROR_OUTPUT = 64 * 1024
+_CLOSED = object()
 
 
 class CodexAppServerError(RuntimeError):
@@ -39,7 +42,27 @@ class CodexAppServer:
         self._process: subprocess.Popen[str] | None = None
         self._stderr: TextIO | None = None
         self._next_request_id = 1
+        self._request_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending: dict[int, Queue[object]] = {}
+        self._notifications: Queue[object] = Queue()
+        self._server_requests: Queue[object] = Queue()
+        self._server_request_handler: (
+            Callable[[Mapping[str, object]], None] | None
+        ) = None
+        self._handler_lock = threading.Lock()
+        self._reader: threading.Thread | None = None
+        self._request_handler: threading.Thread | None = None
+        self._reader_error: CodexAppServerError | None = None
+        self._closing = threading.Event()
+        self._close_lock = threading.Lock()
         self.workspace: Path | None = None
+
+    @property
+    def pid(self) -> int | None:
+        process = self._process
+        return None if process is None else process.pid
 
     def __enter__(self) -> CodexAppServer:
         try:
@@ -250,40 +273,70 @@ class CodexAppServer:
         self,
         method: str,
         params: object,
-        server_request_handler: Callable[[Mapping[str, object]], None] | None = None,
+        *,
+        timeout_seconds: float | None = None,
     ) -> object:
-        request_id = self._next_request_id
-        self._next_request_id += 1
-        self.write_message({"id": request_id, "method": method, "params": params})
-        while True:
-            message = self.read_message()
-            if "id" in message and "method" in message:
-                if server_request_handler is None:
-                    self.reject_server_request(message)
-                else:
-                    server_request_handler(message)
-                continue
-            if "id" not in message:
-                continue
-            if message.get("id") != request_id:
+        with self._request_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+        response_queue: Queue[object] = Queue(maxsize=1)
+        with self._pending_lock:
+            self._raise_reader_error()
+            self._pending[request_id] = response_queue
+        try:
+            self.write_message(
+                {"id": request_id, "method": method, "params": params}
+            )
+            try:
+                response = response_queue.get(timeout=timeout_seconds)
+            except Empty as error:
                 raise CodexAppServerError(
-                    "Codex app-server response ID does not match its request"
-                )
-            if "error" in message:
-                raise CodexAppServerError(
-                    f"Codex app-server {method} failed: {short_json(message['error'])}"
-                )
-            if "result" not in message:
-                raise CodexAppServerError(
-                    f"Codex app-server {method} response has no result"
-                )
-            return message["result"]
+                    f"Codex app-server {method} timed out"
+                ) from error
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+        if isinstance(response, CodexAppServerError):
+            raise response
+        message = object_value(response, f"{method} response")
+        if "error" in message:
+            raise CodexAppServerError(
+                f"Codex app-server {method} failed: {short_json(message['error'])}"
+            )
+        if "result" not in message:
+            raise CodexAppServerError(
+                f"Codex app-server {method} response has no result"
+            )
+        return message["result"]
 
     def notify(self, method: str, params: object) -> None:
         message: dict[str, object] = {"method": method}
         if params is not None:
             message["params"] = params
         self.write_message(message)
+
+    def set_server_request_handler(
+        self,
+        handler: Callable[[Mapping[str, object]], None] | None,
+    ) -> None:
+        with self._handler_lock:
+            self._server_request_handler = handler
+
+    def next_notification(
+        self,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        try:
+            value = self._notifications.get(timeout=timeout_seconds)
+        except Empty as error:
+            raise CodexAppServerError(
+                "timed out waiting for Codex app-server notification"
+            ) from error
+        if isinstance(value, CodexAppServerError):
+            raise value
+        if value is _CLOSED:
+            raise CodexAppServerError("Codex app-server is closed")
+        return object_value(value, "Codex app-server notification")
 
     def reject_server_request(self, message: Mapping[str, object]) -> None:
         request_id = message.get("id")
@@ -325,17 +378,21 @@ class CodexAppServer:
         if process is None or process.stdin is None:
             raise CodexAppServerError("Codex app-server is not running")
         try:
-            process.stdin.write(
-                json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-                + "\n"
-            )
-            process.stdin.flush()
+            with self._write_lock:
+                process.stdin.write(
+                    json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                )
+                process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
             raise CodexAppServerError(
                 "Codex app-server closed its input unexpectedly"
             ) from error
 
     def read_message(self) -> dict[str, object]:
+        return self.next_notification()
+
+    def _read_message(self) -> dict[str, object]:
         process = self._process
         if process is None or process.stdout is None:
             raise CodexAppServerError("Codex app-server is not running")
@@ -365,17 +422,17 @@ class CodexAppServer:
         return message
 
     def close(self) -> None:
+        with self._close_lock:
+            self._close()
+
+    def _close(self) -> None:
+        self._closing.set()
         process = self._process
         self._process = None
         if process is not None:
             if process.stdin is not None:
                 try:
                     process.stdin.close()
-                except OSError:
-                    pass
-            if process.stdout is not None:
-                try:
-                    process.stdout.close()
                 except OSError:
                     pass
             if process.poll() is None:
@@ -393,6 +450,27 @@ class CodexAppServer:
                     process.wait(timeout=_PROCESS_EXIT_TIMEOUT_SECONDS)
             else:
                 process.wait()
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+        self._notifications.put(_CLOSED)
+        self._server_requests.put(_CLOSED)
+        with self._pending_lock:
+            pending = list(self._pending.values())
+        for response in pending:
+            try:
+                response.put_nowait(
+                    CodexAppServerError("Codex app-server is closed")
+                )
+            except Full:
+                pass
+        for thread in (self._reader, self._request_handler):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=_PROCESS_EXIT_TIMEOUT_SECONDS)
+        self._reader = None
+        self._request_handler = None
         if self._stderr is not None:
             self._stderr.close()
             self._stderr = None
@@ -445,6 +523,81 @@ class CodexAppServer:
             raise CodexAppServerError(
                 f"failed to start Codex app-server: {error}"
             ) from error
+        self._reader = threading.Thread(
+            target=self._read_loop,
+            name="codex-app-server-reader",
+            daemon=True,
+        )
+        self._request_handler = threading.Thread(
+            target=self._server_request_loop,
+            name="codex-app-server-requests",
+            daemon=True,
+        )
+        self._reader.start()
+        self._request_handler.start()
+
+    def _read_loop(self) -> None:
+        try:
+            while not self._closing.is_set():
+                message = self._read_message()
+                request_id = message.get("id")
+                if request_id is not None and "method" in message:
+                    self._server_requests.put(message)
+                elif request_id is not None:
+                    if type(request_id) is not int:
+                        raise CodexAppServerError(
+                            "Codex app-server response ID is not an integer"
+                        )
+                    with self._pending_lock:
+                        pending = self._pending.get(request_id)
+                    if pending is None:
+                        raise CodexAppServerError(
+                            "Codex app-server response ID does not match a request"
+                        )
+                    try:
+                        pending.put_nowait(message)
+                    except Full as error:
+                        raise CodexAppServerError(
+                            "Codex app-server sent a duplicate response"
+                        ) from error
+                else:
+                    self._notifications.put(message)
+        except CodexAppServerError as error:
+            if not self._closing.is_set():
+                self._fail_reader(error)
+
+    def _server_request_loop(self) -> None:
+        while not self._closing.is_set():
+            message = self._server_requests.get()
+            if message is _CLOSED:
+                return
+            try:
+                values = object_value(message, "server request")
+                with self._handler_lock:
+                    handler = self._server_request_handler
+                if handler is None:
+                    self.reject_server_request(values)
+                else:
+                    handler(values)
+            except CodexAppServerError as error:
+                if not self._closing.is_set():
+                    self._fail_reader(error)
+                return
+
+    def _fail_reader(self, error: CodexAppServerError) -> None:
+        self._reader_error = error
+        with self._pending_lock:
+            pending = list(self._pending.values())
+        for response in pending:
+            try:
+                response.put_nowait(error)
+            except Full:
+                pass
+        self._notifications.put(error)
+
+    def _raise_reader_error(self) -> None:
+        if self._reader_error is not None:
+            raise self._reader_error
 
     def _stderr_text(self) -> str:
         if self._stderr is None:

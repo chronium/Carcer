@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -11,14 +12,456 @@ from unittest.mock import Mock
 
 from harness import (
     ArchivedGeneration,
+    CodexGenerationWorkerError,
     CodexOSRun,
     PendingGenerationFinish,
     RuntimeState,
+    ToolResult,
 )
 from harness.operator_console import OperatorConsole, main
+from tests.test_codex_generation_worker import (
+    _assert_process_dead,
+    _fake_codex,
+    _wait_for,
+)
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_agent_reuses_one_generation_session_only_on_explicit_command(self) -> None:
+        scenario = {
+            "turns": [
+                {"final_message": "First idle result."},
+                {"final_message": "Second idle result."},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                output = io.StringIO()
+                holder: dict[str, OperatorConsole] = {}
+
+                def wait_for_idle() -> None:
+                    _wait_for(
+                        lambda: holder["console"]._turn_thread is None
+                    )
+
+                scripted_input = _ObservedInput(
+                    [
+                        ("agent\n", None),
+                        ("status\n", wait_for_idle),
+                        ("agent\n", None),
+                        ("status\n", wait_for_idle),
+                        ("quit\n", None),
+                        ("y\n", None),
+                    ]
+                )
+                console = OperatorConsole(
+                    runtime,
+                    scripted_input,
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                record = fake.record()
+                methods = [item.get("method") for item in record["messages"]]
+                self.assertEqual(methods.count("thread/start"), 1)
+                self.assertEqual(methods.count("turn/start"), 2)
+                self.assertNotIn("thread/resume", methods)
+                self.assertNotIn("thread/fork", methods)
+                self.assertIn("First idle result.", output.getvalue())
+                self.assertIn("Second idle result.", output.getvalue())
+                self.assertEqual(
+                    output.getvalue().count("Codex turn started for generation 0."),
+                    2,
+                )
+
+    def test_pause_does_not_touch_qemu_when_turn_interrupt_never_completes(
+        self,
+    ) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "hold_for_interrupt": True,
+                    "interrupt_terminal": False,
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=0.05,
+                )
+                console._start_agent()
+                _wait_for(
+                    lambda: console._session is not None
+                    and console._session.active_turn
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "did not reach interrupted state",
+                ):
+                    console._pause()
+                runtime.pause.assert_not_called()
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                console._terminate_agent_session(interrupt=False)
+
+    def test_pause_resume_reuses_the_active_generation_session(self) -> None:
+        scenario = {
+            "turns": [
+                {"hold_for_interrupt": True},
+                {"final_message": "Continued after operator pause."},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+
+                def pause() -> None:
+                    runtime.state = RuntimeState.PAUSED
+
+                def resume() -> None:
+                    runtime.state = RuntimeState.RUNNING
+
+                runtime.pause.side_effect = pause
+                runtime.resume.side_effect = resume
+                output = io.StringIO()
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                console._start_agent()
+                _wait_for(
+                    lambda: console._session is not None
+                    and console._session.active_turn
+                )
+                session = console._session
+                pid = session.process_pid
+                thread_id = session.thread_id
+
+                console._pause()
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertIs(console._session, session)
+                self.assertFalse(session.active_turn)
+                console._resume()
+                _wait_for(lambda: console._turn_thread is None)
+
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(session.process_pid, pid)
+                self.assertEqual(session.thread_id, thread_id)
+                record = fake.record()
+                turns = [
+                    item
+                    for item in record["messages"]
+                    if item.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 2)
+                self.assertEqual(
+                    turns[1]["params"]["input"][0]["text"],
+                    "Continue working on the current CodexOS generation "
+                    "after the operator pause.",
+                )
+                self.assertIn("same session", output.getvalue())
+                console._terminate_agent_session(interrupt=False)
+
+    def test_pause_fails_if_interrupted_tool_does_not_quiesce(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {"tool": "build", "arguments": {}},
+                    ]
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                tool_started = threading.Event()
+                release_tool = threading.Event()
+
+                def invoke_tool(name: str, arguments: list[bytes]) -> ToolResult:
+                    tool_started.set()
+                    release_tool.wait(1.0)
+                    return ToolResult(0, b"")
+
+                runtime.invoke_tool.side_effect = invoke_tool
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=0.05,
+                )
+                console._start_agent()
+                self.assertTrue(tool_started.wait(1.0))
+
+                with self.assertRaisesRegex(
+                    CodexGenerationWorkerError,
+                    "did not quiesce",
+                ):
+                    console._pause()
+
+                runtime.pause.assert_not_called()
+                runtime.abort_generation.assert_not_called()
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                release_tool.set()
+                session = console._session
+                self.assertIsNotNone(session)
+                assert session is not None
+                _wait_for(lambda: session._active_tool_calls == 0)
+                console._terminate_agent_session(interrupt=False)
+
+    def test_status_history_inspect_and_quit_remain_available_during_turn(
+        self,
+    ) -> None:
+        scenario = {"turns": [{"hold_for_interrupt": True}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                runtime.archived_generations.return_value = [
+                    ArchivedGeneration(
+                        generation=0,
+                        parent_generation=None,
+                        transition="initial",
+                        outcome="completed",
+                        archive_path=root / "run" / "generation-0000",
+                        handoff="Archived handoff.",
+                    )
+                ]
+                runtime.inspect_generation.return_value = (
+                    runtime.archived_generations.return_value[0]
+                )
+                output = io.StringIO()
+                holder: dict[str, OperatorConsole] = {}
+
+                def wait_active() -> None:
+                    _wait_for(
+                        lambda: holder["console"]._session is not None
+                        and holder["console"]._session.active_turn
+                    )
+
+                console = OperatorConsole(
+                    runtime,
+                    _ObservedInput(
+                        [
+                            ("agent\n", None),
+                            ("status\n", wait_active),
+                            ("history\n", None),
+                            ("inspect 0\n", None),
+                            ("quit\n", None),
+                            ("y\n", None),
+                        ]
+                    ),
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                text = output.getvalue()
+                self.assertIn("Codex session: active", text)
+                self.assertIn("Codex turn: running", text)
+                self.assertIn("GEN   PARENT", text)
+                self.assertIn("Outcome: completed", text)
+                runtime.abort_generation.assert_not_called()
+                self.assertTrue(runtime.stop.called)
+                _assert_process_dead(self, fake.record()["pid"])
+
+    def test_cooperative_finish_closes_session_and_next_agent_is_fresh(
+        self,
+    ) -> None:
+        first_scenario = {
+            "tool_calls": [
+                {
+                    "tool": "finish_generation",
+                    "arguments": {"handoff": "Fresh successor context."},
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _fake_codex(first_scenario, root / "fake-codex")
+            runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+            pending = PendingGenerationFinish(
+                "Fresh successor context.",
+                b"snapshot",
+                root / "kernel.elf",
+                root / "codexos.iso",
+            )
+
+            def invoke(name: str, arguments: list[bytes]) -> ToolResult:
+                if name == "finish_generation":
+                    runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                    runtime.active_pid = None
+                    runtime.pending_generation_finish = pending
+                    runtime.previous_handoff = pending.handoff_message
+                return ToolResult(0, b"")
+
+            def continue_generation() -> None:
+                runtime.generation_number = 1
+                runtime.state = RuntimeState.RUNNING
+                runtime.active_pid = 2222
+                runtime.pending_generation_finish = None
+                runtime.previous_handoff = pending.handoff_message
+
+            runtime.invoke_tool.side_effect = invoke
+            runtime.continue_generation.side_effect = continue_generation
+            holder: dict[str, OperatorConsole] = {}
+
+            def prepare_successor() -> None:
+                console = holder["console"]
+                _wait_for(
+                    lambda: runtime.state
+                    is RuntimeState.AWAITING_NEXT_GENERATION
+                    and console._session is None
+                )
+                fake.scenario_path.write_text(
+                    json.dumps({"final_message": "Fresh generation turn."}),
+                    encoding="utf-8",
+                )
+
+            def wait_successor_turn() -> None:
+                _wait_for(lambda: holder["console"]._turn_thread is None)
+
+            output = io.StringIO()
+            console = OperatorConsole(
+                runtime,
+                _ObservedInput(
+                    [
+                        ("agent\n", None),
+                        ("continue\n", prepare_successor),
+                        ("agent\n", None),
+                        ("quit\n", wait_successor_turn),
+                        ("y\n", None),
+                    ]
+                ),
+                output,
+                codex_executable=str(fake.executable),
+                codex_auth_file=fake.auth_file,
+            )
+            holder["console"] = console
+            console.run()
+
+            records = fake.records()
+            self.assertEqual(len(records), 2)
+            self.assertNotEqual(records[0]["pid"], records[1]["pid"])
+            self.assertNotEqual(
+                records[0]["thread_id"],
+                records[1]["thread_id"],
+            )
+            for record in records:
+                methods = [item.get("method") for item in record["messages"]]
+                self.assertEqual(methods.count("thread/start"), 1)
+                self.assertNotIn("thread/resume", methods)
+                self.assertNotIn("thread/fork", methods)
+            successor_prompts = [
+                item["params"]["input"][0]["text"]
+                for record in records
+                for item in record["messages"]
+                if item.get("method") == "turn/start"
+                and "Fresh successor context."
+                in item["params"]["input"][0]["text"]
+            ]
+            self.assertEqual(len(successor_prompts), 1)
+            self.assertIn("Generation 0 completed cooperatively", output.getvalue())
+
+    def test_eof_cleans_up_active_codex_session_before_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(
+                {"turns": [{"hold_for_interrupt": True}]},
+                root / "fake-codex",
+            ) as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                holder: dict[str, OperatorConsole] = {}
+
+                def wait_active() -> None:
+                    _wait_for(
+                        lambda: holder["console"]._session is not None
+                        and holder["console"]._session.active_turn
+                    )
+
+                output = io.StringIO()
+                console = OperatorConsole(
+                    runtime,
+                    _ObservedInput(
+                        [("agent\n", None), ("status\n", wait_active)]
+                    ),
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                self.assertIn("Input closed", output.getvalue())
+                runtime.abort_generation.assert_not_called()
+                self.assertTrue(runtime.stop.called)
+                _assert_process_dead(self, fake.record()["pid"])
+
+    def test_abort_hard_closes_session_when_interrupt_does_not_finish(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "hold_for_interrupt": True,
+                    "interrupt_terminal": False,
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+
+                def abort() -> None:
+                    runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                    runtime.active_pid = None
+
+                runtime.abort_generation.side_effect = abort
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO("y\n"),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=0.05,
+                )
+                console._start_agent()
+                _wait_for(
+                    lambda: console._session is not None
+                    and console._session.active_turn
+                )
+                pid = console._session.process_pid
+
+                console._abort()
+
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
+                self.assertIsNone(console._session)
+                runtime.abort_generation.assert_called_once_with()
+                _assert_process_dead(self, pid)
+
     def test_help_status_input_errors_and_runtime_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = _mock_runtime(Path(temporary), RuntimeState.RUNNING)
@@ -195,6 +638,236 @@ class OperatorConsoleCommandTests(unittest.TestCase):
 
 
 class OperatorConsoleIntegrationTest(unittest.TestCase):
+    def test_pause_waits_for_blocked_guest_tool_before_qemu_pause(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        image = _build_seed(repository)
+        qemu = shutil.which("qemu-system-x86_64")
+        self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "read",
+                            "arguments": {
+                                "path": "seed/kernel.c",
+                                "offset": 0,
+                                "length": 1,
+                            },
+                        }
+                    ]
+                },
+                {"final_message": "Continued on the same generation."},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = CodexOSRun(root / "run", qemu)
+            fake = _fake_codex(scenario, root / "fake-codex")
+            tool_started = threading.Event()
+            release_tool = threading.Event()
+            try:
+                runtime.start(image)
+                qemu_pid = runtime.active_pid
+                self.assertIsNotNone(qemu_pid)
+                invoke_tool = runtime.invoke_tool
+
+                def blocked_invoke(
+                    name: str,
+                    arguments: list[bytes],
+                ) -> ToolResult:
+                    tool_started.set()
+                    self.assertTrue(release_tool.wait(2.0))
+                    return invoke_tool(name, arguments)
+
+                runtime.invoke_tool = Mock(side_effect=blocked_invoke)
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=2.0,
+                )
+                console._start_agent()
+                self.assertTrue(tool_started.wait(1.0))
+                session = console._session
+                self.assertIsNotNone(session)
+                assert session is not None
+                codex_pid = session.process_pid
+                thread_id = session.thread_id
+                pause_errors: list[BaseException] = []
+
+                def pause_console() -> None:
+                    try:
+                        console._pause()
+                    except BaseException as error:
+                        pause_errors.append(error)
+
+                pause_thread = threading.Thread(target=pause_console)
+                pause_thread.start()
+                _wait_for(lambda: session._last_turn_status == "interrupted")
+                self.assertTrue(pause_thread.is_alive())
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                os.kill(qemu_pid, 0)
+
+                release_tool.set()
+                pause_thread.join(2.0)
+                self.assertFalse(pause_thread.is_alive())
+                self.assertEqual(pause_errors, [])
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                os.kill(qemu_pid, 0)
+                self.assertEqual(session._active_tool_calls, 0)
+                self.assertEqual(session.process_pid, codex_pid)
+                self.assertEqual(session.thread_id, thread_id)
+                self.assertIsNone(console._turn_thread)
+
+                console._resume()
+                _wait_for(lambda: console._turn_thread is None)
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                self.assertEqual(session.process_pid, codex_pid)
+                self.assertEqual(session.thread_id, thread_id)
+                console._terminate_agent_session(interrupt=False)
+            finally:
+                release_tool.set()
+                runtime.stop()
+
+    def test_quit_active_turn_stops_qemu_without_archiving(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        image = _build_seed(repository)
+        qemu = shutil.which("qemu-system-x86_64")
+        self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = CodexOSRun(root / "run", qemu)
+            fake = _fake_codex(
+                {"turns": [{"hold_for_interrupt": True}]},
+                root / "fake-codex",
+            )
+            holder: dict[str, OperatorConsole] = {}
+            try:
+                runtime.start(image)
+                qemu_pid = runtime.active_pid
+
+                def wait_active() -> None:
+                    _wait_for(
+                        lambda: holder["console"]._session is not None
+                        and holder["console"]._session.active_turn
+                    )
+
+                console = OperatorConsole(
+                    runtime,
+                    _ObservedInput(
+                        [
+                            ("agent\n", None),
+                            ("quit\n", wait_active),
+                            ("y\n", None),
+                        ]
+                    ),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                self.assertIs(runtime.state, RuntimeState.STOPPED)
+                self.assertFalse((root / "run" / "generation-0000").exists())
+                _assert_process_dead(self, qemu_pid)
+                _assert_process_dead(self, fake.record()["pid"])
+            finally:
+                runtime.stop()
+
+    def test_pause_cancels_active_reviewer_and_preserves_implementor_session(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        image = _build_seed(repository)
+        qemu = shutil.which("qemu-system-x86_64")
+        self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
+        implementor_scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {},
+                        }
+                    ],
+                    "hold_for_interrupt": True,
+                }
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "turns": [{"hold_for_interrupt": True}],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = CodexOSRun(root / "run", qemu)
+            implementor = _fake_codex(
+                implementor_scenario,
+                root / "implementor",
+            )
+            reviewer = _fake_codex(reviewer_scenario, root / "reviewer")
+            holder: dict[str, OperatorConsole] = {}
+            observed: dict[str, int] = {}
+            try:
+                runtime.start(image)
+                qemu_pid = runtime.active_pid
+
+                def before_pause() -> None:
+                    _wait_for(lambda: bool(reviewer.records()))
+                    console = holder["console"]
+                    _wait_for(
+                        lambda: console._session is not None
+                        and console._session.active_turn
+                    )
+                    observed["reviewer"] = reviewer.records()[0]["pid"]
+                    observed["implementor"] = console._session.process_pid
+
+                def before_quit() -> None:
+                    self.assertIs(runtime.state, RuntimeState.PAUSED)
+                    self.assertEqual(runtime.active_pid, qemu_pid)
+                    _assert_process_dead(self, observed["reviewer"])
+                    os.kill(observed["implementor"], 0)
+
+                output = io.StringIO()
+                console = OperatorConsole(
+                    runtime,
+                    _ObservedInput(
+                        [
+                            ("agent\n", None),
+                            ("pause\n", before_pause),
+                            ("quit\n", before_quit),
+                            ("y\n", None),
+                        ]
+                    ),
+                    output,
+                    codex_executable=str(implementor.executable),
+                    codex_auth_file=implementor.auth_file,
+                    reviewer_codex_executable=str(reviewer.executable),
+                    reviewer_auth_file=reviewer.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                self.assertIs(runtime.state, RuntimeState.STOPPED)
+                self.assertIsNone(runtime.active_pid)
+                _assert_process_dead(self, observed["implementor"])
+                self.assertFalse((root / "run" / "generation-0000").exists())
+                response = implementor.record()["tool_results"][0]["result"]
+                self.assertFalse(response["success"])
+                self.assertIn("Generation 0 paused", output.getvalue())
+            finally:
+                runtime.stop()
+
     def test_real_console_dispatches_generation_controls(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         image = _build_seed(repository)
@@ -205,9 +878,21 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
         handoff = "Continue from the console-selected successor."
 
         with tempfile.TemporaryDirectory() as temporary:
-            run_directory = Path(temporary) / "run"
+            root = Path(temporary)
+            run_directory = root / "run"
             runtime = CodexOSRun(run_directory, qemu)
             observed: dict[str, int] = {}
+            agent_observed: dict[str, object] = {}
+            fake = _fake_codex(
+                {
+                    "turns": [
+                        {"hold_for_interrupt": True},
+                        {"hold_for_interrupt": True},
+                    ]
+                },
+                root / "fake-codex",
+            )
+            console_holder: dict[str, OperatorConsole] = {}
             try:
                 runtime.start(image)
                 write = runtime.invoke_tool(
@@ -232,21 +917,70 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                 )
 
                 def before_pause() -> None:
+                    console = console_holder["console"]
+                    _wait_for(
+                        lambda: console._session is not None
+                        and console._session.active_turn
+                    )
                     self.assertIs(runtime.state, RuntimeState.RUNNING)
                     observed["generation_one"] = runtime.active_pid
+                    agent_observed["pid"] = console._session.process_pid
+                    agent_observed["thread"] = console._session.thread_id
+
+                def before_agent() -> None:
+                    self.assertIs(runtime.state, RuntimeState.RUNNING)
+                    self.assertEqual(runtime.generation_number, 1)
+                    self.assertIsNone(console_holder["console"]._session)
 
                 def before_resume() -> None:
+                    console = console_holder["console"]
                     self.assertIs(runtime.state, RuntimeState.PAUSED)
                     self.assertEqual(
                         runtime.active_pid,
                         observed["generation_one"],
                     )
+                    self.assertEqual(
+                        console._session.process_pid,
+                        agent_observed["pid"],
+                    )
+                    self.assertEqual(
+                        console._session.thread_id,
+                        agent_observed["thread"],
+                    )
 
                 def before_abort() -> None:
+                    console = console_holder["console"]
+                    _wait_for(
+                        lambda: console._session is not None
+                        and console._session.active_turn
+                    )
                     self.assertIs(runtime.state, RuntimeState.RUNNING)
                     self.assertEqual(
                         runtime.active_pid,
                         observed["generation_one"],
+                    )
+                    self.assertEqual(
+                        console._session.process_pid,
+                        agent_observed["pid"],
+                    )
+                    self.assertEqual(
+                        console._session.thread_id,
+                        agent_observed["thread"],
+                    )
+                    read = runtime.invoke_tool(
+                        "read",
+                        [
+                            b"seed/kernel.c",
+                            b"0",
+                            str(len(original_kernel) + len(mutation)).encode(
+                                "ascii"
+                            ),
+                        ],
+                    )
+                    self.assertEqual(read.status, 0)
+                    self.assertEqual(
+                        read.output,
+                        original_kernel + mutation,
                     )
 
                 def before_rollback() -> None:
@@ -260,6 +994,7 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                 def before_quit() -> None:
                     self.assertIs(runtime.state, RuntimeState.RUNNING)
                     self.assertEqual(runtime.generation_number, 2)
+                    self.assertIsNone(console_holder["console"]._session)
                     observed["generation_two"] = runtime.active_pid
 
                 scripted_input = _ObservedInput(
@@ -268,6 +1003,7 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                         ("history\n", None),
                         ("inspect 0\n", None),
                         ("continue\n", None),
+                        ("agent\n", before_agent),
                         ("pause\n", before_pause),
                         ("resume\n", before_resume),
                         ("abort\n", before_abort),
@@ -279,7 +1015,15 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                     ]
                 )
                 output = io.StringIO()
-                OperatorConsole(runtime, scripted_input, output).run()
+                console = OperatorConsole(
+                    runtime,
+                    scripted_input,
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                console_holder["console"] = console
+                console.run()
 
                 self.assertIs(runtime.state, RuntimeState.STOPPED)
                 self.assertIsNone(runtime.active_pid)
@@ -306,6 +1050,15 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                 self.assertIn("Generation 2 started from generation 0", text)
                 self.assertIn("GEN   PARENT   TRANSITION   OUTCOME", text)
                 self.assertIn("Outcome: completed", text)
+                agent_record = fake.record()
+                methods = [
+                    message.get("method")
+                    for message in agent_record["messages"]
+                ]
+                self.assertEqual(methods.count("thread/start"), 1)
+                self.assertEqual(methods.count("turn/start"), 2)
+                self.assertEqual(methods.count("turn/interrupt"), 2)
+                _assert_process_dead(self, agent_record["pid"])
             finally:
                 runtime.stop()
 

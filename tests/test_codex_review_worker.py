@@ -1,21 +1,93 @@
 import os
 import shutil
 import tempfile
+import threading
 import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from harness import CodexGenerationWorker, CodexOSRun, RuntimeState, ToolResult
+from harness import (
+    CodexGenerationSession,
+    CodexGenerationWorker,
+    CodexOSRun,
+    RuntimeState,
+    ToolResult,
+)
 from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _build_seed,
     _fake_codex,
     _request,
+    _wait_for,
 )
 
 
 class CodexReviewerProtocolTests(unittest.TestCase):
+    def test_active_review_is_cancelled_before_implementor_interrupt(self) -> None:
+        implementor_scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {},
+                        }
+                    ],
+                    "hold_for_interrupt": True,
+                }
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "turns": [{"hold_for_interrupt": True}],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(
+                implementor_scenario,
+                root / "implementor",
+            ) as implementor:
+                with _fake_codex(
+                    reviewer_scenario,
+                    root / "reviewer",
+                ) as reviewer:
+                    runtime = _runtime_mock()
+                    session = CodexGenerationSession(
+                        runtime,
+                        implementor.executable,
+                        implementor.auth_file,
+                        reviewer_codex_executable=reviewer.executable,
+                        reviewer_auth_file=reviewer.auth_file,
+                    )
+                    results: list[object] = []
+                    turn = threading.Thread(
+                        target=lambda: results.append(
+                            session.run_initial_turn()
+                        )
+                    )
+                    turn.start()
+                    _wait_for(lambda: bool(reviewer.records()))
+                    reviewer_pid = reviewer.records()[0]["pid"]
+
+                    session.interrupt_turn(2.0)
+                    turn.join(2.0)
+                    self.assertFalse(turn.is_alive())
+                    self.assertEqual(results[0].turn_status, "interrupted")
+                    _assert_process_dead(self, reviewer_pid)
+                    _wait_for(
+                        lambda: bool(
+                            implementor.record().get("tool_results")
+                        )
+                    )
+                    response = implementor.record()["tool_results"][0]["result"]
+                    self.assertFalse(response["success"])
+                    self.assertIs(runtime.state, RuntimeState.RUNNING)
+                    self.assertIsNotNone(session.process_pid)
+                    session.close()
+
     def test_two_reviews_are_fresh_read_only_consultations(self) -> None:
         review_text = "Blocking\n- A concrete advisory finding."
         implementor_scenario = {
