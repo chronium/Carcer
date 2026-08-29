@@ -4,12 +4,16 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import tomllib
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
 from harness import (
+    CodexGenerationSession,
     CodexGenerationWorker,
     CodexGenerationWorkerError,
     CodexOSRun,
@@ -215,6 +219,134 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             ):
                 worker.run_generation(runtime)
             _assert_process_dead(self, fake.record()["pid"])
+
+
+class CodexGenerationSessionProtocolTests(unittest.TestCase):
+    def test_multiple_turns_reuse_one_process_and_thread(self) -> None:
+        scenario = {
+            "turns": [
+                {"final_message": "First turn complete."},
+                {"final_message": "Second turn complete."},
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            first = session.run_initial_turn()
+            first_record = fake.record()
+            self.assertEqual(first.final_message, "First turn complete.")
+            self.assertEqual(
+                sum(
+                    item.get("method") == "turn/start"
+                    for item in first_record["messages"]
+                ),
+                1,
+            )
+            pid = session.process_pid
+            thread_id = session.thread_id
+
+            second = session.run_continuation_turn()
+            record = fake.record()
+            self.assertEqual(second.final_message, "Second turn complete.")
+            self.assertEqual(session.process_pid, pid)
+            self.assertEqual(session.thread_id, thread_id)
+            methods = [item.get("method") for item in record["messages"]]
+            self.assertEqual(methods.count("thread/start"), 1)
+            self.assertEqual(methods.count("turn/start"), 2)
+            self.assertNotIn("thread/resume", methods)
+            self.assertNotIn("thread/fork", methods)
+            turns = [
+                item
+                for item in record["messages"]
+                if item.get("method") == "turn/start"
+            ]
+            self.assertEqual(
+                turns[1]["params"]["input"][0]["text"],
+                "Continue working on the current CodexOS generation.",
+            )
+            session.close()
+            _assert_process_dead(self, pid)
+
+    def test_interrupt_completes_and_same_thread_can_continue(self) -> None:
+        scenario = {
+            "turns": [
+                {"hold_for_interrupt": True},
+                {"final_message": "Continued after pause."},
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            results: list[object] = []
+            turn = threading.Thread(
+                target=lambda: results.append(session.run_initial_turn())
+            )
+            turn.start()
+            _wait_for(lambda: session.active_turn)
+            pid = session.process_pid
+            thread_id = session.thread_id
+
+            session.interrupt_turn(1.0)
+            turn.join(1.0)
+            self.assertFalse(turn.is_alive())
+            self.assertEqual(results[0].turn_status, "interrupted")
+
+            continued = session.run_continuation_turn("Mechanical continuation.")
+            self.assertEqual(continued.final_message, "Continued after pause.")
+            self.assertEqual(session.process_pid, pid)
+            self.assertEqual(session.thread_id, thread_id)
+            record = fake.record()
+            methods = [item.get("method") for item in record["messages"]]
+            self.assertEqual(methods.count("turn/interrupt"), 1)
+            self.assertEqual(methods.count("thread/start"), 1)
+            session.close()
+
+    def test_interrupt_requires_terminal_interrupted_notification(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "hold_for_interrupt": True,
+                    "interrupt_terminal": False,
+                }
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            failures: list[BaseException] = []
+
+            def run_turn() -> None:
+                try:
+                    session.run_initial_turn()
+                except BaseException as error:
+                    failures.append(error)
+
+            turn = threading.Thread(target=run_turn)
+            turn.start()
+            _wait_for(lambda: session.active_turn)
+            with self.assertRaisesRegex(
+                CodexGenerationWorkerError,
+                "did not reach interrupted state",
+            ):
+                session.interrupt_turn(0.05)
+            self.assertTrue(session.active_turn)
+            self.assertIs(runtime.state, RuntimeState.RUNNING)
+            session.close()
+            turn.join(1.0)
+            self.assertFalse(turn.is_alive())
+            self.assertTrue(failures)
 
 
 class CodexGenerationWorkerIntegrationTest(unittest.TestCase):
@@ -468,6 +600,24 @@ def _request(
     method: str,
 ) -> dict[str, object]:
     return next(message for message in messages if message.get("method") == method)
+
+
+def _runtime_mock() -> Mock:
+    runtime = Mock(spec=CodexOSRun)
+    runtime.state = RuntimeState.RUNNING
+    runtime.generation_number = 0
+    runtime.previous_handoff = None
+    runtime.current_transition = "initial"
+    return runtime
+
+
+def _wait_for(condition: Callable[[], bool], timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition was not met before timeout")
 
 
 def _assert_process_dead(test: unittest.TestCase, pid: int) -> None:

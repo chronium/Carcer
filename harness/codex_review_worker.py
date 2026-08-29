@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -41,6 +42,16 @@ class CodexReviewWorker:
             if auth_file is not None
             else default_auth_file()
         )
+        self._lock = threading.Lock()
+        self._server: CodexAppServer | None = None
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            server = self._server
+        if server is not None:
+            server.close()
 
     def run_review(
         self,
@@ -54,6 +65,10 @@ class CodexReviewWorker:
     ) -> str:
         if runtime.state is not RuntimeState.RUNNING:
             raise CodexReviewWorkerError("CodexOS generation is not running")
+        if self._cancelled.is_set():
+            raise CodexReviewWorkerError(
+                "Codex reviewer consultation was cancelled"
+            )
         try:
             with CodexAppServer(
                 executable=self._codex_executable,
@@ -61,6 +76,12 @@ class CodexReviewWorker:
                 temporary_prefix="codexos-reviewer-",
                 config_text=_reviewer_config(),
             ) as server:
+                with self._lock:
+                    self._server = server
+                if self._cancelled.is_set():
+                    raise CodexAppServerError(
+                        "Codex reviewer consultation was cancelled"
+                    )
                 server.validate_model(model, reasoning_effort)
                 thread_id = server.start_thread(
                     model=model,
@@ -68,13 +89,29 @@ class CodexReviewWorker:
                     dynamic_tools=[_reviewer_tool_namespace()],
                     require_read_only=True,
                 )
-                turn_id = server.start_turn(
-                    thread_id=thread_id,
-                    prompt=_reviewer_prompt(objective, focus, request),
-                    model=model,
-                    effort=reasoning_effort,
-                    permission_profile=_PERMISSION_PROFILE,
+                turn_ready = threading.Event()
+                turn_value: list[str] = []
+                server.set_server_request_handler(
+                    lambda message: self._handle_ready_server_request(
+                        server,
+                        runtime,
+                        message,
+                        thread_id,
+                        turn_ready,
+                        turn_value,
+                    )
                 )
+                try:
+                    turn_id = server.start_turn(
+                        thread_id=thread_id,
+                        prompt=_reviewer_prompt(objective, focus, request),
+                        model=model,
+                        effort=reasoning_effort,
+                        permission_profile=_PERMISSION_PROFILE,
+                    )
+                    turn_value.append(turn_id)
+                finally:
+                    turn_ready.set()
                 return self._wait_for_turn(
                     server,
                     runtime,
@@ -83,6 +120,9 @@ class CodexReviewWorker:
                 )
         except CodexAppServerError as error:
             raise CodexReviewWorkerError(str(error)) from error
+        finally:
+            with self._lock:
+                self._server = None
 
     def _wait_for_turn(
         self,
@@ -93,16 +133,7 @@ class CodexReviewWorker:
     ) -> str:
         last_agent_message: str | None = None
         while True:
-            message = server.read_message()
-            if "id" in message and "method" in message:
-                self._handle_server_request(
-                    server,
-                    runtime,
-                    message,
-                    thread_id,
-                    turn_id,
-                )
-                continue
+            message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
             if method == "item/completed" and isinstance(params, dict):
@@ -139,6 +170,27 @@ class CodexReviewWorker:
                     "Codex reviewer completed without a final response"
                 )
             return final_message
+
+    def _handle_ready_server_request(
+        self,
+        server: CodexAppServer,
+        runtime: CodexOSRun,
+        message: Mapping[str, object],
+        thread_id: str,
+        turn_ready: threading.Event,
+        turn_value: list[str],
+    ) -> None:
+        turn_ready.wait()
+        if not turn_value:
+            server.reject_server_request(message)
+            return
+        self._handle_server_request(
+            server,
+            runtime,
+            message,
+            thread_id,
+            turn_value[0],
+        )
 
     def _handle_server_request(
         self,

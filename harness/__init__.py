@@ -3,6 +3,7 @@
 from .build_host_service import BuildHostService, StagedBuildArtifacts
 from .codex_generation_worker import (
     CodexGenerationResult,
+    CodexGenerationSession,
     CodexGenerationWorker,
     CodexGenerationWorkerError,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "BuildStatus",
     "ArchivedGeneration",
     "CodexGenerationResult",
+    "CodexGenerationSession",
     "CodexGenerationWorker",
     "CodexGenerationWorkerError",
     "CodexReviewWorker",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,12 @@ from .tool_protocol import ToolResult
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
+
+CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
+RESUME_PROMPT = (
+    "Continue working on the current CodexOS generation after the operator pause."
+)
 
 _PERMISSION_PROFILE = "codexos-implementor"
 _MAX_REVIEW_REQUEST_BYTES = 8 * 1024
@@ -51,14 +58,18 @@ class CodexGenerationResult:
     summary: str
 
 
-class CodexGenerationWorker:
-    """Run exactly one fresh Codex implementor turn."""
+class CodexGenerationSession:
+    """One app-server process and implementor thread for one generation."""
 
     def __init__(
         self,
+        runtime: CodexOSRun,
         codex_executable: str = "codex",
         auth_file: str | Path | None = None,
         *,
+        model: str = DEFAULT_MODEL,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        objective: str | None = None,
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
@@ -78,72 +89,180 @@ class CodexGenerationWorker:
         )
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
-        self._server: CodexAppServer | None = None
-        self._running = False
-        self._runtime: CodexOSRun | None = None
-        self._last_agent_message: str | None = None
-        self._objective: str | None = None
-
-    def run_generation(
-        self,
-        runtime: CodexOSRun,
-        *,
-        model: str = DEFAULT_MODEL,
-        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-        objective: str | None = None,
-    ) -> CodexGenerationResult:
-        if self._running:
-            raise RuntimeError("Codex generation worker is already running")
-        if runtime.state is not RuntimeState.RUNNING:
-            raise RuntimeError("CodexOS generation is not running")
-
-        self._running = True
         self._runtime = runtime
-        self._last_agent_message = None
+        self._model = model
+        self._reasoning_effort = reasoning_effort
         self._objective = objective
+        self._generation_number = runtime.generation_number
+        self._server: CodexAppServer | None = None
+        self._thread_id: str | None = None
+        self._turn_id: str | None = None
+        self._turn_done = threading.Event()
+        self._last_turn_status: str | None = None
+        self._lock = threading.RLock()
+        self._started = False
+        self._healthy = True
+        self._initial_turn_started = False
+        self._last_agent_message: str | None = None
+        self._active_reviewer: CodexReviewWorker | None = None
+
+    @property
+    def active_turn(self) -> bool:
+        with self._lock:
+            return self._turn_id is not None
+
+    @property
+    def healthy(self) -> bool:
+        return self._healthy
+
+    @property
+    def process_pid(self) -> int | None:
+        server = self._server
+        return None if server is None else server.pid
+
+    @property
+    def thread_id(self) -> str | None:
+        return self._thread_id
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if self._runtime.state is not RuntimeState.RUNNING:
+            raise RuntimeError("CodexOS generation is not running")
+        if self._runtime.generation_number != self._generation_number:
+            raise RuntimeError(
+                "Codex generation session belongs to another generation"
+            )
+        server = CodexAppServer(
+            executable=self._codex_executable,
+            auth_file=self._auth_file,
+            temporary_prefix="codexos-codex-worker-",
+            config_text=_implementor_config(),
+        )
         try:
+            server.__enter__()
+            server.validate_model(self._model, self._reasoning_effort)
+            thread_id = server.start_thread(
+                model=self._model,
+                permission_profile=_PERMISSION_PROFILE,
+                dynamic_tools=[
+                    _dynamic_tool_namespace(),
+                    _review_dynamic_function(),
+                ],
+            )
+            self._server = server
+            self._thread_id = thread_id
+            server.set_server_request_handler(self._handle_server_request)
+            self._started = True
+        except CodexAppServerError as error:
+            server.close()
+            self._healthy = False
+            raise CodexGenerationWorkerError(str(error)) from error
+
+    def run_initial_turn(self) -> CodexGenerationResult:
+        if self._initial_turn_started:
+            raise RuntimeError("initial Codex turn has already started")
+        self._initial_turn_started = True
+        return self._run_turn(_implementor_prompt(self._runtime, self._objective))
+
+    def run_continuation_turn(
+        self,
+        prompt: str = CONTINUE_PROMPT,
+    ) -> CodexGenerationResult:
+        if not self._initial_turn_started:
+            raise RuntimeError("initial Codex turn has not started")
+        return self._run_turn(prompt)
+
+    def _run_turn(self, prompt: str) -> CodexGenerationResult:
+        self.start()
+        server = self._server
+        thread_id = self._thread_id
+        if server is None or thread_id is None:
+            raise CodexGenerationWorkerError("Codex app-server is not running")
+        if not self._healthy:
+            raise CodexGenerationWorkerError(
+                "Codex generation session is unusable"
+            )
+        if self._runtime.state is not RuntimeState.RUNNING:
+            raise RuntimeError("CodexOS generation is not running")
+        with self._lock:
+            if self._turn_id is not None:
+                raise RuntimeError("Codex implementor turn is already active")
+            self._last_agent_message = None
+            self._last_turn_status = None
+            self._turn_done.clear()
             try:
-                with CodexAppServer(
-                    executable=self._codex_executable,
-                    auth_file=self._auth_file,
-                    temporary_prefix="codexos-codex-worker-",
-                    config_text=_implementor_config(),
-                ) as server:
-                    self._server = server
-                    server.validate_model(model, reasoning_effort)
-                    thread_id = server.start_thread(
-                        model=model,
-                        permission_profile=_PERMISSION_PROFILE,
-                        dynamic_tools=[
-                            _dynamic_tool_namespace(),
-                            _review_dynamic_function(),
-                        ],
-                    )
-                    prompt = _implementor_prompt(runtime, objective)
-                    turn_id = server.start_turn(
-                        thread_id=thread_id,
-                        prompt=prompt,
-                        model=model,
-                        effort=reasoning_effort,
-                        permission_profile=_PERMISSION_PROFILE,
-                    )
-                    status, final_message = self._wait_for_turn(
-                        thread_id,
-                        turn_id,
-                    )
-                    return CodexGenerationResult(
-                        turn_status=status,
-                        final_message=final_message,
-                        runtime_state=runtime.state,
-                        summary=_result_summary(status, runtime.state),
-                    )
+                self._turn_id = server.start_turn(
+                    thread_id=thread_id,
+                    prompt=prompt,
+                    model=self._model,
+                    effort=self._reasoning_effort,
+                    permission_profile=_PERMISSION_PROFILE,
+                )
             except CodexAppServerError as error:
+                self._healthy = False
                 raise CodexGenerationWorkerError(str(error)) from error
+            turn_id = self._turn_id
+        try:
+            status, final_message = self._wait_for_turn(thread_id, turn_id)
+            self._last_turn_status = status
+            return CodexGenerationResult(
+                turn_status=status,
+                final_message=final_message,
+                runtime_state=self._runtime.state,
+                summary=_result_summary(status, self._runtime.state),
+            )
+        except CodexAppServerError as error:
+            self._healthy = False
+            raise CodexGenerationWorkerError(str(error)) from error
+        except CodexGenerationWorkerError:
+            if self._last_turn_status != "failed":
+                self._healthy = False
+            raise
         finally:
-            self._server = None
-            self._runtime = None
-            self._objective = None
-            self._running = False
+            with self._lock:
+                self._turn_id = None
+                self._turn_done.set()
+
+    def interrupt_turn(
+        self,
+        timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
+    ) -> None:
+        self.cancel_review()
+        with self._lock:
+            server = self._server
+            thread_id = self._thread_id
+            turn_id = self._turn_id
+        if server is None or thread_id is None or turn_id is None:
+            raise RuntimeError("no Codex implementor turn is active")
+        server.request(
+            "turn/interrupt",
+            {"threadId": thread_id, "turnId": turn_id},
+            timeout_seconds=timeout_seconds,
+        )
+        if not self._turn_done.wait(timeout_seconds):
+            raise CodexGenerationWorkerError(
+                "Codex turn did not reach interrupted state before timeout"
+            )
+        if self._last_turn_status != "interrupted":
+            raise CodexGenerationWorkerError(
+                "Codex turn did not finish with interrupted status"
+            )
+
+    def cancel_review(self) -> None:
+        with self._lock:
+            reviewer = self._active_reviewer
+        if reviewer is not None:
+            reviewer.cancel()
+
+    def close(self) -> None:
+        self.cancel_review()
+        server = self._server
+        self._server = None
+        self._thread_id = None
+        self._healthy = False
+        if server is not None:
+            server.close()
 
     def _wait_for_turn(
         self,
@@ -154,10 +273,7 @@ class CodexGenerationWorker:
         if server is None:
             raise CodexGenerationWorkerError("Codex app-server is not running")
         while True:
-            message = server.read_message()
-            if "id" in message and "method" in message:
-                self._handle_server_request(message, thread_id, turn_id)
-                continue
+            message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
             if method == "item/completed" and isinstance(params, dict):
@@ -184,6 +300,7 @@ class CodexGenerationWorker:
                 raise CodexGenerationWorkerError(
                     f"turn/completed has invalid status {status!r}"
                 )
+            self._last_turn_status = status
             if status == "failed":
                 error = turn.get("error")
                 raise CodexGenerationWorkerError(
@@ -195,14 +312,18 @@ class CodexGenerationWorker:
     def _handle_server_request(
         self,
         message: Mapping[str, object],
-        thread_id: str,
-        turn_id: str,
     ) -> None:
         server = self._server
         if server is None:
             raise CodexGenerationWorkerError("Codex app-server is not running")
         method = message.get("method")
         if method == "item/tool/call":
+            with self._lock:
+                thread_id = self._thread_id
+                turn_id = self._turn_id
+            if thread_id is None or turn_id is None:
+                server.reject_server_request(message)
+                return
             response = self._dynamic_tool_response(
                 message.get("params"),
                 thread_id,
@@ -275,20 +396,25 @@ class CodexGenerationWorker:
                 raise ValueError("review request exceeds 8 KiB")
             request = request_value
         runtime = self._runtime
-        if runtime is None:
-            raise RuntimeError("CodexOS runtime is unavailable")
         reviewer = CodexReviewWorker(
             self._reviewer_codex_executable,
             self._reviewer_auth_file,
         )
-        return reviewer.run_review(
-            runtime,
-            objective=self._objective,
-            focus=focus,
-            request=request,
-            model=self._reviewer_model,
-            reasoning_effort=self._reviewer_reasoning_effort,
-        )
+        with self._lock:
+            self._active_reviewer = reviewer
+        try:
+            return reviewer.run_review(
+                runtime,
+                objective=self._objective,
+                focus=focus,
+                request=request,
+                model=self._reviewer_model,
+                reasoning_effort=self._reviewer_reasoning_effort,
+            )
+        finally:
+            with self._lock:
+                if self._active_reviewer is reviewer:
+                    self._active_reviewer = None
 
     def _dispatch_tool(
         self,
@@ -296,8 +422,6 @@ class CodexGenerationWorker:
         arguments: Mapping[str, object],
     ) -> ToolResult:
         runtime = self._runtime
-        if runtime is None:
-            raise RuntimeError("CodexOS runtime is unavailable")
 
         if tool == "list":
             _check_fields(arguments, optional={"prefix"})
@@ -365,6 +489,57 @@ class CodexGenerationWorker:
                 [_utf8(arguments["handoff"], "handoff")],
             )
         raise ValueError(f"unsupported CodexOS tool: {tool}")
+
+
+class CodexGenerationWorker:
+    """Backward-compatible one fresh app-server turn."""
+
+    def __init__(
+        self,
+        codex_executable: str = "codex",
+        auth_file: str | Path | None = None,
+        *,
+        reviewer_codex_executable: str = "codex",
+        reviewer_auth_file: str | Path | None = None,
+        reviewer_model: str = DEFAULT_REVIEWER_MODEL,
+        reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+    ) -> None:
+        self._codex_executable = codex_executable
+        self._auth_file = auth_file
+        self._reviewer_codex_executable = reviewer_codex_executable
+        self._reviewer_auth_file = reviewer_auth_file
+        self._reviewer_model = reviewer_model
+        self._reviewer_reasoning_effort = reviewer_reasoning_effort
+        self._running = False
+
+    def run_generation(
+        self,
+        runtime: CodexOSRun,
+        *,
+        model: str = DEFAULT_MODEL,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        objective: str | None = None,
+    ) -> CodexGenerationResult:
+        if self._running:
+            raise RuntimeError("Codex generation worker is already running")
+        self._running = True
+        session = CodexGenerationSession(
+            runtime,
+            self._codex_executable,
+            self._auth_file,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            objective=objective,
+            reviewer_codex_executable=self._reviewer_codex_executable,
+            reviewer_auth_file=self._reviewer_auth_file,
+            reviewer_model=self._reviewer_model,
+            reviewer_reasoning_effort=self._reviewer_reasoning_effort,
+        )
+        try:
+            return session.run_initial_turn()
+        finally:
+            session.close()
+            self._running = False
 
 def _implementor_config() -> str:
     return """default_permissions = "codexos-implementor"
