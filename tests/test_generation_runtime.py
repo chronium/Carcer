@@ -6,12 +6,12 @@ import subprocess
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
 from harness import (
     TEST_HARDWARE_PROFILE,
-    CodexOSHardwareProfile,
     CodexOSRun,
     QmpError,
     RuntimeState,
@@ -148,10 +148,10 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 hardware = json.loads(
                     (archive / "hardware.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(hardware["profile"], "test-v1")
-                self.assertEqual(hardware["machine"], "q35")
-                self.assertEqual(hardware["vcpus"], 1)
-                self.assertEqual(hardware["memory_mib"], 128)
+                expected_hardware = TEST_HARDWARE_PROFILE.manifest(
+                    hardware["qemu_version"]
+                ).as_json_object()
+                self.assertEqual(hardware, expected_hardware)
                 self.assertEqual(hardware["writable_block_devices"], [])
                 self.assertNotIn(
                     str(run_directory),
@@ -268,13 +268,10 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 # Model a valid older archive produced under a different
                 # trusted profile before exercising rollback. The runtime's
                 # current profile must remain authoritative for the fork.
-                historical_profile = CodexOSHardwareProfile(
+                historical_profile = replace(
+                    TEST_HARDWARE_PROFILE,
                     profile="historical-test-v1",
-                    machine="q35",
-                    accelerator="kvm:tcg",
-                    cpu_model="qemu64",
-                    vcpus=1,
-                    memory_mib=96,
+                    memory_mib=TEST_HARDWARE_PROFILE.memory_mib + 1,
                 )
                 (archive / "hardware.json").write_text(
                     json.dumps(
@@ -455,7 +452,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     json.loads(
                         (archive / "hardware.json").read_text()
                     )["profile"],
-                    "historical-test-v1",
+                    historical_profile.profile,
                 )
                 self.assertEqual(
                     (
@@ -646,11 +643,14 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                         "transition": "successor",
                     },
                 )
+                aborted_hardware = json.loads(
+                    (generation_one_archive / "hardware.json").read_text()
+                )
                 self.assertEqual(
-                    json.loads(
-                        (generation_one_archive / "hardware.json").read_text()
-                    )["profile"],
-                    "test-v1",
+                    aborted_hardware,
+                    TEST_HARDWARE_PROFILE.manifest(
+                        aborted_hardware["qemu_version"]
+                    ).as_json_object(),
                 )
                 self.assertEqual(
                     (generation_one_archive / "aborted.txt").read_bytes(),

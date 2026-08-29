@@ -483,9 +483,20 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 self.assertIn("Codex turn: running", text)
                 self.assertIn("GEN   PARENT", text)
                 self.assertIn("Outcome: completed", text)
-                self.assertIn("Hardware profile: test-v1", text)
-                self.assertIn("Profile: test-v1", text)
-                self.assertIn("CPU: qemu64 x 1", text)
+                self.assertIn(
+                    f"Hardware profile: {TEST_HARDWARE_PROFILE.profile}",
+                    text,
+                )
+                self.assertIn(
+                    f"Profile: {TEST_HARDWARE_PROFILE.profile}",
+                    text,
+                )
+                self.assertIn(
+                    "CPU: "
+                    f"{TEST_HARDWARE_PROFILE.cpu_model} x "
+                    f"{TEST_HARDWARE_PROFILE.vcpus}",
+                    text,
+                )
                 runtime.abort_generation.assert_not_called()
                 self.assertTrue(runtime.stop.called)
                 _assert_process_dead(self, fake.record()["pid"])

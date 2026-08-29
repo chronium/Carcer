@@ -438,10 +438,16 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(
                 generation_started["data"]["hardware_profile"],
-                "test-v1",
+                TEST_HARDWARE_PROFILE.profile,
             )
-            self.assertEqual(generation_started["data"]["vcpus"], 1)
-            self.assertEqual(generation_started["data"]["memory_mib"], 128)
+            self.assertEqual(
+                generation_started["data"]["vcpus"],
+                TEST_HARDWARE_PROFILE.vcpus,
+            )
+            self.assertEqual(
+                generation_started["data"]["memory_mib"],
+                TEST_HARDWARE_PROFILE.memory_mib,
+            )
             serialized = json.dumps(events, ensure_ascii=False)
             self.assertNotIn("OBSERVABILITY-HANDOFF-SECRET", serialized)
             self.assertNotIn("REVIEW-RESPONSE-SECRET", serialized)

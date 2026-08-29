@@ -25,10 +25,11 @@ class CodexOSHardwareProfileTests(unittest.TestCase):
             )
 
     def test_experiment_profile_builds_the_frozen_qemu_command(self) -> None:
+        profile = EXPERIMENT_HARDWARE_PROFILE
         boot = Path("/trusted/boot.iso")
         qmp = Path("/trusted/qmp.sock")
         serial = Path("/trusted/serial.sock")
-        arguments = EXPERIMENT_HARDWARE_PROFILE.qemu_arguments(
+        arguments = profile.qemu_arguments(
             boot,
             qmp,
             serial,
@@ -36,11 +37,25 @@ class CodexOSHardwareProfileTests(unittest.TestCase):
 
         self.assertEqual(
             _option_values(arguments, "-machine"),
-            ["q35,accel=kvm,pcspk-audiodev=codexos-noaudio"],
+            [
+                f"{profile.machine},accel={profile.accelerator},"
+                "pcspk-audiodev=codexos-noaudio"
+            ],
         )
-        self.assertEqual(_option_values(arguments, "-cpu"), ["host"])
-        self.assertEqual(_option_values(arguments, "-smp"), ["4"])
-        self.assertEqual(_option_values(arguments, "-m"), ["8192M"])
+        self.assertEqual(
+            _option_values(arguments, "-cpu"),
+            [profile.cpu_model],
+        )
+        self.assertEqual(
+            _option_values(arguments, "-smp"),
+            [str(profile.vcpus)],
+        )
+        self.assertEqual(
+            _option_values(arguments, "-m"),
+            [f"{profile.memory_mib}M"],
+        )
+        self.assertEqual(profile.accelerator, "kvm")
+        self.assertNotIn(":", profile.accelerator)
         self.assertIn("-nodefaults", arguments)
         self.assertIn("-no-reboot", arguments)
         self.assertEqual(_option_values(arguments, "-display"), ["none"])
@@ -96,7 +111,10 @@ class CodexOSHardwareProfileTests(unittest.TestCase):
         value = TEST_HARDWARE_PROFILE.manifest(
             "QEMU emulator version test"
         ).as_json_object()
-        self.assertEqual(validate_hardware_manifest(value).profile, "test-v1")
+        self.assertEqual(
+            validate_hardware_manifest(value).profile,
+            TEST_HARDWARE_PROFILE.profile,
+        )
         normalized = value["qemu_arguments"]
         self.assertIn("<BOOT_ISO>", " ".join(normalized))
         self.assertIn("<QMP_SOCKET>", " ".join(normalized))
@@ -117,7 +135,7 @@ class CodexOSHardwareProfileTests(unittest.TestCase):
     shutil.which("qemu-system-x86_64")
     and Path("/dev/kvm").exists()
     and os.access("/dev/kvm", os.R_OK | os.W_OK),
-    "experiment-v1 requires accessible /dev/kvm",
+    "production hardware profile requires accessible /dev/kvm",
 )
 class ExperimentHardwareKvmIntegrationTest(unittest.TestCase):
     def test_real_experiment_profile_boots_builds_pauses_and_stops(self) -> None:
@@ -152,14 +170,15 @@ class ExperimentHardwareKvmIntegrationTest(unittest.TestCase):
                 )
                 completed = runtime.inspect_generation(0)
                 self.assertEqual(completed.outcome, "completed")
+                expected_hardware = EXPERIMENT_HARDWARE_PROFILE.manifest(
+                    completed.hardware.qemu_version
+                )
                 self.assertEqual(
-                    completed.hardware.profile,
-                    "experiment-v1",
+                    completed.hardware,
+                    expected_hardware,
                 )
                 self.assertEqual(completed.hardware.accelerator, "kvm")
-                self.assertEqual(completed.hardware.cpu_model, "host")
-                self.assertEqual(completed.hardware.vcpus, 4)
-                self.assertEqual(completed.hardware.memory_mib, 8192)
+                self.assertNotIn(":", completed.hardware.accelerator)
 
                 runtime.continue_generation()
                 self.assertIs(runtime.state, RuntimeState.RUNNING)
