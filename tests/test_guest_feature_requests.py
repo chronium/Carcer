@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import CodexOSRun, RuntimeState
+from harness import TEST_HARDWARE_PROFILE, CodexOSRun, RuntimeState
 
 _TOOLS = [
     "list",
@@ -25,7 +25,10 @@ class GuestFeatureRequestIntegrationTest(unittest.TestCase):
         original_kernel = (repository / "seed" / "kernel.c").read_bytes()
 
         with tempfile.TemporaryDirectory() as temporary:
-            runtime = CodexOSRun(temporary)
+            runtime = CodexOSRun(
+                temporary,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             try:
                 runtime.start(image)
                 self.assertEqual(runtime.list_tools(), _TOOLS)

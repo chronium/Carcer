@@ -212,6 +212,10 @@ class OperatorConsole:
         )
         self._print(f"State: {self._runtime.state.name}")
         self._print(f"QEMU PID: {pid if pid is not None else 'none'}")
+        if self._runtime.state in {RuntimeState.RUNNING, RuntimeState.PAUSED}:
+            self._print(
+                f"Hardware profile: {self._runtime.hardware_profile.profile}"
+            )
         self._print(
             "Selected successor: "
             + ("yes" if self._runtime.pending_generation_finish else "no")
@@ -278,11 +282,22 @@ class OperatorConsole:
         self._print(f"Transition: {item.transition}")
         self._print(f"Outcome: {item.outcome}")
         self._print(f"Archive: {item.archive_path}")
+        hardware = item.hardware
+        self._print("Hardware:")
+        self._print(f"  Profile: {hardware.profile}")
+        self._print(f"  Machine: {hardware.machine}")
+        self._print(f"  CPU: {hardware.cpu_model} x {hardware.vcpus}")
+        self._print(f"  RAM: {hardware.memory_mib} MiB")
+        self._print(f"  Graphics: {hardware.graphics}")
+        self._print(f"  Network: {hardware.network}")
+        writable = ", ".join(hardware.writable_block_devices) or "none"
+        self._print(f"  Writable disks: {writable}")
         if item.outcome == "completed":
             self._print("Handoff:")
             self._print_indented(item.handoff or "")
             self._print("Artifacts:")
             self._print("  boot ISO")
+            self._print("  hardware manifest")
             self._print("  source snapshot")
             self._print("  materialized source")
             self._print("  successor kernel")
@@ -293,6 +308,7 @@ class OperatorConsole:
             self._print("Generation aborted by operator.")
             self._print("Artifacts:")
             self._print("  boot ISO")
+            self._print("  hardware manifest")
             self._print("  QEMU stdout")
             self._print("  QEMU stderr")
 

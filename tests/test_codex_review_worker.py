@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
     CodexGenerationSession,
     CodexGenerationWorker,
     CodexOSRun,
@@ -536,7 +537,11 @@ class CodexReviewerQemuIntegrationTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             try:
                 runtime.start(image)
                 pid = runtime.active_pid
@@ -594,7 +599,11 @@ class RealCodexReviewerSmokeTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             try:
                 runtime.start(image)
                 pid = runtime.active_pid

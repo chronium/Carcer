@@ -17,6 +17,13 @@ from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
 )
+from .hardware import (
+    EXPERIMENT_HARDWARE_PROFILE,
+    CodexOSHardwareProfile,
+    HardwareManifest,
+    discover_qemu_version,
+    validate_hardware_manifest,
+)
 from .observability import ExperimentObservability
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
@@ -45,6 +52,7 @@ class ArchivedGeneration:
     outcome: str
     archive_path: Path
     handoff: str | None
+    hardware: HardwareManifest
 
 
 class CodexOSRun:
@@ -55,6 +63,7 @@ class CodexOSRun:
         run_directory: str | Path,
         qemu_executable: str = "qemu-system-x86_64",
         *,
+        hardware_profile: CodexOSHardwareProfile = EXPERIMENT_HARDWARE_PROFILE,
         observability: ExperimentObservability | None = None,
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
@@ -69,11 +78,13 @@ class CodexOSRun:
                 )
             )
         self._qemu_executable = qemu_executable
+        self._hardware_profile = hardware_profile
         self._state = RuntimeState.STOPPED
         self._generation_number: int | None = None
         self._current_boot_image: Path | None = None
         self._current_parent_generation: int | None = None
         self._current_transition: str | None = None
+        self._current_hardware: HardwareManifest | None = None
         self._previous_handoff: str | None = None
         self._pending_finish: PendingGenerationFinish | None = None
         self._generation_started_at: float | None = None
@@ -99,6 +110,10 @@ class CodexOSRun:
     @property
     def observability(self) -> ExperimentObservability | None:
         return self._observability
+
+    @property
+    def hardware_profile(self) -> CodexOSHardwareProfile:
+        return self._hardware_profile
 
     @property
     def generation_number(self) -> int | None:
@@ -378,6 +393,21 @@ class CodexOSRun:
             ) from error
         outcome = _validate_generation_metadata(metadata, generation_number)
 
+        hardware_path = archive / "hardware.json"
+        if hardware_path.is_symlink() or not hardware_path.is_file():
+            raise FileNotFoundError(
+                f"generation archive artifact is missing: {hardware_path}"
+            )
+        try:
+            hardware_value = json.loads(
+                hardware_path.read_bytes().decode("utf-8")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "generation hardware manifest is malformed"
+            ) from error
+        hardware = validate_hardware_manifest(hardware_value)
+
         boot = archive / "boot"
         common_files = (
             boot / "codexos.iso",
@@ -425,6 +455,7 @@ class CodexOSRun:
             expected_names = {
                 "boot",
                 "metadata.json",
+                "hardware.json",
                 "handoff.txt",
                 "source.snapshot",
                 "source",
@@ -443,6 +474,7 @@ class CodexOSRun:
             expected_names = {
                 "boot",
                 "metadata.json",
+                "hardware.json",
                 "aborted.txt",
                 "qemu.stdout",
                 "qemu.stderr",
@@ -459,6 +491,7 @@ class CodexOSRun:
             outcome=outcome,
             archive_path=archive,
             handoff=handoff,
+            hardware=hardware,
         )
 
     def _boot_generation(
@@ -468,6 +501,10 @@ class CodexOSRun:
         parent_generation: int | None,
         transition: str,
     ) -> None:
+        self._hardware_profile.require_available()
+        hardware = self._hardware_profile.manifest(
+            discover_qemu_version(self._qemu_executable)
+        )
         workspace = tempfile.TemporaryDirectory(
             prefix=f".generation-{generation_number:04d}-",
             dir=self._run_directory,
@@ -496,15 +533,18 @@ class CodexOSRun:
         self._serial = serial
         self._host_services = host_services
         self._tool_client = None
+        self._current_hardware = hardware
 
         try:
             shutil.copyfile(image, boot_image)
             controller.start(
-                _qemu_arguments(boot_image),
+                self._hardware_profile.qemu_arguments(
+                    boot_image,
+                    qmp_path,
+                    serial_path,
+                ),
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                qmp_socket_path=qmp_path,
-                serial_socket_path=serial_path,
             )
             qmp.connect()
             serial.connect()
@@ -578,6 +618,8 @@ class CodexOSRun:
             raise RuntimeError("CodexOS boot image is unavailable")
         if self._current_transition is None:
             raise RuntimeError("CodexOS generation transition is unavailable")
+        if self._current_hardware is None:
+            raise RuntimeError("CodexOS hardware manifest is unavailable")
         archive_final = self._run_directory / (
             f"generation-{self._generation_number:04d}"
         )
@@ -605,6 +647,10 @@ class CodexOSRun:
                     "utf-8"
                 )
             )
+            _write_hardware_manifest(
+                archive_staging / "hardware.json",
+                self._current_hardware,
+            )
             (archive_staging / "handoff.txt").write_bytes(
                 pending.handoff_message.encode("utf-8")
             )
@@ -631,6 +677,8 @@ class CodexOSRun:
             raise RuntimeError("CodexOS boot image is unavailable")
         if self._current_transition is None:
             raise RuntimeError("CodexOS generation transition is unavailable")
+        if self._current_hardware is None:
+            raise RuntimeError("CodexOS hardware manifest is unavailable")
         archive_final = self._run_directory / (
             f"generation-{self._generation_number:04d}"
         )
@@ -657,6 +705,10 @@ class CodexOSRun:
                 (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(
                     "utf-8"
                 )
+            )
+            _write_hardware_manifest(
+                archive_staging / "hardware.json",
+                self._current_hardware,
             )
             (archive_staging / "aborted.txt").write_bytes(_ABORT_MARKER)
         except BaseException:
@@ -703,6 +755,7 @@ class CodexOSRun:
         self._current_boot_image = None
         self._current_parent_generation = None
         self._current_transition = None
+        self._current_hardware = None
 
     def _record_generation_started(self) -> None:
         self._record(
@@ -712,6 +765,9 @@ class CodexOSRun:
                 "transition": self._current_transition,
                 "parent_generation": self._current_parent_generation,
                 "qemu_pid": self.active_pid,
+                "hardware_profile": self._hardware_profile.profile,
+                "vcpus": self._hardware_profile.vcpus,
+                "memory_mib": self._hardware_profile.memory_mib,
             },
         )
 
@@ -790,6 +846,18 @@ def _materialize_snapshot(snapshot: bytes, destination: Path) -> None:
         output.write_bytes(entry.content)
 
 
+def _write_hardware_manifest(
+    path: Path,
+    manifest: HardwareManifest,
+) -> None:
+    path.write_bytes(
+        (
+            json.dumps(manifest.as_json_object(), indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+    )
+
+
 def _validate_generation_metadata(
     metadata: object,
     expected_generation: int,
@@ -832,23 +900,3 @@ def _wait_for_ready(serial: SerialConnection) -> None:
             received.extend(serial.read(4096, min(0.5, remaining)))
         except TimeoutError:
             continue
-
-
-def _qemu_arguments(image: Path) -> list[str]:
-    return [
-        "-machine",
-        "q35,accel=kvm:tcg",
-        "-m",
-        "128M",
-        "-cdrom",
-        str(image),
-        "-boot",
-        "order=d",
-        "-display",
-        "none",
-        "-monitor",
-        "none",
-        "-nic",
-        "none",
-        "-no-reboot",
-    ]

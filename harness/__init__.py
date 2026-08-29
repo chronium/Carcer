@@ -24,6 +24,12 @@ from .generation_git import (
     GenerationGitRecorderError,
 )
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
+from .hardware import (
+    EXPERIMENT_HARDWARE_PROFILE,
+    TEST_HARDWARE_PROFILE,
+    CodexOSHardwareProfile,
+    HardwareManifest,
+)
 from .host_service_protocol import (
     HostServiceProtocolError,
     HostServiceRequest,
@@ -59,6 +65,8 @@ __all__ = [
     "CodexReviewWorkerError",
     "CodexOSHostServices",
     "CodexOSRun",
+    "CodexOSHardwareProfile",
+    "EXPERIMENT_HARDWARE_PROFILE",
     "GenerationGitRecord",
     "GenerationGitRecorder",
     "GenerationGitRecorderError",
@@ -71,6 +79,7 @@ __all__ = [
     "ExperimentObservabilityError",
     "HostServiceProtocolError",
     "HostServiceRequest",
+    "HardwareManifest",
     "QmpClient",
     "QmpError",
     "QemuProcessController",
@@ -81,6 +90,7 @@ __all__ = [
     "SnapshotFile",
     "SourceSnapshotError",
     "StagedBuildArtifacts",
+    "TEST_HARDWARE_PROFILE",
     "ToolClient",
     "ToolProtocolError",
     "ToolResult",

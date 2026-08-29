@@ -23,6 +23,7 @@ from harness.observability import (
     ExperimentObservabilityError,
 )
 from harness import (
+    TEST_HARDWARE_PROFILE,
     CodexGenerationWorker,
     CodexOSRun,
     GenerationGitRecorder,
@@ -349,6 +350,7 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             runtime = CodexOSRun(
                 run_directory,
                 qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
                 observability=observability,
             )
             with _fake_codex(
@@ -429,6 +431,22 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             self.assertLess(
                 names.index("feature_requested"),
                 names.index("feature_approved"),
+            )
+            generation_started = next(
+                event for event in events
+                if event["event"] == "generation_started"
+            )
+            self.assertEqual(
+                generation_started["data"]["hardware_profile"],
+                TEST_HARDWARE_PROFILE.profile,
+            )
+            self.assertEqual(
+                generation_started["data"]["vcpus"],
+                TEST_HARDWARE_PROFILE.vcpus,
+            )
+            self.assertEqual(
+                generation_started["data"]["memory_mib"],
+                TEST_HARDWARE_PROFILE.memory_mib,
             )
             serialized = json.dumps(events, ensure_ascii=False)
             self.assertNotIn("OBSERVABILITY-HANDOFF-SECRET", serialized)

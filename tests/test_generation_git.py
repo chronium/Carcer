@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
     CodexOSRun,
     GenerationGitRecorder,
     GenerationGitRecorderError,
@@ -242,7 +243,11 @@ class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
                 source_seed=source_repository / "seed",
             )
             run_directory = root / "run"
-            runtime = CodexOSRun(run_directory, qemu)
+            runtime = CodexOSRun(
+                run_directory,
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             recorder: GenerationGitRecorder | None = None
             try:
                 runtime.start(image)
@@ -290,7 +295,10 @@ class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
                     "show",
                     f"{commits[2]}:seed/kernel.c",
                 ).encode()
-                self.assertEqual(rollback_source, original_kernel + mutation_a + mutation_c)
+                self.assertEqual(
+                    rollback_source,
+                    original_kernel + mutation_a + mutation_c,
+                )
                 self.assertNotIn(mutation_b, rollback_source)
                 self.assertEqual(_archive_bytes(run_directory), archives_before)
                 self.assertIs(runtime.state, RuntimeState.AWAITING_NEXT_GENERATION)
@@ -343,6 +351,7 @@ def _archive_completed(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    _write_test_hardware(archive)
     snapshot = encode_source_snapshot(files)
     (archive / "source.snapshot").write_bytes(snapshot)
     for entry in files:
@@ -379,10 +388,21 @@ def _archive_aborted(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    _write_test_hardware(archive)
     (archive / "boot" / "codexos.iso").write_bytes(b"boot")
     (archive / "aborted.txt").write_bytes(b"Generation aborted by operator.")
     (archive / "qemu.stdout").write_bytes(b"")
     (archive / "qemu.stderr").write_bytes(b"")
+
+
+def _write_test_hardware(archive: Path) -> None:
+    manifest = TEST_HARDWARE_PROFILE.manifest(
+        "QEMU emulator version test"
+    )
+    (archive / "hardware.json").write_text(
+        json.dumps(manifest.as_json_object(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _append(runtime: CodexOSRun, offset: int, data: bytes) -> None:

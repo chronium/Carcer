@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
     ArchivedGeneration,
     CodexGenerationWorkerError,
     CodexOSRun,
@@ -27,6 +28,10 @@ from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _fake_codex,
     _wait_for,
+)
+
+_TEST_HARDWARE = TEST_HARDWARE_PROFILE.manifest(
+    "QEMU emulator version test"
 )
 
 
@@ -439,6 +444,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                         outcome="completed",
                         archive_path=root / "run" / "generation-0000",
                         handoff="Archived handoff.",
+                        hardware=_TEST_HARDWARE,
                     )
                 ]
                 runtime.inspect_generation.return_value = (
@@ -477,6 +483,20 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 self.assertIn("Codex turn: running", text)
                 self.assertIn("GEN   PARENT", text)
                 self.assertIn("Outcome: completed", text)
+                self.assertIn(
+                    f"Hardware profile: {TEST_HARDWARE_PROFILE.profile}",
+                    text,
+                )
+                self.assertIn(
+                    f"Profile: {TEST_HARDWARE_PROFILE.profile}",
+                    text,
+                )
+                self.assertIn(
+                    "CPU: "
+                    f"{TEST_HARDWARE_PROFILE.cpu_model} x "
+                    f"{TEST_HARDWARE_PROFILE.vcpus}",
+                    text,
+                )
                 runtime.abort_generation.assert_not_called()
                 self.assertTrue(runtime.stop.called)
                 _assert_process_dead(self, fake.record()["pid"])
@@ -796,6 +816,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 outcome="aborted",
                 archive_path=root / "run" / "generation-0001",
                 handoff=None,
+                hardware=_TEST_HARDWARE,
             )
             output = io.StringIO()
             OperatorConsole(
@@ -806,6 +827,8 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("Outcome: aborted", text)
             self.assertIn("Generation aborted by operator.", text)
+            self.assertIn("Hardware:", text)
+            self.assertIn("Writable disks: none", text)
             self.assertNotIn("source snapshot", text)
 
             cli_output = io.StringIO()
@@ -863,7 +886,11 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             fake = _fake_codex(scenario, root / "fake-codex")
             tool_started = threading.Event()
             release_tool = threading.Event()
@@ -943,7 +970,11 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             fake = _fake_codex(
                 {"turns": [{"hold_for_interrupt": True}]},
                 root / "fake-codex",
@@ -1011,7 +1042,11 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            runtime = CodexOSRun(root / "run", qemu)
+            runtime = CodexOSRun(
+                root / "run",
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             implementor = _fake_codex(
                 implementor_scenario,
                 root / "implementor",
@@ -1081,7 +1116,11 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             run_directory = root / "run"
-            runtime = CodexOSRun(run_directory, qemu)
+            runtime = CodexOSRun(
+                run_directory,
+                qemu,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
             observed: dict[str, int] = {}
             agent_observed: dict[str, object] = {}
             fake = _fake_codex(
@@ -1298,6 +1337,7 @@ def _mock_runtime(run_directory: Path, state: RuntimeState) -> Mock:
     } else None
     runtime.previous_handoff = None
     runtime.pending_generation_finish = None
+    runtime.hardware_profile = TEST_HARDWARE_PROFILE
     runtime.archived_generations.return_value = []
 
     def stop() -> None:
