@@ -11,7 +11,7 @@ from harness import QemuProcessController, SerialConnection, SerialError, ToolCl
 
 
 class SeedBootIntegrationTest(unittest.TestCase):
-    def test_real_seed_lists_no_tools_and_stops_on_oversized_frame(self) -> None:
+    def test_real_seed_lists_and_reads_its_source(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         make = shutil.which("make")
         qemu = shutil.which("qemu-system-x86_64")
@@ -78,12 +78,56 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         except TimeoutError:
                             continue
 
-                    self.assertEqual(ToolClient(serial).list_tools(), [])
+                    client = ToolClient(serial)
+                    self.assertEqual(client.list_tools(), ["list", "read"])
+
+                    paths = ["seed/kernel.c", "seed/limine.conf", "seed/linker.ld"]
+                    listed = client.invoke_tool("list", [])
+                    self.assertEqual(listed.status, 0)
+                    self.assertEqual(
+                        listed.output,
+                        "".join(f"{path}\n" for path in paths).encode(),
+                    )
+
+                    prefixed = client.invoke_tool("list", [b"seed/li"])
+                    self.assertEqual(prefixed.status, 0)
+                    self.assertEqual(
+                        prefixed.output,
+                        b"seed/limine.conf\nseed/linker.ld\n",
+                    )
+
+                    kernel_source = (repository / "seed" / "kernel.c").read_bytes()
+                    read_all = client.invoke_tool(
+                        "read",
+                        [
+                            b"seed/kernel.c",
+                            b"0",
+                            str(len(kernel_source)).encode("ascii"),
+                        ],
+                    )
+                    self.assertEqual(read_all.status, 0)
+                    self.assertEqual(read_all.output, kernel_source)
+
+                    offset = 37
+                    length = 83
+                    read_range = client.invoke_tool(
+                        "read",
+                        [
+                            b"seed/kernel.c",
+                            str(offset).encode(),
+                            str(length).encode(),
+                        ],
+                    )
+                    self.assertEqual(read_range.status, 0)
+                    self.assertEqual(
+                        read_range.output,
+                        kernel_source[offset : offset + length],
+                    )
 
                     oversized = struct.pack(
-                        "<4sHHII", b"CXOS", 1, 0x0001, 2, 16 * 1024 * 1024 + 1
+                        "<4sHHII", b"CXOS", 1, 0x0001, 6, 16 * 1024 * 1024 + 1
                     )
-                    valid_request = struct.pack("<4sHHII", b"CXOS", 1, 0x0001, 3, 0)
+                    valid_request = struct.pack("<4sHHII", b"CXOS", 1, 0x0001, 7, 0)
                     serial.write(oversized + valid_request)
                     with self.assertRaises(TimeoutError):
                         serial.read(1, timeout_seconds=0.25)
