@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -31,6 +32,16 @@ class RuntimeState(Enum):
     RUNNING = "running"
     PAUSED = "paused"
     AWAITING_NEXT_GENERATION = "awaiting_next_generation"
+
+
+@dataclass(frozen=True)
+class ArchivedGeneration:
+    generation: int
+    parent_generation: int | None
+    transition: str
+    outcome: str
+    archive_path: Path
+    handoff: str | None
 
 
 class CodexOSRun:
@@ -66,6 +77,10 @@ class CodexOSRun:
         return self._state
 
     @property
+    def run_directory(self) -> Path:
+        return self._run_directory
+
+    @property
     def generation_number(self) -> int | None:
         return self._generation_number
 
@@ -82,6 +97,32 @@ class CodexOSRun:
     @property
     def pending_generation_finish(self) -> PendingGenerationFinish | None:
         return self._pending_finish
+
+    def archived_generations(self) -> list[ArchivedGeneration]:
+        generations: list[ArchivedGeneration] = []
+        for path in self._run_directory.iterdir():
+            if not path.name.startswith("generation-"):
+                continue
+            suffix = path.name.removeprefix("generation-")
+            if (
+                not suffix.isascii()
+                or not suffix.isdecimal()
+                or path.name != f"generation-{int(suffix):04d}"
+            ):
+                raise ValueError(f"invalid generation archive: {path.name}")
+            generations.append(self.inspect_generation(int(suffix)))
+        generations.sort(key=lambda item: item.generation)
+        return generations
+
+    def inspect_generation(self, generation_number: int) -> ArchivedGeneration:
+        if type(generation_number) is not int or generation_number < 0:
+            raise ValueError("generation number must be a non-negative integer")
+        try:
+            return self._read_archived_generation(generation_number)
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                f"generation {generation_number} archive is invalid: {error}"
+            ) from error
 
     def start(self, initial_iso: str | Path) -> None:
         if self._state is not RuntimeState.STOPPED:
@@ -237,6 +278,20 @@ class CodexOSRun:
         return self._tool_client
 
     def _load_fork_generation(self, generation_number: int) -> tuple[Path, str]:
+        archived = self._read_archived_generation(generation_number)
+        if archived.outcome != "completed":
+            raise ValueError("aborted generation cannot be a rollback parent")
+        if archived.handoff is None:
+            raise ValueError("completed generation handoff is unavailable")
+        return (
+            archived.archive_path / "successor" / "codexos.iso",
+            archived.handoff,
+        )
+
+    def _read_archived_generation(
+        self,
+        generation_number: int,
+    ) -> ArchivedGeneration:
         archive = self._run_directory / f"generation-{generation_number:04d}"
         if archive.is_symlink() or not archive.is_dir():
             raise FileNotFoundError(f"generation archive is missing: {archive}")
@@ -253,27 +308,89 @@ class CodexOSRun:
                 "generation archive metadata is malformed"
             ) from error
         outcome = _validate_generation_metadata(metadata, generation_number)
-        if outcome != "completed":
-            raise ValueError("aborted generation cannot be a rollback parent")
 
-        handoff_path = archive / "handoff.txt"
-        successor = archive / "successor"
-        if successor.is_symlink() or not successor.is_dir():
+        boot = archive / "boot"
+        common_files = (
+            boot / "codexos.iso",
+            archive / "qemu.stdout",
+            archive / "qemu.stderr",
+        )
+        if boot.is_symlink() or not boot.is_dir():
             raise FileNotFoundError(
-                f"generation archive artifact is missing: {successor}"
+                f"generation archive artifact is missing: {boot}"
             )
-        image = successor / "codexos.iso"
-        for required in (handoff_path, image):
+        for required in common_files:
             if required.is_symlink() or not required.is_file():
                 raise FileNotFoundError(
                     f"generation archive artifact is missing: {required}"
                 )
 
-        try:
-            handoff = handoff_path.read_bytes().decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ValueError("generation handoff is not valid UTF-8") from error
-        return image, handoff
+        handoff: str | None = None
+        if outcome == "completed":
+            handoff_path = archive / "handoff.txt"
+            source_snapshot = archive / "source.snapshot"
+            source = archive / "source"
+            successor = archive / "successor"
+            for directory in (source, successor):
+                if directory.is_symlink() or not directory.is_dir():
+                    raise FileNotFoundError(
+                        f"generation archive artifact is missing: {directory}"
+                    )
+            for required in (
+                handoff_path,
+                source_snapshot,
+                successor / "kernel.elf",
+                successor / "codexos.iso",
+            ):
+                if required.is_symlink() or not required.is_file():
+                    raise FileNotFoundError(
+                        f"generation archive artifact is missing: {required}"
+                    )
+            try:
+                handoff = handoff_path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError(
+                    "generation handoff is not valid UTF-8"
+                ) from error
+            decode_source_snapshot(source_snapshot.read_bytes())
+            expected_names = {
+                "boot",
+                "metadata.json",
+                "handoff.txt",
+                "source.snapshot",
+                "source",
+                "successor",
+                "qemu.stdout",
+                "qemu.stderr",
+            }
+        else:
+            aborted = archive / "aborted.txt"
+            if aborted.is_symlink() or not aborted.is_file():
+                raise FileNotFoundError(
+                    f"generation archive artifact is missing: {aborted}"
+                )
+            if aborted.read_bytes() != _ABORT_MARKER:
+                raise ValueError("generation abort marker is malformed")
+            expected_names = {
+                "boot",
+                "metadata.json",
+                "aborted.txt",
+                "qemu.stdout",
+                "qemu.stderr",
+            }
+
+        if {path.name for path in archive.iterdir()} != expected_names:
+            raise ValueError(
+                f"generation {generation_number} archive has invalid contents"
+            )
+        return ArchivedGeneration(
+            generation=generation_number,
+            parent_generation=metadata["parent_generation"],
+            transition=metadata["transition"],
+            outcome=outcome,
+            archive_path=archive,
+            handoff=handoff,
+        )
 
     def _boot_generation(
         self,

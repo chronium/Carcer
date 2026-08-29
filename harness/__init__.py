@@ -6,7 +6,7 @@ from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
 )
-from .generation_runtime import CodexOSRun, RuntimeState
+from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
 from .host_service_protocol import (
     HostServiceProtocolError,
     HostServiceRequest,
@@ -29,6 +29,7 @@ __all__ = [
     "BuildHostService",
     "BuildResult",
     "BuildStatus",
+    "ArchivedGeneration",
     "CodexOSHostServices",
     "CodexOSRun",
     "Frame",
