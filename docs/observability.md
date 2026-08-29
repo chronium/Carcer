@@ -6,24 +6,26 @@ The optional `--otlp-endpoint` console argument exports metrics only, using
 OTLP/HTTP at `<endpoint>/v1/metrics`.
 
 OpenTelemetry log export is intentionally not used by Python. A separately
-managed local Grafana Alloy can tail the durable JSONL file and forward it over
-OTLP/HTTP to a configurable central Alloy ingress. (`otelcol.receiver.filelog`
-currently requires Alloy's `public-preview` stability level.) For example:
+managed local Grafana Alloy can discover and tail the durable JSONL files,
+convert the Loki entries to OpenTelemetry logs, and forward them over OTLP/HTTP
+to a configurable central Alloy ingress. For example:
 
 ```alloy
-otelcol.storage.file "codexos_events" {}
-
-otelcol.receiver.filelog "codexos_events" {
-  include  = ["/srv/codexos/run/events.jsonl"]
-  storage  = otelcol.storage.file.codexos_events.handler
-  resource = {
-    "service.name" = "codexos-harness",
-    "codexos.run"  = sys.env("CODEXOS_RUN_ID"),
-  }
-  operators = [{
-    type = "json_parser",
+loki.source.file "codexos_events" {
+  targets = [{
+    __path__       = "/srv/codexos/**/events.jsonl",
+    "loki.format" = "json",
+    service_name   = "codexos-harness",
   }]
+  forward_to = [otelcol.receiver.loki.codexos_events.receiver]
 
+  file_match {
+    enabled     = true
+    sync_period = "5s"
+  }
+}
+
+otelcol.receiver.loki "codexos_events" {
   output {
     logs = [otelcol.exporter.otlphttp.central.input]
   }
