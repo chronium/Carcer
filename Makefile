@@ -8,8 +8,9 @@ PYTHON := python3
 BUILD_DIR := build/seed
 ISO_ROOT := $(BUILD_DIR)/iso-root
 SEED_SOURCES := seed/kernel.c seed/serial.c seed/protocol.c \
-	seed/files.c seed/tools.c
-SEED_HEADERS := seed/serial.h seed/protocol.h seed/files.h seed/tools.h
+	seed/files.c seed/tools.c seed/build.c
+SEED_HEADERS := seed/serial.h seed/protocol.h seed/files.h seed/tools.h \
+	seed/build.h
 SOURCE_TABLE_C := $(BUILD_DIR)/source-files.c
 SOURCE_TABLE_OBJECT := $(BUILD_DIR)/source-files.o
 OBJECTS := $(patsubst seed/%.c,$(BUILD_DIR)/%.o,$(SEED_SOURCES)) \
@@ -28,9 +29,9 @@ LDFLAGS := -static --build-id=none -z max-page-size=0x1000
 REQUIRED_TOOLS := $(CROSS_CC) $(CROSS_LD) $(HOST_CC) $(PYTHON) \
 	xorriso install mkdir rm
 REQUIRED_LIMINE_FILES := limine.c limine-bios.sys limine-bios-cd.bin
-GUEST_SOURCE_INPUTS := seed/files.c seed/files.h seed/kernel.c \
-	seed/limine.conf seed/linker.ld seed/protocol.c seed/protocol.h \
-	seed/serial.c seed/serial.h seed/tools.c seed/tools.h
+GUEST_SOURCE_INPUTS := seed/build.c seed/build.h seed/files.c seed/files.h \
+	seed/kernel.c seed/limine.conf seed/linker.ld seed/protocol.c \
+	seed/protocol.h seed/serial.c seed/serial.h seed/tools.c seed/tools.h
 
 .PHONY: seed check-tools clean
 

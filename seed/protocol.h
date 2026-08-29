@@ -8,6 +8,8 @@
 #define LIST_TOOLS_RESPONSE 0x8001u
 #define INVOKE_TOOL_REQUEST 0x0002u
 #define INVOKE_TOOL_RESPONSE 0x8002u
+#define HOST_SERVICE_REQUEST 0x0003u
+#define HOST_SERVICE_RESPONSE 0x8003u
 
 void frame_send_header(
     uint16_t message_type,

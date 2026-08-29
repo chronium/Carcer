@@ -93,6 +93,8 @@ def _response(payload: bytes) -> tuple[int, bytes]:
 
 def _current_seed_files(repository: Path) -> tuple[SnapshotFile, ...]:
     paths = (
+        "seed/build.c",
+        "seed/build.h",
         "seed/files.c",
         "seed/files.h",
         "seed/kernel.c",
