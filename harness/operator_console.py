@@ -18,6 +18,7 @@ from .codex_generation_worker import (
     CodexGenerationSession,
     CodexGenerationWorkerError,
 )
+from .generation_git import GenerationGitRecorder, GenerationGitRecorderError
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
 
 
@@ -33,6 +34,7 @@ class OperatorConsole:
         objective: str | None = None,
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
+        git_recorder: GenerationGitRecorder | None = None,
         interrupt_timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
     ) -> None:
         self._runtime = runtime
@@ -43,6 +45,7 @@ class OperatorConsole:
         self._objective = objective
         self._reviewer_codex_executable = reviewer_codex_executable
         self._reviewer_auth_file = reviewer_auth_file
+        self._git_recorder = git_recorder
         self._interrupt_timeout_seconds = interrupt_timeout_seconds
         self._session: CodexGenerationSession | None = None
         self._turn_thread: threading.Thread | None = None
@@ -56,6 +59,7 @@ class OperatorConsole:
         self._print("CodexOS operator console")
         self._print()
         self._print(f"Run directory: {self._runtime.run_directory}")
+        self._reconcile_git()
         if self._runtime.state is RuntimeState.AWAITING_NEXT_GENERATION:
             self._print_gate()
         else:
@@ -114,6 +118,11 @@ class OperatorConsole:
                 self._print("Usage: agent")
             else:
                 self._start_agent()
+        elif command == "git-record":
+            if len(words) != 1:
+                self._print("Usage: git-record")
+            else:
+                self._record_git()
         elif command == "pause":
             if len(words) != 1:
                 self._print("Usage: pause")
@@ -153,6 +162,7 @@ class OperatorConsole:
         self._print("history     show archived generation lineage")
         self._print("inspect N   show archived generation N")
         self._print("agent       start or continue the generation's Codex session")
+        self._print("git-record  reconcile local generation Git provenance")
         self._print("pause       pause the running generation")
         self._print("resume      resume the paused generation")
         self._print("abort       permanently abort the running/paused generation")
@@ -249,6 +259,7 @@ class OperatorConsole:
         self._terminate_agent_session(interrupt=True)
         self._runtime.abort_generation()
         self._clear_agent_generation()
+        self._reconcile_git()
         self._print_gate()
 
     def _continue_generation(self) -> None:
@@ -377,6 +388,7 @@ class OperatorConsole:
             with self._agent_lock:
                 if self._session is session:
                     self._session = None
+            self._reconcile_git()
             self._print(
                 f"Generation {self._runtime.generation_number} completed cooperatively."
             )
@@ -454,6 +466,24 @@ class OperatorConsole:
             self._agent_unavailable_generation = None
         self._resume_agent_after_pause = False
 
+    def _record_git(self) -> None:
+        if self._git_recorder is None:
+            self._print("Git provenance is not configured.")
+            return
+        if self._reconcile_git():
+            self._print("Git provenance is up to date.")
+
+    def _reconcile_git(self) -> bool:
+        recorder = self._git_recorder
+        if recorder is None:
+            return True
+        try:
+            recorder.reconcile()
+        except GenerationGitRecorderError as error:
+            self._print(f"Git provenance error: {error}")
+            return False
+        return True
+
     def _print_gate(self) -> None:
         generation = self._runtime.generation_number
         pending = self._runtime.pending_generation_finish
@@ -529,12 +559,23 @@ def main(
     parser = argparse.ArgumentParser(description="CodexOS operator console")
     parser.add_argument("--run-directory", required=True, type=Path)
     parser.add_argument("--initial-iso", required=True, type=Path)
+    parser.add_argument("--git-repository", type=Path)
+    parser.add_argument("--git-base-ref")
     arguments = parser.parse_args(argv)
+    if (arguments.git_repository is None) != (arguments.git_base_ref is None):
+        parser.error("--git-repository and --git-base-ref must be supplied together")
     output = output_stream if output_stream is not None else sys.stdout
 
     runtime: CodexOSRun | None = None
+    recorder: GenerationGitRecorder | None = None
     try:
         runtime = CodexOSRun(arguments.run_directory)
+        if arguments.git_repository is not None:
+            recorder = GenerationGitRecorder(
+                arguments.git_repository,
+                arguments.run_directory,
+                arguments.git_base_ref,
+            )
         runtime.start(arguments.initial_iso)
     except (OSError, RuntimeError) as error:
         if runtime is not None:
@@ -542,7 +583,12 @@ def main(
         print(f"Error: failed to start CodexOS: {error}", file=output)
         return 1
 
-    OperatorConsole(runtime, input_stream, output).run()
+    OperatorConsole(
+        runtime,
+        input_stream,
+        output,
+        git_recorder=recorder,
+    ).run()
     return 0
 
 
