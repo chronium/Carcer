@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -14,6 +15,8 @@ from harness import (
     ArchivedGeneration,
     CodexGenerationWorkerError,
     CodexOSRun,
+    GenerationGitRecorder,
+    GenerationGitRecorderError,
     PendingGenerationFinish,
     RuntimeState,
     ToolResult,
@@ -27,6 +30,75 @@ from tests.test_codex_generation_worker import (
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_git_reconciliation_startup_retry_and_failure_is_bookkeeping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run",
+                RuntimeState.AWAITING_NEXT_GENERATION,
+            )
+            recorder = Mock(spec=GenerationGitRecorder)
+            recorder.reconcile.side_effect = [
+                GenerationGitRecorderError("temporary local failure"),
+                [],
+                GenerationGitRecorderError("retryable conflict"),
+            ]
+            output = io.StringIO()
+            console = OperatorConsole(
+                runtime,
+                io.StringIO("git-record\nquit\n"),
+                output,
+                git_recorder=recorder,
+            )
+            console.run()
+
+            self.assertEqual(recorder.reconcile.call_count, 2)
+            self.assertIn(
+                "Git provenance error: temporary local failure",
+                output.getvalue(),
+            )
+            self.assertIn("Git provenance is up to date.", output.getvalue())
+
+            runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+            console._execute(["git-record"])
+            self.assertIs(
+                runtime.state,
+                RuntimeState.AWAITING_NEXT_GENERATION,
+            )
+            self.assertIn(
+                "Git provenance error: retryable conflict",
+                output.getvalue(),
+            )
+
+    def test_git_record_reports_unconfigured_and_cli_requires_both_options(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = _mock_runtime(root / "run", RuntimeState.STOPPED)
+            output = io.StringIO()
+            OperatorConsole(
+                runtime,
+                io.StringIO("git-record\nquit\n"),
+                output,
+            ).run()
+            self.assertIn("Git provenance is not configured.", output.getvalue())
+
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    main(
+                        [
+                            "--run-directory",
+                            str(root / "cli-run"),
+                            "--initial-iso",
+                            str(root / "seed.iso"),
+                            "--git-repository",
+                            str(root / "repository"),
+                        ],
+                        io.StringIO(),
+                        io.StringIO(),
+                    )
+            self.assertEqual(error.exception.code, 2)
+
     def test_agent_reuses_one_generation_session_only_on_explicit_command(self) -> None:
         scenario = {
             "turns": [
@@ -343,6 +415,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 _wait_for(lambda: holder["console"]._turn_thread is None)
 
             output = io.StringIO()
+            recorder = Mock(spec=GenerationGitRecorder)
             console = OperatorConsole(
                 runtime,
                 _ObservedInput(
@@ -357,6 +430,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 output,
                 codex_executable=str(fake.executable),
                 codex_auth_file=fake.auth_file,
+                git_recorder=recorder,
             )
             holder["console"] = console
             console.run()
@@ -383,6 +457,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             ]
             self.assertEqual(len(successor_prompts), 1)
             self.assertIn("Generation 0 completed cooperatively", output.getvalue())
+            self.assertEqual(recorder.reconcile.call_count, 2)
 
     def test_eof_cleans_up_active_codex_session_before_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -437,12 +512,14 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                     runtime.active_pid = None
 
                 runtime.abort_generation.side_effect = abort
+                recorder = Mock(spec=GenerationGitRecorder)
                 console = OperatorConsole(
                     runtime,
                     io.StringIO("y\n"),
                     io.StringIO(),
                     codex_executable=str(fake.executable),
                     codex_auth_file=fake.auth_file,
+                    git_recorder=recorder,
                     interrupt_timeout_seconds=0.05,
                 )
                 console._start_agent()
@@ -460,6 +537,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 )
                 self.assertIsNone(console._session)
                 runtime.abort_generation.assert_called_once_with()
+                recorder.reconcile.assert_called_once_with()
                 _assert_process_dead(self, pid)
 
     def test_help_status_input_errors_and_runtime_errors(self) -> None:
