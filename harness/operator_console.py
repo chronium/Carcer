@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
@@ -387,13 +388,19 @@ class OperatorConsole:
             self._print_indented(result.final_message)
 
     def _pause(self) -> None:
+        deadline = time.monotonic() + self._interrupt_timeout_seconds
         with self._agent_lock:
             session = self._session
-            active = self._turn_thread is not None
-        if active:
+            turn = self._turn_thread
+        if turn is not None:
             if session is None:
                 raise RuntimeError("Codex turn has no generation session")
-            session.interrupt_turn(self._interrupt_timeout_seconds)
+            session.interrupt_turn(max(0.0, deadline - time.monotonic()))
+            turn.join(max(0.0, deadline - time.monotonic()))
+            if turn.is_alive():
+                raise CodexGenerationWorkerError(
+                    "Codex turn cleanup did not finish before timeout"
+                )
             self._resume_agent_after_pause = True
         else:
             self._resume_agent_after_pause = False

@@ -283,22 +283,19 @@ class CodexAppServer:
         with self._pending_lock:
             self._raise_reader_error()
             self._pending[request_id] = response_queue
-        received = False
         try:
             self.write_message(
                 {"id": request_id, "method": method, "params": params}
             )
             try:
                 response = response_queue.get(timeout=timeout_seconds)
-                received = True
             except Empty as error:
                 raise CodexAppServerError(
                     f"Codex app-server {method} timed out"
                 ) from error
         finally:
-            if received:
-                with self._pending_lock:
-                    self._pending.pop(request_id, None)
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
         if isinstance(response, CodexAppServerError):
             raise response
         message = object_value(response, f"{method} response")

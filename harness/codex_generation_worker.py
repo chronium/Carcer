@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,9 @@ class CodexGenerationSession:
         self._thread_id: str | None = None
         self._turn_id: str | None = None
         self._turn_done = threading.Event()
+        self._tool_calls_idle = threading.Event()
+        self._tool_calls_idle.set()
+        self._active_tool_calls = 0
         self._last_turn_status: str | None = None
         self._lock = threading.RLock()
         self._started = False
@@ -188,6 +192,10 @@ class CodexGenerationSession:
         with self._lock:
             if self._turn_id is not None:
                 raise RuntimeError("Codex implementor turn is already active")
+            if self._active_tool_calls:
+                raise RuntimeError(
+                    "a previous Codex dynamic tool call is still active"
+                )
             self._last_agent_message = None
             self._last_turn_status = None
             self._turn_done.clear()
@@ -228,6 +236,7 @@ class CodexGenerationSession:
         self,
         timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
     ) -> None:
+        deadline = time.monotonic() + timeout_seconds
         self.cancel_review()
         with self._lock:
             server = self._server
@@ -238,15 +247,21 @@ class CodexGenerationSession:
         server.request(
             "turn/interrupt",
             {"threadId": thread_id, "turnId": turn_id},
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=max(0.0, deadline - time.monotonic()),
         )
-        if not self._turn_done.wait(timeout_seconds):
+        if not self._turn_done.wait(max(0.0, deadline - time.monotonic())):
             raise CodexGenerationWorkerError(
                 "Codex turn did not reach interrupted state before timeout"
             )
         if self._last_turn_status != "interrupted":
             raise CodexGenerationWorkerError(
                 "Codex turn did not finish with interrupted status"
+            )
+        if not self._tool_calls_idle.wait(
+            max(0.0, deadline - time.monotonic())
+        ):
+            raise CodexGenerationWorkerError(
+                "Codex dynamic tool call did not quiesce before timeout"
             )
 
     def cancel_review(self) -> None:
@@ -324,12 +339,21 @@ class CodexGenerationSession:
             if thread_id is None or turn_id is None:
                 server.reject_server_request(message)
                 return
-            response = self._dynamic_tool_response(
-                message.get("params"),
-                thread_id,
-                turn_id,
-            )
-            server.write_result(message.get("id"), response)
+            with self._lock:
+                self._active_tool_calls += 1
+                self._tool_calls_idle.clear()
+            try:
+                response = self._dynamic_tool_response(
+                    message.get("params"),
+                    thread_id,
+                    turn_id,
+                )
+                server.write_result(message.get("id"), response)
+            finally:
+                with self._lock:
+                    self._active_tool_calls -= 1
+                    if self._active_tool_calls == 0:
+                        self._tool_calls_idle.set()
         else:
             server.reject_server_request(message)
 

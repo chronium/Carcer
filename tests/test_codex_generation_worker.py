@@ -20,6 +20,7 @@ from harness import (
     RuntimeState,
     ToolResult,
 )
+from harness.codex_app_server import CodexAppServerError
 
 _TOOLS = [
     "list",
@@ -347,6 +348,37 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             turn.join(1.0)
             self.assertFalse(turn.is_alive())
             self.assertTrue(failures)
+
+    def test_timed_out_interrupt_request_does_not_remain_pending(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "hold_for_interrupt": True,
+                    "interrupt_response": False,
+                }
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            turn = threading.Thread(target=session.run_initial_turn)
+            turn.start()
+            _wait_for(lambda: session.active_turn)
+
+            with self.assertRaisesRegex(CodexAppServerError, "timed out"):
+                session.interrupt_turn(0.05)
+
+            server = session._server
+            self.assertIsNotNone(server)
+            assert server is not None
+            self.assertEqual(server._pending, {})
+            session.close()
+            turn.join(1.0)
+            self.assertFalse(turn.is_alive())
 
 
 class CodexGenerationWorkerIntegrationTest(unittest.TestCase):

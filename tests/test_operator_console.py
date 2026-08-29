@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import Mock
 
 from harness import (
     ArchivedGeneration,
+    CodexGenerationWorkerError,
     CodexOSRun,
     PendingGenerationFinish,
     RuntimeState,
@@ -174,6 +176,56 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                     "after the operator pause.",
                 )
                 self.assertIn("same session", output.getvalue())
+                console._terminate_agent_session(interrupt=False)
+
+    def test_pause_fails_if_interrupted_tool_does_not_quiesce(self) -> None:
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {"tool": "build", "arguments": {}},
+                    ]
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                tool_started = threading.Event()
+                release_tool = threading.Event()
+
+                def invoke_tool(name: str, arguments: list[bytes]) -> ToolResult:
+                    tool_started.set()
+                    release_tool.wait(1.0)
+                    return ToolResult(0, b"")
+
+                runtime.invoke_tool.side_effect = invoke_tool
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=0.05,
+                )
+                console._start_agent()
+                self.assertTrue(tool_started.wait(1.0))
+
+                with self.assertRaisesRegex(
+                    CodexGenerationWorkerError,
+                    "did not quiesce",
+                ):
+                    console._pause()
+
+                runtime.pause.assert_not_called()
+                runtime.abort_generation.assert_not_called()
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                release_tool.set()
+                session = console._session
+                self.assertIsNotNone(session)
+                assert session is not None
+                _wait_for(lambda: session._active_tool_calls == 0)
                 console._terminate_agent_session(interrupt=False)
 
     def test_status_history_inspect_and_quit_remain_available_during_turn(
@@ -586,6 +638,103 @@ class OperatorConsoleCommandTests(unittest.TestCase):
 
 
 class OperatorConsoleIntegrationTest(unittest.TestCase):
+    def test_pause_waits_for_blocked_guest_tool_before_qemu_pause(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        image = _build_seed(repository)
+        qemu = shutil.which("qemu-system-x86_64")
+        self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "read",
+                            "arguments": {
+                                "path": "seed/kernel.c",
+                                "offset": 0,
+                                "length": 1,
+                            },
+                        }
+                    ]
+                },
+                {"final_message": "Continued on the same generation."},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = CodexOSRun(root / "run", qemu)
+            fake = _fake_codex(scenario, root / "fake-codex")
+            tool_started = threading.Event()
+            release_tool = threading.Event()
+            try:
+                runtime.start(image)
+                qemu_pid = runtime.active_pid
+                self.assertIsNotNone(qemu_pid)
+                invoke_tool = runtime.invoke_tool
+
+                def blocked_invoke(
+                    name: str,
+                    arguments: list[bytes],
+                ) -> ToolResult:
+                    tool_started.set()
+                    self.assertTrue(release_tool.wait(2.0))
+                    return invoke_tool(name, arguments)
+
+                runtime.invoke_tool = Mock(side_effect=blocked_invoke)
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    io.StringIO(),
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                    interrupt_timeout_seconds=2.0,
+                )
+                console._start_agent()
+                self.assertTrue(tool_started.wait(1.0))
+                session = console._session
+                self.assertIsNotNone(session)
+                assert session is not None
+                codex_pid = session.process_pid
+                thread_id = session.thread_id
+                pause_errors: list[BaseException] = []
+
+                def pause_console() -> None:
+                    try:
+                        console._pause()
+                    except BaseException as error:
+                        pause_errors.append(error)
+
+                pause_thread = threading.Thread(target=pause_console)
+                pause_thread.start()
+                _wait_for(lambda: session._last_turn_status == "interrupted")
+                self.assertTrue(pause_thread.is_alive())
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                os.kill(qemu_pid, 0)
+
+                release_tool.set()
+                pause_thread.join(2.0)
+                self.assertFalse(pause_thread.is_alive())
+                self.assertEqual(pause_errors, [])
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                os.kill(qemu_pid, 0)
+                self.assertEqual(session._active_tool_calls, 0)
+                self.assertEqual(session.process_pid, codex_pid)
+                self.assertEqual(session.thread_id, thread_id)
+                self.assertIsNone(console._turn_thread)
+
+                console._resume()
+                _wait_for(lambda: console._turn_thread is None)
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.active_pid, qemu_pid)
+                self.assertEqual(session.process_pid, codex_pid)
+                self.assertEqual(session.thread_id, thread_id)
+                console._terminate_agent_session(interrupt=False)
+            finally:
+                release_tool.set()
+                runtime.stop()
+
     def test_quit_active_turn_stops_qemu_without_archiving(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         image = _build_seed(repository)
