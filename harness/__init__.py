@@ -6,6 +6,7 @@ from .codex_generation_worker import (
     CodexGenerationWorker,
     CodexGenerationWorkerError,
 )
+from .codex_review_worker import CodexReviewWorker, CodexReviewWorkerError
 from .framing import Frame, FramingError, encode_frame, read_frame
 from .generation_finish_host_service import (
     CodexOSHostServices,
@@ -38,6 +39,8 @@ __all__ = [
     "CodexGenerationResult",
     "CodexGenerationWorker",
     "CodexGenerationWorkerError",
+    "CodexReviewWorker",
+    "CodexReviewWorkerError",
     "CodexOSHostServices",
     "CodexOSRun",
     "Frame",
