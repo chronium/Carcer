@@ -6,6 +6,7 @@ from pathlib import Path
 from harness import (
     BuildHostService,
     CodexOSHostServices,
+    FeatureRequestStore,
     HostServiceRequest,
     SnapshotFile,
     encode_source_snapshot,
@@ -95,7 +96,21 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
         snapshot = encode_source_snapshot(_current_seed_files(repository))
 
         with tempfile.TemporaryDirectory() as temporary:
-            service = CodexOSHostServices(Path(temporary) / "staging")
+            store = FeatureRequestStore(Path(temporary) / "run")
+            service = CodexOSHostServices(
+                Path(temporary) / "staging",
+                feature_request_store=store,
+                generation=7,
+            )
+            feature = service.handle_request(
+                HostServiceRequest(
+                    59,
+                    "request_feature",
+                    ("Δυνατότητα".encode(), "Needed externally. λ".encode()),
+                )
+            )
+            self.assertEqual(_response(feature.payload), (0, b"1"))
+            self.assertEqual(store.request(1).generation, 7)
             build = service.handle_request(
                 HostServiceRequest(60, "build", (snapshot,))
             )
@@ -130,6 +145,16 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             self.assertNotEqual(_response(later_build.payload)[0], 0)
             self.assertIs(service.pending_generation_finish, pending)
             self.assertIs(service.latest_successful_build, artifacts)
+
+            frozen_feature = service.handle_request(
+                HostServiceRequest(
+                    64,
+                    "request_feature",
+                    (b"too late", b"must not persist"),
+                )
+            )
+            self.assertEqual(_response(frozen_feature.payload)[0], 2)
+            self.assertEqual(len(store.requests()), 1)
 
     def test_rejects_invalid_or_unbuilt_source_and_preserves_prior_build(self) -> None:
         repository = Path(__file__).resolve().parents[1]
@@ -208,6 +233,32 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(_response(finish.payload), (0, b""))
             self.assertIsNotNone(service.pending_generation_finish)
+
+    def test_feature_request_rejects_malformed_arguments_without_persistence(
+        self,
+    ) -> None:
+        invalid_arguments = (
+            (),
+            (b"title",),
+            (b"", b"description"),
+            (b"\xff", b"description"),
+            (b"title", b"\xff"),
+            (b"x" * 257, b"description"),
+            (b"title", b"x" * (16 * 1024 + 1)),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = FeatureRequestStore(Path(temporary) / "run")
+            service = CodexOSHostServices(
+                Path(temporary) / "staging",
+                feature_request_store=store,
+                generation=4,
+            )
+            for request_id, arguments in enumerate(invalid_arguments, 80):
+                response = service.handle_request(
+                    HostServiceRequest(request_id, "request_feature", arguments)
+                )
+                self.assertEqual(_response(response.payload)[0], 2)
+            self.assertEqual(store.requests(), ())
 
 
 def _response(payload: bytes) -> tuple[int, bytes]:

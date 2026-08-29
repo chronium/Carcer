@@ -9,6 +9,11 @@ from .codex_generation_worker import (
 )
 from .codex_review_worker import CodexReviewWorker, CodexReviewWorkerError
 from .framing import Frame, FramingError, encode_frame, read_frame
+from .feature_requests import (
+    FeatureRequest,
+    FeatureRequestError,
+    FeatureRequestStore,
+)
 from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
@@ -54,6 +59,9 @@ __all__ = [
     "GenerationGitRecorder",
     "GenerationGitRecorderError",
     "Frame",
+    "FeatureRequest",
+    "FeatureRequestError",
+    "FeatureRequestStore",
     "FramingError",
     "HostServiceProtocolError",
     "HostServiceRequest",
