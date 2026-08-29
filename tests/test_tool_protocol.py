@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from harness import (
-    BuildHostService,
+    CodexOSHostServices,
     Frame,
     SerialConnection,
     ToolClient,
@@ -101,7 +101,7 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
         tool_output = b"original tool result"
 
         with tempfile.TemporaryDirectory() as temporary:
-            build_service = BuildHostService(Path(temporary) / "staging")
+            host_services = CodexOSHostServices(Path(temporary) / "staging")
             with connected_serial_peer() as (serial, peer):
                 peer.sendall(
                     encode_frame(Frame(0x0003, 1, host_service_payload))
@@ -110,7 +110,7 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                     )
                 )
 
-                result = ToolClient(serial, build_service).invoke_tool("future", [])
+                result = ToolClient(serial, host_services).invoke_tool("future", [])
 
                 tool_request = receive_peer_frame(peer)
                 self.assertEqual(
