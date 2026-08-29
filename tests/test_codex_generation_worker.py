@@ -12,6 +12,8 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
 from harness import (
     CodexGenerationSession,
     CodexGenerationWorker,
@@ -22,6 +24,7 @@ from harness import (
     ToolResult,
 )
 from harness.codex_app_server import CodexAppServerError
+from harness.observability import ExperimentObservability
 
 _TOOLS = [
     "list",
@@ -36,6 +39,48 @@ _TOOLS = [
 
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
+    def test_authoritative_turn_usage_updates_token_metrics(self) -> None:
+        usage = {
+            "cacheWriteInputTokens": 0,
+            "cachedInputTokens": 10,
+            "inputTokens": 123,
+            "outputTokens": 45,
+            "reasoningOutputTokens": 20,
+            "totalTokens": 168,
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            {"token_usage": usage}
+        ) as fake:
+            reader = InMemoryMetricReader()
+            observability = ExperimentObservability(
+                temporary,
+                metric_readers=[reader],
+            )
+            runtime = _runtime_mock()
+            runtime.observability = observability
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+
+            values = {}
+            metrics = reader.get_metrics_data()
+            for resource in metrics.resource_metrics:
+                for scope in resource.scope_metrics:
+                    for metric in scope.metrics:
+                        if metric.name.startswith("codexos_model_"):
+                            values[metric.name] = metric.data.data_points[0].value
+                            self.assertEqual(
+                                dict(metric.data.data_points[0].attributes),
+                                {
+                                    "model": "gpt-5.6-sol",
+                                    "role": "implementor",
+                                },
+                            )
+            self.assertEqual(values["codexos_model_input_tokens_total"], 123)
+            self.assertEqual(values["codexos_model_output_tokens_total"], 45)
+            observability.close()
+
     def test_feature_request_bridge_and_approved_prompt_are_concrete(self) -> None:
         approved_title = "Approved title\nraw\r\x1b[2J"
         approved_description = "Approved description\nraw\x07\u009b"

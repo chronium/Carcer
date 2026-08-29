@@ -248,6 +248,22 @@ for turn_index, turn_scenario in enumerate(turns, 1):
                 checks.append({"pid": checked_pid, "dead": dead})
             dead_process_checks.append(checks)
 
+    token_usage = turn_scenario.get("token_usage")
+    if isinstance(token_usage, dict):
+        send(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "tokenUsage": {
+                        "last": token_usage,
+                        "total": token_usage,
+                    },
+                },
+            }
+        )
+
     if turn_id in interrupted_turns:
         save_record()
         continue
