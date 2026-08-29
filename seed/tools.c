@@ -112,6 +112,11 @@ static int parse_decimal(struct bytes argument, uint32_t *value) {
     return 1;
 }
 
+static int valid_path(struct bytes path) {
+    return path.length != 0 && path.length <= FILE_MAX_PATH_LENGTH &&
+           valid_utf8(path.data, path.length);
+}
+
 static void send_invoke_header(
     uint32_t request_id,
     uint32_t status,
@@ -125,18 +130,34 @@ void tools_send_failure(uint32_t request_id) {
     send_invoke_header(request_id, TOOL_FAILURE, 0);
 }
 
+static void send_tool_success(uint32_t request_id) {
+    send_invoke_header(request_id, TOOL_SUCCESS, 0);
+}
+
 void tools_send_list(uint32_t request_id) {
     static const uint8_t list_name[] = "list";
     static const uint8_t read_name[] = "read";
+    static const uint8_t write_name[] = "write";
+    static const uint8_t truncate_name[] = "truncate";
+    static const uint8_t remove_name[] = "remove";
     uint32_t payload_length = 2u + 2u + (sizeof(list_name) - 1u) + 2u +
-                              (sizeof(read_name) - 1u);
+                              (sizeof(read_name) - 1u) + 2u +
+                              (sizeof(write_name) - 1u) + 2u +
+                              (sizeof(truncate_name) - 1u) + 2u +
+                              (sizeof(remove_name) - 1u);
 
     frame_send_header(LIST_TOOLS_RESPONSE, request_id, payload_length);
-    frame_write_u16(2);
+    frame_write_u16(5);
     frame_write_u16(sizeof(list_name) - 1u);
     serial_write_bytes(list_name, sizeof(list_name) - 1u);
     frame_write_u16(sizeof(read_name) - 1u);
     serial_write_bytes(read_name, sizeof(read_name) - 1u);
+    frame_write_u16(sizeof(write_name) - 1u);
+    serial_write_bytes(write_name, sizeof(write_name) - 1u);
+    frame_write_u16(sizeof(truncate_name) - 1u);
+    serial_write_bytes(truncate_name, sizeof(truncate_name) - 1u);
+    frame_write_u16(sizeof(remove_name) - 1u);
+    serial_write_bytes(remove_name, sizeof(remove_name) - 1u);
 }
 
 static int parse_invocation(
@@ -223,10 +244,7 @@ static void invoke_read(uint32_t request_id, const struct invocation *invocation
     uint32_t requested_length;
 
     if (invocation->argument_count != 3 ||
-        !valid_utf8(
-            invocation->arguments[0].data,
-            invocation->arguments[0].length
-        ) ||
+        !valid_path(invocation->arguments[0]) ||
         !parse_decimal(invocation->arguments[1], &offset) ||
         !parse_decimal(invocation->arguments[2], &requested_length) ||
         requested_length > FRAME_MAX_PAYLOAD - 4u) {
@@ -253,7 +271,59 @@ static void invoke_read(uint32_t request_id, const struct invocation *invocation
         requested_length < available ? requested_length : available;
 
     send_invoke_header(request_id, TOOL_SUCCESS, output_length);
-    serial_write_bytes(file->data + offset, output_length);
+    serial_write_bytes(file_content(file) + offset, output_length);
+}
+
+static void invoke_write(uint32_t request_id, const struct invocation *invocation) {
+    uint32_t offset;
+
+    if (invocation->argument_count != 3 ||
+        !valid_path(invocation->arguments[0]) ||
+        !parse_decimal(invocation->arguments[1], &offset) ||
+        !file_write(
+            invocation->arguments[0].data,
+            invocation->arguments[0].length,
+            offset,
+            invocation->arguments[2].data,
+            invocation->arguments[2].length
+        )) {
+        tools_send_failure(request_id);
+        return;
+    }
+    send_tool_success(request_id);
+}
+
+static void invoke_truncate(
+    uint32_t request_id,
+    const struct invocation *invocation
+) {
+    uint32_t size;
+
+    if (invocation->argument_count != 2 ||
+        !valid_path(invocation->arguments[0]) ||
+        !parse_decimal(invocation->arguments[1], &size) ||
+        !file_truncate(
+            invocation->arguments[0].data,
+            invocation->arguments[0].length,
+            size
+        )) {
+        tools_send_failure(request_id);
+        return;
+    }
+    send_tool_success(request_id);
+}
+
+static void invoke_remove(uint32_t request_id, const struct invocation *invocation) {
+    if (invocation->argument_count != 1 ||
+        !valid_path(invocation->arguments[0]) ||
+        !file_remove(
+            invocation->arguments[0].data,
+            invocation->arguments[0].length
+        )) {
+        tools_send_failure(request_id);
+        return;
+    }
+    send_tool_success(request_id);
 }
 
 void tools_handle_invocation(
@@ -263,6 +333,9 @@ void tools_handle_invocation(
 ) {
     static const uint8_t list_name[] = "list";
     static const uint8_t read_name[] = "read";
+    static const uint8_t write_name[] = "write";
+    static const uint8_t truncate_name[] = "truncate";
+    static const uint8_t remove_name[] = "remove";
     struct invocation invocation;
 
     if (!parse_invocation(payload, payload_length, &invocation)) {
@@ -283,6 +356,27 @@ void tools_handle_invocation(
                    sizeof(read_name) - 1u
                )) {
         invoke_read(request_id, &invocation);
+    } else if (bytes_equal(
+                   invocation.name.data,
+                   invocation.name.length,
+                   write_name,
+                   sizeof(write_name) - 1u
+               )) {
+        invoke_write(request_id, &invocation);
+    } else if (bytes_equal(
+                   invocation.name.data,
+                   invocation.name.length,
+                   truncate_name,
+                   sizeof(truncate_name) - 1u
+               )) {
+        invoke_truncate(request_id, &invocation);
+    } else if (bytes_equal(
+                   invocation.name.data,
+                   invocation.name.length,
+                   remove_name,
+                   sizeof(remove_name) - 1u
+               )) {
+        invoke_remove(request_id, &invocation);
     } else {
         tools_send_failure(request_id);
     }

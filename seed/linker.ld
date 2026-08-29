@@ -24,7 +24,12 @@ SECTIONS
         *(.data .data.*)
     } :data
 
-    ASSERT(SIZEOF(.data) <= 64K, "seed RAM file store exceeds 64 KiB")
+    ASSERT(SIZEOF(.data) <= 64K, "embedded seed data exceeds 64 KiB")
+
+    .bss : ALIGN(16) {
+        *(.bss .bss.*)
+        *(COMMON)
+    } :data
 
     /DISCARD/ : {
         *(.comment)

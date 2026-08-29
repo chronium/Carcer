@@ -21,7 +21,23 @@ if not sources or any(not path or not set(path) <= allowed for path in sources):
         "seed source paths must use ASCII letters, digits, '.', '_', '/', or '-'"
     )
 
-lines = ['#include "files.h"', ""]
+content_size = sum(Path(path).stat().st_size for path in sources)
+lines = [
+    '#include "files.h"',
+    "",
+    f'_Static_assert({len(sources)}u <= FILE_MAX_COUNT, "too many initial files");',
+    (
+        f'_Static_assert({content_size}u <= FILE_CONTENT_CAPACITY, '
+        '"initial files exceed 64 KiB");'
+    ),
+]
+for path in sources:
+    lines.append(
+        f'_Static_assert(sizeof("{path}") - 1u <= FILE_MAX_PATH_LENGTH, '
+        f'"initial path too long: {path}");'
+    )
+
+lines.append("")
 for path in sources:
     symbol = binary_symbol(path)
     lines.extend(
@@ -31,7 +47,7 @@ for path in sources:
         ]
     )
 
-lines.extend(["", "struct file files[] = {"])
+lines.extend(["", "const struct embedded_file initial_files[] = {"])
 for path in sources:
     symbol = binary_symbol(path)
     lines.extend(
@@ -48,7 +64,10 @@ lines.extend(
     [
         "};",
         "",
-        "const uint32_t file_count = sizeof(files) / sizeof(files[0]);",
+        (
+            "const uint32_t initial_file_count = "
+            "sizeof(initial_files) / sizeof(initial_files[0]);"
+        ),
     ]
 )
 
