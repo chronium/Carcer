@@ -17,6 +17,7 @@ from .host_service_protocol import (
     HostServiceRequest,
     create_host_service_response,
 )
+from .observability import ExperimentObservability
 from .source_snapshot import SourceSnapshotError, decode_source_snapshot
 
 _FINISH_ACCEPTED = 0
@@ -44,6 +45,7 @@ class CodexOSHostServices:
         *,
         feature_request_store: FeatureRequestStore | None = None,
         generation: int | None = None,
+        observability: ExperimentObservability | None = None,
     ) -> None:
         if (feature_request_store is None) != (generation is None):
             raise ValueError(
@@ -53,6 +55,7 @@ class CodexOSHostServices:
         self._pending_finish: PendingGenerationFinish | None = None
         self._feature_request_store = feature_request_store
         self._generation = generation
+        self._observability = observability
 
     @property
     def latest_successful_build(self) -> StagedBuildArtifacts | None:
@@ -197,6 +200,19 @@ class CodexOSHostServices:
                 request,
                 _FEATURE_HARNESS_FAILURE,
                 str(error).encode("utf-8")[:1024],
+            )
+        if self._observability is not None:
+            self._observability.record(
+                "feature_requested",
+                generation,
+                {
+                    "request_id": recorded.id,
+                    "request_generation": recorded.generation,
+                    "title": recorded.title,
+                },
+            )
+            self._observability.set_feature_requests_pending(
+                sum(item.status == "pending" for item in store.requests())
             )
         return self._feature_response(
             request,

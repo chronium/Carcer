@@ -17,6 +17,7 @@ from .codex_app_server import (
     default_auth_file,
     object_value,
     short_json,
+    token_usage_from_notification,
 )
 from .codex_review_worker import (
     DEFAULT_REVIEWER_MODEL,
@@ -111,6 +112,7 @@ class CodexGenerationSession:
         self._started = False
         self._healthy = True
         self._initial_turn_started = False
+        self._turn_number = 0
         self._last_agent_message: str | None = None
         self._active_reviewer: CodexReviewWorker | None = None
 
@@ -162,6 +164,13 @@ class CodexGenerationSession:
             self._thread_id = thread_id
             server.set_server_request_handler(self._handle_server_request)
             self._started = True
+            self._record(
+                "codex_session_started",
+                {
+                    "model": self._model,
+                    "reasoning_effort": self._reasoning_effort,
+                },
+            )
         except CodexAppServerError as error:
             server.close()
             self._healthy = False
@@ -215,9 +224,32 @@ class CodexGenerationSession:
                 self._healthy = False
                 raise CodexGenerationWorkerError(str(error)) from error
             turn_id = self._turn_id
+            self._turn_number += 1
+            turn_number = self._turn_number
+        started_at = time.monotonic()
+        self._record(
+            "codex_turn_started",
+            {
+                "model": self._model,
+                "reasoning_effort": self._reasoning_effort,
+                "turn_number": turn_number,
+            },
+        )
         try:
             status, final_message = self._wait_for_turn(thread_id, turn_id)
             self._last_turn_status = status
+            self._record(
+                f"codex_turn_{status}",
+                {
+                    "model": self._model,
+                    "reasoning_effort": self._reasoning_effort,
+                    "turn_number": turn_number,
+                    "duration_seconds": max(
+                        0.0, time.monotonic() - started_at
+                    ),
+                    "result": status,
+                },
+            )
             return CodexGenerationResult(
                 turn_status=status,
                 final_message=final_message,
@@ -226,10 +258,12 @@ class CodexGenerationSession:
             )
         except CodexAppServerError as error:
             self._healthy = False
+            self._record_turn_failure(turn_number, started_at)
             raise CodexGenerationWorkerError(str(error)) from error
         except CodexGenerationWorkerError:
             if self._last_turn_status != "failed":
                 self._healthy = False
+            self._record_turn_failure(turn_number, started_at)
             raise
         finally:
             with self._lock:
@@ -282,6 +316,15 @@ class CodexGenerationSession:
         self._healthy = False
         if server is not None:
             server.close()
+        if self._started:
+            self._record(
+                "codex_session_stopped",
+                {
+                    "model": self._model,
+                    "reasoning_effort": self._reasoning_effort,
+                },
+            )
+            self._started = False
 
     def _wait_for_turn(
         self,
@@ -295,6 +338,9 @@ class CodexGenerationSession:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
+            if method == "thread/tokenUsage/updated":
+                self._record_token_usage(params, thread_id, turn_id)
+                continue
             if method == "item/completed" and isinstance(params, dict):
                 item = params.get("item")
                 if isinstance(item, dict) and item.get("type") == "agentMessage":
@@ -327,6 +373,39 @@ class CodexGenerationSession:
                 )
             final_message = _final_agent_message(turn)
             return status, final_message or self._last_agent_message
+
+    def _record_turn_failure(self, turn_number: int, started_at: float) -> None:
+        self._record(
+            "codex_turn_failed",
+            {
+                "model": self._model,
+                "reasoning_effort": self._reasoning_effort,
+                "turn_number": turn_number,
+                "duration_seconds": max(0.0, time.monotonic() - started_at),
+                "result": "failed",
+            },
+        )
+
+    def _record_token_usage(
+        self,
+        params: object,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        usage = token_usage_from_notification(params, thread_id, turn_id)
+        observability = self._runtime.observability
+        if observability is not None:
+            observability.record_model_tokens(
+                model=self._model,
+                role="implementor",
+                input_tokens=usage[0],
+                output_tokens=usage[1],
+            )
+
+    def _record(self, event: str, data: Mapping[str, object]) -> None:
+        observability = self._runtime.observability
+        if observability is not None:
+            observability.record(event, self._generation_number, data)
 
     def _handle_server_request(
         self,
@@ -382,7 +461,47 @@ class CodexGenerationSession:
                 }
             if values.get("namespace") != "codexos":
                 raise ValueError("unsupported dynamic tool namespace")
-            result = self._dispatch_tool(tool, arguments)
+            metadata = _tool_metadata(tool, arguments)
+            started_at = time.monotonic()
+            self._record("tool_started", {"tool": tool, **metadata})
+            try:
+                result = self._dispatch_tool(tool, arguments)
+            except Exception:
+                self._record(
+                    "tool_completed",
+                    {
+                        "tool": tool,
+                        **metadata,
+                        "status": -1,
+                        "output_bytes": 0,
+                        "duration_seconds": max(
+                            0.0, time.monotonic() - started_at
+                        ),
+                    },
+                )
+                raise
+            completed = {
+                "tool": tool,
+                **metadata,
+                "status": result.status,
+                "output_bytes": len(result.output),
+                "duration_seconds": max(0.0, time.monotonic() - started_at),
+            }
+            if tool == "request_feature" and result.status == 0:
+                try:
+                    completed["request_id"] = int(result.output.decode("ascii"))
+                except (UnicodeDecodeError, ValueError):
+                    pass
+            self._record("tool_completed", completed)
+            if tool == "build":
+                self._record(
+                    "build_completed",
+                    {
+                        "status": result.status,
+                        "duration_seconds": completed["duration_seconds"],
+                        "diagnostics_bytes": len(result.output),
+                    },
+                )
             return {
                 "contentItems": [
                     {"type": "inputText", "text": _format_tool_result(result)}
@@ -870,6 +989,46 @@ def _unsigned_decimal(value: object, name: str) -> bytes:
     if type(value) is not int or value < 0:
         raise TypeError(f"{name} must be a non-negative integer")
     return str(value).encode("ascii")
+
+
+def _tool_metadata(
+    tool: str,
+    arguments: Mapping[str, object],
+) -> dict[str, object]:
+    metadata: dict[str, object] = {"input_bytes": 0}
+    path = arguments.get("path")
+    if isinstance(path, str):
+        metadata["path"] = path
+    for name in ("offset", "length", "size"):
+        value = arguments.get(name)
+        if type(value) is int and value >= 0:
+            metadata[name] = value
+
+    encoded: list[bytes] = []
+    for name in ("prefix", "path", "handoff", "title", "description"):
+        value = arguments.get(name)
+        if isinstance(value, str):
+            try:
+                encoded.append(value.encode("utf-8"))
+            except UnicodeEncodeError:
+                pass
+    for name in ("offset", "length", "size"):
+        value = arguments.get(name)
+        if type(value) is int and value >= 0:
+            encoded.append(str(value).encode("ascii"))
+    if tool == "write":
+        value = arguments.get("data")
+        encoding = arguments.get("encoding", "utf8")
+        if isinstance(value, str):
+            try:
+                if encoding == "base64":
+                    encoded.append(base64.b64decode(value, validate=True))
+                elif encoding == "utf8":
+                    encoded.append(value.encode("utf-8"))
+            except (UnicodeEncodeError, binascii.Error):
+                pass
+    metadata["input_bytes"] = sum(len(value) for value in encoded)
+    return metadata
 
 
 def _format_tool_result(result: ToolResult) -> str:

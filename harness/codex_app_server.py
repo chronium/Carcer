@@ -623,3 +623,28 @@ def short_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[
         :MAX_ERROR_OUTPUT
     ]
+
+
+def token_usage_from_notification(
+    params: object,
+    thread_id: str,
+    turn_id: str,
+) -> tuple[int, int]:
+    """Read exact per-response usage from the installed v2 notification."""
+    values = object_value(params, "thread/tokenUsage/updated notification")
+    if values.get("threadId") != thread_id or values.get("turnId") != turn_id:
+        raise CodexAppServerError(
+            "thread/tokenUsage/updated has the wrong thread or turn ID"
+        )
+    token_usage = object_value(values.get("tokenUsage"), "token usage")
+    last = object_value(token_usage.get("last"), "last token usage")
+    input_tokens = last.get("inputTokens")
+    output_tokens = last.get("outputTokens")
+    if (
+        type(input_tokens) is not int
+        or input_tokens < 0
+        or type(output_tokens) is not int
+        or output_tokens < 0
+    ):
+        raise CodexAppServerError("token usage has invalid counts")
+    return input_tokens, output_tokens

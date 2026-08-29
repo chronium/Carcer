@@ -30,6 +30,10 @@ from .host_service_protocol import (
     create_host_service_response,
     decode_host_service_request,
 )
+from .observability import (
+    ExperimentObservability,
+    ExperimentObservabilityError,
+)
 from .qmp import QmpClient, QmpError
 from .qemu import QemuProcessController
 from .serial import SerialConnection, SerialError
@@ -63,6 +67,8 @@ __all__ = [
     "FeatureRequestError",
     "FeatureRequestStore",
     "FramingError",
+    "ExperimentObservability",
+    "ExperimentObservabilityError",
     "HostServiceProtocolError",
     "HostServiceRequest",
     "QmpClient",

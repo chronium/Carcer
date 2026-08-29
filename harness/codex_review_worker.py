@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .codex_app_server import (
     default_auth_file,
     object_value,
     short_json,
+    token_usage_from_notification,
 )
 from .generation_runtime import CodexOSRun, RuntimeState
 from .tool_protocol import ToolResult
@@ -69,6 +71,16 @@ class CodexReviewWorker:
             raise CodexReviewWorkerError(
                 "Codex reviewer consultation was cancelled"
             )
+        started_at = time.monotonic()
+        outcome = "failed"
+        self._record(
+            runtime,
+            "review_started",
+            model,
+            reasoning_effort,
+            focus,
+            None,
+        )
         try:
             with CodexAppServer(
                 executable=self._codex_executable,
@@ -112,17 +124,30 @@ class CodexReviewWorker:
                     turn_value.append(turn_id)
                 finally:
                     turn_ready.set()
-                return self._wait_for_turn(
+                result = self._wait_for_turn(
                     server,
                     runtime,
                     thread_id,
                     turn_id,
+                    model,
                 )
+                outcome = "completed"
+                return result
         except CodexAppServerError as error:
             raise CodexReviewWorkerError(str(error)) from error
         finally:
             with self._lock:
                 self._server = None
+            if self._cancelled.is_set():
+                outcome = "cancelled"
+            self._record(
+                runtime,
+                f"review_{outcome}",
+                model,
+                reasoning_effort,
+                focus,
+                max(0.0, time.monotonic() - started_at),
+            )
 
     def _wait_for_turn(
         self,
@@ -130,12 +155,27 @@ class CodexReviewWorker:
         runtime: CodexOSRun,
         thread_id: str,
         turn_id: str,
+        model: str,
     ) -> str:
         last_agent_message: str | None = None
         while True:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
+            if method == "thread/tokenUsage/updated":
+                usage = token_usage_from_notification(
+                    params,
+                    thread_id,
+                    turn_id,
+                )
+                if runtime.observability is not None:
+                    runtime.observability.record_model_tokens(
+                        model=model,
+                        role="reviewer",
+                        input_tokens=usage[0],
+                        output_tokens=usage[1],
+                    )
+                continue
             if method == "item/completed" and isinstance(params, dict):
                 item = params.get("item")
                 if isinstance(item, dict) and item.get("type") == "agentMessage":
@@ -170,6 +210,30 @@ class CodexReviewWorker:
                     "Codex reviewer completed without a final response"
                 )
             return final_message
+
+    @staticmethod
+    def _record(
+        runtime: CodexOSRun,
+        event: str,
+        model: str,
+        reasoning_effort: str,
+        focus: str,
+        duration_seconds: float | None,
+    ) -> None:
+        if runtime.observability is None:
+            return
+        data: dict[str, object] = {
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "focus": focus,
+        }
+        if duration_seconds is not None:
+            data["duration_seconds"] = duration_seconds
+        runtime.observability.record(
+            event,
+            runtime.generation_number,
+            data,
+        )
 
     def _handle_ready_server_request(
         self,

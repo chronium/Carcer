@@ -20,6 +20,10 @@ from .codex_generation_worker import (
 )
 from .generation_git import GenerationGitRecorder, GenerationGitRecorderError
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
+from .observability import (
+    ExperimentObservability,
+    ExperimentObservabilityError,
+)
 
 
 class OperatorConsole:
@@ -46,6 +50,10 @@ class OperatorConsole:
         self._reviewer_codex_executable = reviewer_codex_executable
         self._reviewer_auth_file = reviewer_auth_file
         self._git_recorder = git_recorder
+        observed = getattr(runtime, "observability", None)
+        self._observability = (
+            observed if isinstance(observed, ExperimentObservability) else None
+        )
         self._interrupt_timeout_seconds = interrupt_timeout_seconds
         self._session: CodexGenerationSession | None = None
         self._turn_thread: threading.Thread | None = None
@@ -134,7 +142,12 @@ class OperatorConsole:
             if len(words) != 1:
                 self._print("Usage: agent")
             else:
-                self._start_agent()
+                try:
+                    self._start_agent()
+                except Exception:
+                    self._record_operator("agent", "failed")
+                    raise
+                self._record_operator("agent", "success")
         elif command == "git-record":
             if len(words) != 1:
                 self._print("Usage: git-record")
@@ -208,6 +221,14 @@ class OperatorConsole:
             for request in self._runtime.feature_requests()
         )
         self._print(f"Pending feature requests: {pending_requests}")
+        if self._observability is not None:
+            if self._observability.healthy:
+                self._print("Observability: healthy")
+            else:
+                self._print(
+                    "Observability: degraded - "
+                    + str(self._observability.degraded_reason)
+                )
         with self._agent_lock:
             session = self._session
             running = self._turn_thread is not None
@@ -324,25 +345,36 @@ class OperatorConsole:
             f"Abort generation {generation} permanently? [y/N] "
         ):
             self._print("Abort cancelled.")
+            self._record_operator("abort", "cancelled")
             return
-        self._terminate_agent_session(interrupt=True)
-        self._runtime.abort_generation()
-        self._clear_agent_generation()
-        self._reconcile_git()
-        self._print_gate()
+        try:
+            self._terminate_agent_session(interrupt=True)
+            self._runtime.abort_generation()
+            self._clear_agent_generation()
+            self._reconcile_git()
+            self._print_gate()
+        except Exception:
+            self._record_operator("abort", "failed")
+            raise
+        self._record_operator("abort", "success")
 
     def _continue_generation(self) -> None:
-        self._require_agent_stopped_at_gate()
-        if self._runtime.pending_generation_finish is None:
-            self._runtime.continue_generation()
-            return
-        generation = (self._runtime.generation_number or 0) + 1
-        self._print(
-            f"Starting generation {generation} from selected successor..."
-        )
-        self._runtime.continue_generation()
-        self._clear_agent_generation()
-        self._print_running_summary()
+        try:
+            self._require_agent_stopped_at_gate()
+            if self._runtime.pending_generation_finish is None:
+                self._runtime.continue_generation()
+            else:
+                generation = (self._runtime.generation_number or 0) + 1
+                self._print(
+                    f"Starting generation {generation} from selected successor..."
+                )
+                self._runtime.continue_generation()
+                self._clear_agent_generation()
+                self._print_running_summary()
+        except Exception:
+            self._record_operator("continue", "failed")
+            raise
+        self._record_operator("continue", "success")
 
     def _rollback(self, parent: int) -> None:
         self._require_agent_stopped_at_gate()
@@ -353,15 +385,27 @@ class OperatorConsole:
             "This preserves all later archives unchanged. [y/N] "
         ):
             self._print("Rollback cancelled.")
+            self._record_operator(
+                "rollback", "cancelled", {"parent_generation": parent}
+            )
             return
-        self._runtime.fork_from_generation(parent)
-        self._clear_agent_generation()
-        self._print(
-            f"Generation {self._runtime.generation_number} started from "
-            f"generation {parent}."
+        try:
+            self._runtime.fork_from_generation(parent)
+            self._clear_agent_generation()
+            self._print(
+                f"Generation {self._runtime.generation_number} started from "
+                f"generation {parent}."
+            )
+            self._print(f"State: {self._runtime.state.name}")
+            self._print(f"QEMU PID: {self._runtime.active_pid}")
+        except Exception:
+            self._record_operator(
+                "rollback", "failed", {"parent_generation": parent}
+            )
+            raise
+        self._record_operator(
+            "rollback", "success", {"parent_generation": parent}
         )
-        self._print(f"State: {self._runtime.state.name}")
-        self._print(f"QEMU PID: {self._runtime.active_pid}")
 
     def _quit(self) -> bool:
         if self._runtime.state in {RuntimeState.RUNNING, RuntimeState.PAUSED}:
@@ -371,9 +415,15 @@ class OperatorConsole:
                 "[y/N] "
             ):
                 self._print("Quit cancelled.")
+                self._record_operator("quit", "cancelled")
                 return False
-        self._terminate_agent_session(interrupt=True)
-        self._runtime.stop()
+        try:
+            self._terminate_agent_session(interrupt=True)
+            self._runtime.stop()
+        except Exception:
+            self._record_operator("quit", "failed")
+            raise
+        self._record_operator("quit", "success")
         return True
 
     def _start_agent(self, prompt: str | None = None) -> None:
@@ -469,37 +519,48 @@ class OperatorConsole:
             self._print_indented(result.final_message)
 
     def _pause(self) -> None:
-        deadline = time.monotonic() + self._interrupt_timeout_seconds
-        with self._agent_lock:
-            session = self._session
-            turn = self._turn_thread
-        if turn is not None:
-            if session is None:
-                raise RuntimeError("Codex turn has no generation session")
-            session.interrupt_turn(max(0.0, deadline - time.monotonic()))
-            turn.join(max(0.0, deadline - time.monotonic()))
-            if turn.is_alive():
-                raise CodexGenerationWorkerError(
-                    "Codex turn cleanup did not finish before timeout"
-                )
-            self._resume_agent_after_pause = True
-        else:
-            self._resume_agent_after_pause = False
-        self._runtime.pause()
-        self._print(f"Generation {self._runtime.generation_number} paused.")
+        try:
+            deadline = time.monotonic() + self._interrupt_timeout_seconds
+            with self._agent_lock:
+                session = self._session
+                turn = self._turn_thread
+            if turn is not None:
+                if session is None:
+                    raise RuntimeError("Codex turn has no generation session")
+                session.interrupt_turn(max(0.0, deadline - time.monotonic()))
+                turn.join(max(0.0, deadline - time.monotonic()))
+                if turn.is_alive():
+                    raise CodexGenerationWorkerError(
+                        "Codex turn cleanup did not finish before timeout"
+                    )
+                self._resume_agent_after_pause = True
+            else:
+                self._resume_agent_after_pause = False
+            self._runtime.pause()
+            self._print(f"Generation {self._runtime.generation_number} paused.")
+        except Exception:
+            self._record_operator("pause", "failed")
+            raise
+        self._record_operator("pause", "success")
 
     def _resume(self) -> None:
-        restart_agent = self._resume_agent_after_pause
-        self._runtime.resume()
-        self._resume_agent_after_pause = False
-        generation = self._runtime.generation_number
-        if restart_agent:
-            self._start_agent(RESUME_PROMPT)
-            self._print(
-                f"Generation {generation} resumed; Codex continued in the same session."
-            )
-        else:
-            self._print(f"Generation {generation} resumed.")
+        try:
+            restart_agent = self._resume_agent_after_pause
+            self._runtime.resume()
+            self._resume_agent_after_pause = False
+            generation = self._runtime.generation_number
+            if restart_agent:
+                self._start_agent(RESUME_PROMPT)
+                self._print(
+                    f"Generation {generation} resumed; "
+                    "Codex continued in the same session."
+                )
+            else:
+                self._print(f"Generation {generation} resumed.")
+        except Exception:
+            self._record_operator("resume", "failed")
+            raise
+        self._record_operator("resume", "success")
 
     def _terminate_agent_session(self, *, interrupt: bool) -> None:
         with self._agent_lock:
@@ -547,11 +608,42 @@ class OperatorConsole:
         if recorder is None:
             return True
         try:
-            recorder.reconcile()
+            records = recorder.reconcile()
         except GenerationGitRecorderError as error:
+            if self._observability is not None:
+                self._observability.record(
+                    "git_reconciliation_failed",
+                    self._runtime.generation_number,
+                    {"error": str(error)[:1024]},
+                )
             self._print(f"Git provenance error: {error}")
             return False
+        if self._observability is not None:
+            for record in records:
+                self._observability.record(
+                    "git_generation_recorded",
+                    record.generation,
+                    {
+                        "generation": record.generation,
+                        "tag": record.tag,
+                        "commit": record.commit,
+                        "already_recorded": record.already_recorded,
+                    },
+                )
         return True
+
+    def _record_operator(
+        self,
+        action: str,
+        result: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        if self._observability is not None:
+            self._observability.record(
+                f"operator_{action}",
+                self._runtime.generation_number,
+                {"result": result, **(extra or {})},
+            )
 
     def _print_gate(self) -> None:
         generation = self._runtime.generation_number
@@ -669,6 +761,7 @@ def main(
     parser.add_argument("--initial-iso", required=True, type=Path)
     parser.add_argument("--git-repository", type=Path)
     parser.add_argument("--git-base-ref")
+    parser.add_argument("--otlp-endpoint")
     arguments = parser.parse_args(argv)
     if (arguments.git_repository is None) != (arguments.git_base_ref is None):
         parser.error("--git-repository and --git-base-ref must be supplied together")
@@ -676,8 +769,16 @@ def main(
 
     runtime: CodexOSRun | None = None
     recorder: GenerationGitRecorder | None = None
+    observability: ExperimentObservability | None = None
     try:
-        runtime = CodexOSRun(arguments.run_directory)
+        observability = ExperimentObservability(
+            arguments.run_directory,
+            otlp_endpoint=arguments.otlp_endpoint,
+        )
+        runtime = CodexOSRun(
+            arguments.run_directory,
+            observability=observability,
+        )
         if arguments.git_repository is not None:
             recorder = GenerationGitRecorder(
                 arguments.git_repository,
@@ -685,18 +786,23 @@ def main(
                 arguments.git_base_ref,
             )
         runtime.start(arguments.initial_iso)
-    except (OSError, RuntimeError) as error:
+    except (ExperimentObservabilityError, OSError, RuntimeError) as error:
         if runtime is not None:
             runtime.stop()
+        if observability is not None:
+            observability.close()
         print(f"Error: failed to start CodexOS: {error}", file=output)
         return 1
 
-    OperatorConsole(
-        runtime,
-        input_stream,
-        output,
-        git_recorder=recorder,
-    ).run()
+    try:
+        OperatorConsole(
+            runtime,
+            input_stream,
+            output,
+            git_recorder=recorder,
+        ).run()
+    finally:
+        observability.close()
     return 0
 
 
