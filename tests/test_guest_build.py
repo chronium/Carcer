@@ -13,7 +13,15 @@ from harness import (
     ToolClient,
 )
 
-_TOOLS = ["list", "read", "write", "truncate", "remove", "build"]
+_TOOLS = [
+    "list",
+    "read",
+    "write",
+    "truncate",
+    "remove",
+    "build",
+    "finish_generation",
+]
 _READY = b"CODEXOS-SEED-READY\n"
 
 
