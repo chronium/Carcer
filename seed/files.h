@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define FILE_COUNT 3u
+#define FILE_COUNT 11u
 
 struct file {
     const uint8_t *path;

@@ -23,7 +23,9 @@ CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding \
 LDFLAGS := -static --build-id=none -z max-page-size=0x1000
 REQUIRED_TOOLS := $(CROSS_CC) $(CROSS_LD) $(HOST_CC) xorriso install mkdir rm
 REQUIRED_LIMINE_FILES := limine.c limine-bios.sys limine-bios-cd.bin
-GUEST_SOURCE_INPUTS := seed/kernel.c seed/limine.conf seed/linker.ld
+GUEST_SOURCE_INPUTS := seed/files.c seed/files.h seed/kernel.c \
+	seed/limine.conf seed/linker.ld seed/protocol.c seed/protocol.h \
+	seed/serial.c seed/serial.h seed/tools.c seed/tools.h
 
 .PHONY: seed check-tools clean
 
