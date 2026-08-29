@@ -1,5 +1,6 @@
 """External CodexOS harness."""
 
+from .build_host_service import BuildHostService, StagedBuildArtifacts
 from .framing import Frame, FramingError, encode_frame, read_frame
 from .host_service_protocol import (
     HostServiceProtocolError,
@@ -20,6 +21,7 @@ from .tool_protocol import ToolClient, ToolProtocolError, ToolResult
 from .trusted_build import BuildResult, BuildStatus, build_source_snapshot
 
 __all__ = [
+    "BuildHostService",
     "BuildResult",
     "BuildStatus",
     "Frame",
@@ -33,6 +35,7 @@ __all__ = [
     "SerialError",
     "SnapshotFile",
     "SourceSnapshotError",
+    "StagedBuildArtifacts",
     "ToolClient",
     "ToolProtocolError",
     "ToolResult",

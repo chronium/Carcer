@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from harness import (
+    BuildHostService,
     Frame,
     SerialConnection,
     ToolClient,
@@ -89,6 +90,43 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                 offset += argument_length
             self.assertEqual(decoded_arguments, arguments)
             self.assertEqual(offset, len(request.payload))
+
+    def test_handles_host_service_while_waiting_for_tool_response(self) -> None:
+        host_service_name = b"unknown"
+        host_service_payload = (
+            struct.pack("<H", len(host_service_name))
+            + host_service_name
+            + struct.pack("<H", 0)
+        )
+        tool_output = b"original tool result"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build_service = BuildHostService(Path(temporary) / "staging")
+            with connected_serial_peer() as (serial, peer):
+                peer.sendall(
+                    encode_frame(Frame(0x0003, 1, host_service_payload))
+                    + encode_frame(
+                        Frame(0x8002, 1, struct.pack("<I", 7) + tool_output)
+                    )
+                )
+
+                result = ToolClient(serial, build_service).invoke_tool("future", [])
+
+                tool_request = receive_peer_frame(peer)
+                self.assertEqual(
+                    (tool_request.message_type, tool_request.request_id),
+                    (0x0002, 1),
+                )
+                host_response = receive_peer_frame(peer)
+                self.assertEqual(
+                    (host_response.message_type, host_response.request_id),
+                    (0x8003, 1),
+                )
+                self.assertNotEqual(
+                    struct.unpack_from("<I", host_response.payload)[0],
+                    0,
+                )
+                self.assertEqual(result, ToolResult(7, tool_output))
 
     def test_rejects_mismatched_request_id_and_message_type(self) -> None:
         with connected_serial_peer() as (serial, peer):
