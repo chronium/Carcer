@@ -95,6 +95,11 @@ class CodexOSRun:
         return self._previous_handoff
 
     @property
+    def current_transition(self) -> str | None:
+        """How the currently running generation entered the lineage."""
+        return self._current_transition
+
+    @property
     def pending_generation_finish(self) -> PendingGenerationFinish | None:
         return self._pending_finish
 
