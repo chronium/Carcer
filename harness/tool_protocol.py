@@ -6,8 +6,8 @@ import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from .build_host_service import BuildHostService
 from .framing import MAX_PAYLOAD_SIZE, Frame, encode_frame, read_frame
+from .generation_finish_host_service import CodexOSHostServices
 from .host_service_protocol import (
     HOST_SERVICE_REQUEST,
     decode_host_service_request,
@@ -44,10 +44,10 @@ class ToolClient:
     def __init__(
         self,
         connection: SerialConnection,
-        build_service: BuildHostService | None = None,
+        host_services: CodexOSHostServices | None = None,
     ) -> None:
         self._connection = connection
-        self._build_service = build_service
+        self._host_services = host_services
         self._next_request_id = 1
 
     def list_tools(self) -> list[str]:
@@ -93,12 +93,12 @@ class ToolClient:
         while True:
             response = read_frame(self._connection, _RESPONSE_TIMEOUT_SECONDS)
             if response.message_type == HOST_SERVICE_REQUEST:
-                if self._build_service is None:
+                if self._host_services is None:
                     raise ToolProtocolError(
-                        "received a host-service request without a build service"
+                        "received a host-service request without a host-service handler"
                     )
                 host_request = decode_host_service_request(response)
-                host_response = self._build_service.handle_request(host_request)
+                host_response = self._host_services.handle_request(host_request)
                 self._connection.write(encode_frame(host_response))
                 continue
             break
