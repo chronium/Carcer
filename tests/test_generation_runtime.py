@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import struct
@@ -32,15 +33,20 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
         handoff = "Generation zero selected this exact successor."
 
         with tempfile.TemporaryDirectory() as temporary:
-            run_directory = Path(temporary) / "run"
+            temporary_path = Path(temporary)
+            run_directory = temporary_path / "run"
+            initial_iso = temporary_path / "initial.iso"
+            shutil.copyfile(image, initial_iso)
+            initial_iso_bytes = initial_iso.read_bytes()
             runtime = CodexOSRun(run_directory, qemu)
             try:
-                runtime.start(image)
+                runtime.start(initial_iso)
                 self.assertIs(runtime.state, RuntimeState.RUNNING)
                 self.assertEqual(runtime.generation_number, 0)
                 generation_zero_pid = runtime.active_pid
                 self.assertIsNotNone(generation_zero_pid)
                 self.assertEqual(runtime.list_tools(), _TOOLS)
+                initial_iso.unlink()
 
                 write = runtime.invoke_tool(
                     "write",
@@ -105,9 +111,23 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertTrue((archive / "qemu.stdout").is_file())
                 self.assertTrue((archive / "qemu.stderr").is_file())
                 self.assertEqual(
+                    (archive / "boot" / "codexos.iso").read_bytes(),
+                    initial_iso_bytes,
+                )
+                self.assertEqual(
+                    json.loads((archive / "metadata.json").read_text()),
+                    {
+                        "generation": 0,
+                        "parent_generation": None,
+                        "transition": "initial",
+                    },
+                )
+                self.assertEqual(
                     {path.name for path in archive.iterdir()},
                     {
+                        "boot",
                         "handoff.txt",
+                        "metadata.json",
                         "source.snapshot",
                         "source",
                         "successor",
@@ -117,6 +137,8 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 )
 
                 archived_snapshot = (archive / "source.snapshot").read_bytes()
+                archived_boot = (archive / "boot" / "codexos.iso").read_bytes()
+                successor_boot = pending.iso.read_bytes()
                 time.sleep(0.1)
                 self.assertIs(
                     runtime.state,
@@ -126,6 +148,10 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     (archive / "source.snapshot").read_bytes(),
                     archived_snapshot,
+                )
+                self.assertEqual(
+                    (archive / "boot" / "codexos.iso").read_bytes(),
+                    archived_boot,
                 )
 
                 runtime.continue_generation()
@@ -146,16 +172,52 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertEqual(read.status, 0)
                 self.assertEqual(read.output, expected_kernel)
 
-                runtime.stop()
-                self.assertIs(runtime.state, RuntimeState.STOPPED)
+                build = runtime.invoke_tool("build", [])
+                self.assertEqual(build.status, 0, build.output.decode())
+                generation_one_handoff = "Generation one selected its successor."
+                finish = runtime.invoke_tool(
+                    "finish_generation",
+                    [generation_one_handoff.encode("utf-8")],
+                )
+                self.assertEqual(finish.status, 0)
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
                 self.assertIsNone(runtime.active_pid)
                 with self.assertRaises(ProcessLookupError):
                     os.kill(generation_one_pid, 0)
+
+                generation_one_archive = run_directory / "generation-0001"
+                self.assertEqual(
+                    (
+                        generation_one_archive / "boot" / "codexos.iso"
+                    ).read_bytes(),
+                    successor_boot,
+                )
+                self.assertEqual(
+                    json.loads(
+                        (generation_one_archive / "metadata.json").read_text()
+                    ),
+                    {
+                        "generation": 1,
+                        "parent_generation": 0,
+                        "transition": "successor",
+                    },
+                )
+                self.assertEqual(
+                    (archive / "boot" / "codexos.iso").read_bytes(),
+                    initial_iso_bytes,
+                )
+
+                runtime.stop()
+                self.assertIs(runtime.state, RuntimeState.STOPPED)
+                self.assertIsNone(runtime.active_pid)
                 runtime.stop()
                 self.assertTrue(archive.is_dir())
                 self.assertEqual(
                     {path.name for path in run_directory.iterdir()},
-                    {"generation-0000"},
+                    {"generation-0000", "generation-0001"},
                 )
             finally:
                 runtime.stop()

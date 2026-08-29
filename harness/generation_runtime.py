@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import time
@@ -44,6 +45,8 @@ class CodexOSRun:
         self._state = RuntimeState.STOPPED
         self._generation_number: int | None = None
         self._current_boot_image: Path | None = None
+        self._current_parent_generation: int | None = None
+        self._current_transition: str | None = None
         self._previous_handoff: str | None = None
         self._pending_finish: PendingGenerationFinish | None = None
 
@@ -87,9 +90,8 @@ class CodexOSRun:
         image = Path(initial_iso).resolve()
         if not image.is_file():
             raise FileNotFoundError(image)
-        self._boot_generation(0, image)
+        self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
-        self._current_boot_image = image
         self._state = RuntimeState.RUNNING
 
     def list_tools(self) -> list[str]:
@@ -116,9 +118,13 @@ class CodexOSRun:
             raise RuntimeError("CodexOS run has no selected successor")
 
         next_generation = self._generation_number + 1
-        self._boot_generation(next_generation, pending.iso)
+        self._boot_generation(
+            next_generation,
+            pending.iso,
+            self._generation_number,
+            "successor",
+        )
         self._generation_number = next_generation
-        self._current_boot_image = pending.iso
         self._pending_finish = None
         self._state = RuntimeState.RUNNING
 
@@ -131,6 +137,8 @@ class CodexOSRun:
         self._pending_finish = None
         self._previous_handoff = None
         self._current_boot_image = None
+        self._current_parent_generation = None
+        self._current_transition = None
         self._state = RuntimeState.STOPPED
 
     def _require_running_client(self) -> ToolClient:
@@ -138,12 +146,19 @@ class CodexOSRun:
             raise RuntimeError("CodexOS generation is not running")
         return self._tool_client
 
-    def _boot_generation(self, generation_number: int, image: Path) -> None:
+    def _boot_generation(
+        self,
+        generation_number: int,
+        image: Path,
+        parent_generation: int | None,
+        transition: str,
+    ) -> None:
         workspace = tempfile.TemporaryDirectory(
             prefix=f".generation-{generation_number:04d}-",
             dir=self._run_directory,
         )
         workspace_path = Path(workspace.name)
+        boot_image = workspace_path / "boot.iso"
         stdout_path = workspace_path / "qemu.stdout"
         stderr_path = workspace_path / "qemu.stderr"
         qmp_path = workspace_path / "qmp.sock"
@@ -163,8 +178,9 @@ class CodexOSRun:
         self._tool_client = None
 
         try:
+            shutil.copyfile(image, boot_image)
             controller.start(
-                _qemu_arguments(image),
+                _qemu_arguments(boot_image),
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 qmp_socket_path=qmp_path,
@@ -174,6 +190,9 @@ class CodexOSRun:
             serial.connect()
             _wait_for_ready(serial)
             self._tool_client = ToolClient(serial, host_services)
+            self._current_boot_image = boot_image
+            self._current_parent_generation = parent_generation
+            self._current_transition = transition
         except BaseException:
             self._shutdown_qemu()
             self._cleanup_workspace()
@@ -231,6 +250,10 @@ class CodexOSRun:
     ) -> tuple[Path, Path]:
         if self._generation_number is None:
             raise RuntimeError("CodexOS generation number is unavailable")
+        if self._current_boot_image is None:
+            raise RuntimeError("CodexOS boot image is unavailable")
+        if self._current_transition is None:
+            raise RuntimeError("CodexOS generation transition is unavailable")
         archive_final = self._run_directory / (
             f"generation-{self._generation_number:04d}"
         )
@@ -244,6 +267,19 @@ class CodexOSRun:
         )
 
         try:
+            boot = archive_staging / "boot"
+            boot.mkdir()
+            shutil.copyfile(self._current_boot_image, boot / "codexos.iso")
+            metadata = {
+                "generation": self._generation_number,
+                "parent_generation": self._current_parent_generation,
+                "transition": self._current_transition,
+            }
+            (archive_staging / "metadata.json").write_bytes(
+                (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                )
+            )
             (archive_staging / "handoff.txt").write_bytes(
                 pending.handoff_message.encode("utf-8")
             )
@@ -299,6 +335,9 @@ class CodexOSRun:
             workspace.cleanup()
         self._stdout_path = None
         self._stderr_path = None
+        self._current_boot_image = None
+        self._current_parent_generation = None
+        self._current_transition = None
 
 
 def _materialize_snapshot(snapshot: bytes, destination: Path) -> None:
