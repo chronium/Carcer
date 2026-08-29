@@ -81,7 +81,19 @@ class SeedBootIntegrationTest(unittest.TestCase):
                     client = ToolClient(serial)
                     self.assertEqual(client.list_tools(), ["list", "read"])
 
-                    paths = ["seed/kernel.c", "seed/limine.conf", "seed/linker.ld"]
+                    paths = [
+                        "seed/files.c",
+                        "seed/files.h",
+                        "seed/kernel.c",
+                        "seed/limine.conf",
+                        "seed/linker.ld",
+                        "seed/protocol.c",
+                        "seed/protocol.h",
+                        "seed/serial.c",
+                        "seed/serial.h",
+                        "seed/tools.c",
+                        "seed/tools.h",
+                    ]
                     listed = client.invoke_tool("list", [])
                     self.assertEqual(listed.status, 0)
                     self.assertEqual(
@@ -124,10 +136,22 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         kernel_source[offset : offset + length],
                     )
 
-                    oversized = struct.pack(
-                        "<4sHHII", b"CXOS", 1, 0x0001, 6, 16 * 1024 * 1024 + 1
+                    serial_source = (repository / "seed" / "serial.c").read_bytes()
+                    read_serial = client.invoke_tool(
+                        "read",
+                        [
+                            b"seed/serial.c",
+                            b"0",
+                            str(len(serial_source)).encode("ascii"),
+                        ],
                     )
-                    valid_request = struct.pack("<4sHHII", b"CXOS", 1, 0x0001, 7, 0)
+                    self.assertEqual(read_serial.status, 0)
+                    self.assertEqual(read_serial.output, serial_source)
+
+                    oversized = struct.pack(
+                        "<4sHHII", b"CXOS", 1, 0x0001, 7, 16 * 1024 * 1024 + 1
+                    )
+                    valid_request = struct.pack("<4sHHII", b"CXOS", 1, 0x0001, 8, 0)
                     serial.write(oversized + valid_request)
                     with self.assertRaises(TimeoutError):
                         serial.read(1, timeout_seconds=0.25)

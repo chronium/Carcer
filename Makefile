@@ -3,10 +3,17 @@
 CROSS_CC := x86_64-elf-gcc
 CROSS_LD := x86_64-elf-ld
 HOST_CC := cc
+PYTHON := python3
 
 BUILD_DIR := build/seed
 ISO_ROOT := $(BUILD_DIR)/iso-root
-OBJECT := $(BUILD_DIR)/kernel.o
+SEED_SOURCES := seed/kernel.c seed/serial.c seed/protocol.c \
+	seed/files.c seed/tools.c
+SEED_HEADERS := seed/serial.h seed/protocol.h seed/files.h seed/tools.h
+SOURCE_TABLE_C := $(BUILD_DIR)/source-files.c
+SOURCE_TABLE_OBJECT := $(BUILD_DIR)/source-files.o
+OBJECTS := $(patsubst seed/%.c,$(BUILD_DIR)/%.o,$(SEED_SOURCES)) \
+	$(SOURCE_TABLE_OBJECT)
 SOURCE_IMAGE := $(BUILD_DIR)/source-image.o
 KERNEL := $(BUILD_DIR)/kernel.elf
 LIMINE_TOOL := $(BUILD_DIR)/limine
@@ -18,9 +25,12 @@ CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding \
 	-m64 -march=x86-64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
 	-mcmodel=kernel
 LDFLAGS := -static --build-id=none -z max-page-size=0x1000
-REQUIRED_TOOLS := $(CROSS_CC) $(CROSS_LD) $(HOST_CC) xorriso install mkdir rm
+REQUIRED_TOOLS := $(CROSS_CC) $(CROSS_LD) $(HOST_CC) $(PYTHON) \
+	xorriso install mkdir rm
 REQUIRED_LIMINE_FILES := limine.c limine-bios.sys limine-bios-cd.bin
-GUEST_SOURCE_INPUTS := seed/kernel.c seed/limine.conf seed/linker.ld
+GUEST_SOURCE_INPUTS := seed/files.c seed/files.h seed/kernel.c \
+	seed/limine.conf seed/linker.ld seed/protocol.c seed/protocol.h \
+	seed/serial.c seed/serial.h seed/tools.c seed/tools.h
 
 .PHONY: seed check-tools clean
 
@@ -47,14 +57,21 @@ check-tools:
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJECT): seed/kernel.c Makefile | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: seed/%.c $(SEED_HEADERS) Makefile | $(BUILD_DIR)
 	$(CROSS_CC) $(CFLAGS) -c $< -o $@
 
-$(SOURCE_IMAGE): $(GUEST_SOURCE_INPUTS) | $(BUILD_DIR)
+$(SOURCE_TABLE_C): scripts/generate_seed_source_table.py \
+	Makefile $(GUEST_SOURCE_INPUTS) | $(BUILD_DIR)
+	$(PYTHON) $< $@ $(GUEST_SOURCE_INPUTS)
+
+$(SOURCE_TABLE_OBJECT): $(SOURCE_TABLE_C) seed/files.h Makefile
+	$(CROSS_CC) $(CFLAGS) -Iseed -c $< -o $@
+
+$(SOURCE_IMAGE): Makefile $(GUEST_SOURCE_INPUTS) | $(BUILD_DIR)
 	$(CROSS_LD) -r -b binary $(GUEST_SOURCE_INPUTS) -o $@
 
-$(KERNEL): $(OBJECT) $(SOURCE_IMAGE) seed/linker.ld
-	$(CROSS_LD) $(LDFLAGS) -T seed/linker.ld $(OBJECT) $(SOURCE_IMAGE) -o $@
+$(KERNEL): $(OBJECTS) $(SOURCE_IMAGE) seed/linker.ld
+	$(CROSS_LD) $(LDFLAGS) -T seed/linker.ld $(OBJECTS) $(SOURCE_IMAGE) -o $@
 
 $(LIMINE_TOOL): $(LIMINE_DIR)/limine.c | $(BUILD_DIR)
 	$(HOST_CC) -std=c99 -O2 $< -o $@
