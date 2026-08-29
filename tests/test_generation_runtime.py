@@ -7,8 +7,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
-from harness import CodexOSRun, RuntimeState, SourceSnapshotError
+from harness import CodexOSRun, QmpError, RuntimeState, SourceSnapshotError
 from harness.generation_runtime import _materialize_snapshot
 
 _TOOLS = [
@@ -623,6 +624,30 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
 
 
 class GenerationRuntimeStateTests(unittest.TestCase):
+    def test_qmp_failures_leave_runtime_conservatively_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(Path(temporary) / "run")
+            qmp = Mock()
+            qmp.query_status.side_effect = QmpError("verification failed")
+            runtime._state = RuntimeState.RUNNING
+            runtime._qmp = qmp
+
+            with self.assertRaisesRegex(QmpError, "verification failed"):
+                runtime.pause()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                runtime.list_tools()
+
+            qmp.cont.side_effect = QmpError("continue failed")
+            with self.assertRaisesRegex(QmpError, "continue failed"):
+                runtime.resume()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+
+            qmp.cont.side_effect = None
+            with self.assertRaisesRegex(QmpError, "verification failed"):
+                runtime.resume()
+            self.assertIs(runtime.state, RuntimeState.PAUSED)
+
     def test_rejects_continuation_from_stopped_and_stop_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = CodexOSRun(Path(temporary) / "run")

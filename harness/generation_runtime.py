@@ -119,10 +119,10 @@ class CodexOSRun:
             raise RuntimeError("CodexOS QMP connection is unavailable")
 
         self._qmp.stop()
+        self._state = RuntimeState.PAUSED
         status = self._qmp.query_status()
         if status != "paused":
             raise QmpError(f"QEMU did not pause; status is {status!r}")
-        self._state = RuntimeState.PAUSED
 
     def resume(self) -> None:
         if self._state is not RuntimeState.PAUSED:
