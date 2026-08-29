@@ -15,6 +15,7 @@ from harness import (
     ArchivedGeneration,
     CodexGenerationWorkerError,
     CodexOSRun,
+    FeatureRequest,
     GenerationGitRecorder,
     GenerationGitRecorderError,
     PendingGenerationFinish,
@@ -30,6 +31,86 @@ from tests.test_codex_generation_worker import (
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_feature_request_commands_confirm_and_persist_gate_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(temporary)
+            first = runtime._feature_request_store.create(
+                3,
+                "Capability λ",
+                "First line.\nSecond line.",
+            )
+            second = runtime._feature_request_store.create(
+                4,
+                "Another capability",
+                "",
+            )
+            third = runtime._feature_request_store.create(
+                4,
+                "Still pending",
+                "May cross a generation gate.",
+            )
+            runtime._state = RuntimeState.AWAITING_NEXT_GENERATION
+            runtime._generation_number = 4
+            output = io.StringIO()
+            console = OperatorConsole(
+                runtime,
+                io.StringIO(
+                    "status\n"
+                    "features\n"
+                    "feature 1\n"
+                    "feature-approve 1\nn\n"
+                    "feature-approve 1\ny\n"
+                    "feature-deny 2\nY\n"
+                    "quit\n"
+                ),
+                output,
+            )
+            console.run()
+
+            self.assertEqual(runtime.feature_request(first.id).status, "approved")
+            self.assertEqual(runtime.feature_request(second.id).status, "denied")
+            self.assertEqual(runtime.feature_request(third.id).status, "pending")
+            text = output.getvalue()
+            self.assertIn("ID   GEN   STATUS     TITLE", text)
+            self.assertIn("Feature request: #1", text)
+            self.assertIn("  Second line.", text)
+            self.assertIn("Feature approval cancelled.", text)
+            self.assertIn("Feature request #1 approved.", text)
+            self.assertIn("Feature request #2 denied.", text)
+            self.assertIn("Pending feature requests: 3", text)
+            self.assertIn("#3  Still pending", text)
+
+    def test_pending_feature_request_does_not_block_explicit_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run",
+                RuntimeState.AWAITING_NEXT_GENERATION,
+            )
+            runtime.feature_requests.return_value = (
+                FeatureRequest(1, 0, "Pending", "Description", "pending"),
+            )
+            runtime.pending_generation_finish = PendingGenerationFinish(
+                "handoff",
+                b"snapshot",
+                Path(temporary) / "kernel.elf",
+                Path(temporary) / "codexos.iso",
+            )
+            output = io.StringIO()
+            console = OperatorConsole(runtime, io.StringIO(), output)
+
+            console._continue_generation()
+
+            runtime.continue_generation.assert_called_once_with()
+
+    def test_feature_decision_outside_gate_remains_runtime_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(temporary)
+            request = runtime._feature_request_store.create(0, "Title", "Description")
+            console = OperatorConsole(runtime, io.StringIO("y\n"), io.StringIO())
+            with self.assertRaisesRegex(RuntimeError, "only while awaiting"):
+                console._approve_feature(request.id)
+            self.assertEqual(runtime.feature_request(request.id).status, "pending")
+
     def test_git_reconciliation_startup_retry_and_failure_is_bookkeeping(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = _mock_runtime(
@@ -1165,6 +1246,7 @@ class _ObservedInput:
 
 def _mock_runtime(run_directory: Path, state: RuntimeState) -> Mock:
     runtime = Mock(spec=CodexOSRun)
+    runtime.feature_requests.return_value = ()
     runtime.run_directory = run_directory
     runtime.state = state
     runtime.generation_number = 0

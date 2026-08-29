@@ -113,6 +113,23 @@ class OperatorConsole:
                 self._print_inspection(
                     self._runtime.inspect_generation(generation)
                 )
+        elif command == "features":
+            if len(words) != 1:
+                self._print("Usage: features")
+            else:
+                self._print_features()
+        elif command == "feature":
+            request_id = self._generation_argument(words, "feature")
+            if request_id is not None:
+                self._print_feature(request_id)
+        elif command == "feature-approve":
+            request_id = self._generation_argument(words, "feature-approve")
+            if request_id is not None:
+                self._approve_feature(request_id)
+        elif command == "feature-deny":
+            request_id = self._generation_argument(words, "feature-deny")
+            if request_id is not None:
+                self._deny_feature(request_id)
         elif command == "agent":
             if len(words) != 1:
                 self._print("Usage: agent")
@@ -161,6 +178,10 @@ class OperatorConsole:
         self._print("status      show current runtime state")
         self._print("history     show archived generation lineage")
         self._print("inspect N   show archived generation N")
+        self._print("features    list external feature requests")
+        self._print("feature N   show external feature request N")
+        self._print("feature-approve N  approve a pending request at the gate")
+        self._print("feature-deny N     deny a pending request at the gate")
         self._print("agent       start or continue the generation's Codex session")
         self._print("git-record  reconcile local generation Git provenance")
         self._print("pause       pause the running generation")
@@ -182,6 +203,11 @@ class OperatorConsole:
             "Selected successor: "
             + ("yes" if self._runtime.pending_generation_finish else "no")
         )
+        pending_requests = sum(
+            request.status == "pending"
+            for request in self._runtime.feature_requests()
+        )
+        self._print(f"Pending feature requests: {pending_requests}")
         with self._agent_lock:
             session = self._session
             running = self._turn_thread is not None
@@ -248,6 +274,46 @@ class OperatorConsole:
             self._print("  boot ISO")
             self._print("  QEMU stdout")
             self._print("  QEMU stderr")
+
+    def _print_features(self) -> None:
+        requests = self._runtime.feature_requests()
+        if not requests:
+            self._print("No feature requests.")
+            return
+        self._print("ID   GEN   STATUS     TITLE")
+        for request in requests:
+            self._print(
+                f"{request.id:<4} {request.generation:<5} "
+                f"{request.status:<10} {request.title}"
+            )
+
+    def _print_feature(self, request_id: int) -> None:
+        request = self._runtime.feature_request(request_id)
+        self._print(f"Feature request: #{request.id}")
+        self._print(f"Generation: {request.generation}")
+        self._print(f"Status: {request.status}")
+        self._print(f"Title: {request.title}")
+        self._print()
+        self._print("Description:")
+        self._print_indented(request.description)
+
+    def _approve_feature(self, request_id: int) -> None:
+        if not self._confirm(
+            f"Mark feature request #{request_id} approved?\n"
+            "Only do this after the trusted external capability has been "
+            "provisioned. [y/N] "
+        ):
+            self._print("Feature approval cancelled.")
+            return
+        self._runtime.approve_feature_request(request_id)
+        self._print(f"Feature request #{request_id} approved.")
+
+    def _deny_feature(self, request_id: int) -> None:
+        if not self._confirm(f"Deny feature request #{request_id}? [y/N] "):
+            self._print("Feature denial cancelled.")
+            return
+        self._runtime.deny_feature_request(request_id)
+        self._print(f"Feature request #{request_id} denied.")
 
     def _abort(self) -> None:
         generation = self._runtime.generation_number
@@ -507,6 +573,22 @@ class OperatorConsole:
         self._print("  rollback N")
         self._print(f"  inspect {generation}")
         self._print("  history")
+        pending_requests = [
+            request for request in self._runtime.feature_requests()
+            if request.status == "pending"
+        ]
+        if pending_requests:
+            self._print()
+            self._print("Pending feature requests:")
+            self._print()
+            for request in pending_requests:
+                self._print(f"#{request.id}  {request.title}")
+            self._print()
+            self._print("Use:")
+            self._print("  features")
+            self._print("  feature N")
+            self._print("  feature-approve N")
+            self._print("  feature-deny N")
         self._print("  quit")
 
     def _print_running_summary(self) -> None:

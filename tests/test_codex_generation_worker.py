@@ -17,6 +17,7 @@ from harness import (
     CodexGenerationWorker,
     CodexGenerationWorkerError,
     CodexOSRun,
+    FeatureRequest,
     RuntimeState,
     ToolResult,
 )
@@ -30,10 +31,73 @@ _TOOLS = [
     "remove",
     "build",
     "finish_generation",
+    "request_feature",
 ]
 
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
+    def test_feature_request_bridge_and_approved_prompt_are_concrete(self) -> None:
+        scenario = {
+            "tool_calls": [
+                {
+                    "tool": "request_feature",
+                    "arguments": {
+                        "title": "External capability λ",
+                        "description": "Please provision this outside CodexOS.",
+                    },
+                },
+                {
+                    "tool": "request_feature",
+                    "arguments": {
+                        "title": "x" * 257,
+                        "description": "must not reach the guest",
+                    },
+                },
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.feature_requests.return_value = (
+                FeatureRequest(
+                    3, 0, "Approved title", "Approved description", "approved"
+                ),
+                FeatureRequest(
+                    4, 0, "Pending title", "Pending description", "pending"
+                ),
+                FeatureRequest(
+                    5, 0, "Denied title", "Denied description", "denied"
+                ),
+            )
+            runtime.invoke_tool.return_value = ToolResult(0, b"17")
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            record = fake.record()
+
+            runtime.invoke_tool.assert_called_once_with(
+                "request_feature",
+                [
+                    "External capability λ".encode(),
+                    b"Please provision this outside CodexOS.",
+                ],
+            )
+            first = record["tool_results"][0]["result"]
+            self.assertTrue(first["success"])
+            self.assertEqual(
+                json.loads(first["contentItems"][0]["text"])["output"],
+                "17",
+            )
+            self.assertFalse(record["tool_results"][1]["result"]["success"])
+
+            turn = _request(record["messages"], "turn/start")
+            prompt = turn["params"]["input"][0]["text"]
+            self.assertIn("Approved external feature requests for this run:", prompt)
+            self.assertIn("#3: Approved title\nApproved description", prompt)
+            self.assertNotIn("Pending title", prompt)
+            self.assertNotIn("Denied title", prompt)
+            self.assertIn("you may use request_feature", prompt)
+
     def test_fresh_protocol_dynamic_tools_validation_and_cleanup(self) -> None:
         scenario = {
             "server_requests": [
@@ -74,6 +138,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.feature_requests.return_value = ()
             runtime.invoke_tool.return_value = ToolResult(7, b"\xff\x00A")
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
@@ -178,6 +243,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -192,6 +258,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -213,6 +280,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -640,6 +708,7 @@ def _runtime_mock() -> Mock:
     runtime.generation_number = 0
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
+    runtime.feature_requests.return_value = ()
     return runtime
 
 

@@ -24,6 +24,10 @@ from .codex_review_worker import (
     CodexReviewWorker,
     CodexReviewWorkerError,
 )
+from .feature_requests import (
+    MAX_FEATURE_DESCRIPTION_BYTES,
+    MAX_FEATURE_TITLE_BYTES,
+)
 from .generation_runtime import CodexOSRun, RuntimeState
 from .tool_protocol import ToolResult
 
@@ -512,6 +516,20 @@ class CodexGenerationSession:
                 "finish_generation",
                 [_utf8(arguments["handoff"], "handoff")],
             )
+        if tool == "request_feature":
+            _check_fields(arguments, required={"title", "description"})
+            title = _utf8(arguments["title"], "title")
+            description = _utf8(arguments["description"], "description")
+            if not title:
+                raise ValueError("title must not be empty")
+            if len(title) > MAX_FEATURE_TITLE_BYTES:
+                raise ValueError("title exceeds 256 encoded bytes")
+            if len(description) > MAX_FEATURE_DESCRIPTION_BYTES:
+                raise ValueError("description exceeds 16 KiB")
+            return runtime.invoke_tool(
+                "request_feature",
+                [title, description],
+            )
         raise ValueError(f"unsupported CodexOS tool: {tool}")
 
 
@@ -684,6 +702,16 @@ def _dynamic_tool_namespace() -> dict[str, object]:
                 {"handoff": {"type": "string"}},
                 ["handoff"],
             ),
+            function(
+                "request_feature",
+                "Record an advisory request for a capability in the trusted "
+                "external environment.",
+                {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                ["title", "description"],
+            ),
         ],
     }
 
@@ -746,6 +774,20 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
     extra = ""
     if objective is not None:
         extra = "\n\nCurrent trusted objective:\n" + objective
+    approved = [
+        request for request in runtime.feature_requests()
+        if request.status == "approved"
+    ]
+    if approved:
+        approved_text = (
+            "Approved external feature requests for this run:\n\n"
+            + "\n\n".join(
+                f"#{request.id}: {request.title}\n{request.description}"
+                for request in approved
+            )
+        )
+    else:
+        approved_text = "Approved external feature requests for this run: none."
     return (
         "You are developing CodexOS from inside its current running generation.\n\n"
         "Your goal is to evolve CodexOS into a general-purpose operating system.\n\n"
@@ -760,11 +802,19 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
         "such as paging, scheduling, filesystems, or drivers unless the current "
         "state actually requires it.\n\n"
         "Use build to validate changes.\n\n"
+        "If progress requires a capability that belongs to the trusted external "
+        "environment rather than CodexOS itself, you may use request_feature.\n\n"
+        "Feature requests are advisory requests to the human operator. They do "
+        "not automatically change the environment and may be approved or denied.\n\n"
+        "Use this only for genuine external capabilities. Do not use it as a "
+        "substitute for implementing functionality that belongs inside CodexOS.\n\n"
         "When you believe this generation should end, ensure the current source "
         "has a successful matching build and call finish_generation with a concise "
         "handoff for your successor.\n\n"
         "No human source edits or architectural guidance are available through "
         "these tools.\n\n"
+        + approved_text
+        + "\n\n"
         + handoff_text
         + rollback
         + extra
