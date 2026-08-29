@@ -42,15 +42,15 @@ class CodexAppServer:
         self.workspace: Path | None = None
 
     def __enter__(self) -> CodexAppServer:
-        if not self._auth_file.is_file():
-            raise CodexAppServerError(
-                "Codex is not authenticated with a file-based ChatGPT login"
-            )
-        self._temporary = tempfile.TemporaryDirectory(
-            prefix=self._temporary_prefix,
-            dir="/tmp",
-        )
         try:
+            if not self._auth_file.is_file():
+                raise CodexAppServerError(
+                    "Codex is not authenticated with a file-based ChatGPT login"
+                )
+            self._temporary = tempfile.TemporaryDirectory(
+                prefix=self._temporary_prefix,
+                dir="/tmp",
+            )
             root = Path(self._temporary.name)
             codex_home = root / "codex-home"
             self.workspace = root / "workspace"
@@ -66,6 +66,17 @@ class CodexAppServer:
             self._start_process(codex_home, self.workspace, process_tmp)
             self.initialize()
             self.validate_chatgpt_login()
+        except OSError as error:
+            try:
+                self.close()
+            except OSError as cleanup_error:
+                raise CodexAppServerError(
+                    "failed to clean up an app-server after isolated setup "
+                    f"failed: {cleanup_error}"
+                ) from error
+            raise CodexAppServerError(
+                f"failed to prepare isolated Codex app-server state: {error}"
+            ) from error
         except BaseException:
             self.close()
             raise

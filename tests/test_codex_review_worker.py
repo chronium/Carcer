@@ -4,7 +4,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from harness import CodexGenerationWorker, CodexOSRun, RuntimeState, ToolResult
 from tests.test_codex_generation_worker import (
@@ -318,6 +318,55 @@ class CodexReviewerProtocolTests(unittest.TestCase):
         self.assertTrue(implementor_record["tool_results"][1]["result"]["success"])
         runtime.invoke_tool.assert_called_once_with("list", [])
         _assert_process_dead(self, reviewer_record["pid"])
+
+    def test_reviewer_setup_oserror_is_isolated_from_implementor(self) -> None:
+        scenario = {
+            "tool_calls": [
+                {"namespace": None, "tool": "review", "arguments": {}},
+                {"tool": "list", "arguments": {}},
+            ],
+            "final_message": "Implementor continued after setup failure.",
+        }
+        real_symlink = os.symlink
+        reviewer_roots: list[Path] = []
+
+        def symlink(source: object, destination: object, *args: object) -> None:
+            path = Path(destination)
+            if path.parent.parent.name.startswith("codexos-reviewer-"):
+                reviewer_roots.append(path.parent.parent)
+                raise OSError("synthetic reviewer filesystem failure")
+            real_symlink(source, destination, *args)
+
+        with _fake_codex(scenario) as implementor:
+            with _fake_codex({}) as reviewer:
+                runtime = _runtime_mock()
+                runtime.invoke_tool.return_value = ToolResult(0, b"seed/kernel.c\n")
+                worker = CodexGenerationWorker(
+                    implementor.executable,
+                    implementor.auth_file,
+                    reviewer_codex_executable=reviewer.executable,
+                    reviewer_auth_file=reviewer.auth_file,
+                )
+                with patch(
+                    "harness.codex_app_server.os.symlink",
+                    side_effect=symlink,
+                ):
+                    result = worker.run_generation(runtime)
+                record = implementor.record()
+                self.assertEqual(reviewer.records(), [])
+
+        self.assertEqual(result.turn_status, "completed")
+        self.assertIs(runtime.state, RuntimeState.RUNNING)
+        review = record["tool_results"][0]["result"]
+        self.assertFalse(review["success"])
+        self.assertIn(
+            "synthetic reviewer filesystem failure",
+            review["contentItems"][0]["text"],
+        )
+        self.assertTrue(record["tool_results"][1]["result"]["success"])
+        runtime.invoke_tool.assert_called_once_with("list", [])
+        self.assertEqual(len(reviewer_roots), 1)
+        self.assertFalse(reviewer_roots[0].exists())
 
 
 class CodexReviewerQemuIntegrationTests(unittest.TestCase):
