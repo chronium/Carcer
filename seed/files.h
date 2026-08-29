@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#define FILE_COUNT 11u
-
 struct file {
     const uint8_t *path;
     uint32_t path_length;
@@ -12,7 +10,8 @@ struct file {
     uint8_t *end;
 };
 
-extern struct file files[FILE_COUNT];
+extern struct file files[];
+extern const uint32_t file_count;
 
 uint32_t file_size(const struct file *file);
 struct file *file_find(const uint8_t *path, uint32_t path_length);

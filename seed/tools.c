@@ -203,14 +203,14 @@ static void invoke_list(uint32_t request_id, const struct invocation *invocation
     }
 
     uint32_t output_length = 0;
-    for (uint32_t index = 0; index < FILE_COUNT; ++index) {
+    for (uint32_t index = 0; index < file_count; ++index) {
         if (file_path_has_prefix(&files[index], prefix.data, prefix.length)) {
             output_length += files[index].path_length + 1u;
         }
     }
 
     send_invoke_header(request_id, TOOL_SUCCESS, output_length);
-    for (uint32_t index = 0; index < FILE_COUNT; ++index) {
+    for (uint32_t index = 0; index < file_count; ++index) {
         if (file_path_has_prefix(&files[index], prefix.data, prefix.length)) {
             serial_write_bytes(files[index].path, files[index].path_length);
             serial_write('\n');
