@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
+from .codex_generation_worker import (
+    CONTINUE_PROMPT,
+    DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
+    RESUME_PROMPT,
+    CodexGenerationResult,
+    CodexGenerationSession,
+    CodexGenerationWorkerError,
+)
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
 
 
@@ -17,10 +26,30 @@ class OperatorConsole:
         runtime: CodexOSRun,
         input_stream: TextIO | None = None,
         output_stream: TextIO | None = None,
+        *,
+        codex_executable: str = "codex",
+        codex_auth_file: str | Path | None = None,
+        objective: str | None = None,
+        reviewer_codex_executable: str = "codex",
+        reviewer_auth_file: str | Path | None = None,
+        interrupt_timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
     ) -> None:
         self._runtime = runtime
         self._input = input_stream if input_stream is not None else sys.stdin
         self._output = output_stream if output_stream is not None else sys.stdout
+        self._codex_executable = codex_executable
+        self._codex_auth_file = codex_auth_file
+        self._objective = objective
+        self._reviewer_codex_executable = reviewer_codex_executable
+        self._reviewer_auth_file = reviewer_auth_file
+        self._interrupt_timeout_seconds = interrupt_timeout_seconds
+        self._session: CodexGenerationSession | None = None
+        self._turn_thread: threading.Thread | None = None
+        self._session_generation: int | None = None
+        self._agent_unavailable_generation: int | None = None
+        self._resume_agent_after_pause = False
+        self._agent_lock = threading.RLock()
+        self._output_lock = threading.Lock()
 
     def run(self) -> None:
         self._print("CodexOS operator console")
@@ -53,6 +82,7 @@ class OperatorConsole:
                     self._print("Interrupted; stopping CodexOS run.")
                     return
         finally:
+            self._terminate_agent_session(interrupt=True)
             self._runtime.stop()
 
     def _execute(self, words: list[str]) -> bool:
@@ -78,22 +108,21 @@ class OperatorConsole:
                 self._print_inspection(
                     self._runtime.inspect_generation(generation)
                 )
+        elif command == "agent":
+            if len(words) != 1:
+                self._print("Usage: agent")
+            else:
+                self._start_agent()
         elif command == "pause":
             if len(words) != 1:
                 self._print("Usage: pause")
             else:
-                self._runtime.pause()
-                self._print(
-                    f"Generation {self._runtime.generation_number} paused."
-                )
+                self._pause()
         elif command == "resume":
             if len(words) != 1:
                 self._print("Usage: resume")
             else:
-                self._runtime.resume()
-                self._print(
-                    f"Generation {self._runtime.generation_number} resumed."
-                )
+                self._resume()
         elif command == "abort":
             if len(words) != 1:
                 self._print("Usage: abort")
@@ -122,6 +151,7 @@ class OperatorConsole:
         self._print("status      show current runtime state")
         self._print("history     show archived generation lineage")
         self._print("inspect N   show archived generation N")
+        self._print("agent       start or continue the generation's Codex session")
         self._print("pause       pause the running generation")
         self._print("resume      resume the paused generation")
         self._print("abort       permanently abort the running/paused generation")
@@ -141,6 +171,18 @@ class OperatorConsole:
             "Selected successor: "
             + ("yes" if self._runtime.pending_generation_finish else "no")
         )
+        with self._agent_lock:
+            session = self._session
+            running = self._turn_thread is not None
+        session_state = "active" if session is not None else "none"
+        self._print(f"Codex session: {session_state}")
+        if running:
+            turn_state = "running"
+        elif session is not None:
+            turn_state = "idle"
+        else:
+            turn_state = "none"
+        self._print(f"Codex turn: {turn_state}")
         handoff = self._runtime.previous_handoff
         if handoff is None:
             self._print("Previous handoff: none")
@@ -203,10 +245,13 @@ class OperatorConsole:
         ):
             self._print("Abort cancelled.")
             return
+        self._terminate_agent_session(interrupt=True)
         self._runtime.abort_generation()
+        self._clear_agent_generation()
         self._print_gate()
 
     def _continue_generation(self) -> None:
+        self._require_agent_stopped_at_gate()
         if self._runtime.pending_generation_finish is None:
             self._runtime.continue_generation()
             return
@@ -215,9 +260,11 @@ class OperatorConsole:
             f"Starting generation {generation} from selected successor..."
         )
         self._runtime.continue_generation()
+        self._clear_agent_generation()
         self._print_running_summary()
 
     def _rollback(self, parent: int) -> None:
+        self._require_agent_stopped_at_gate()
         generation = (self._runtime.generation_number or 0) + 1
         if not self._confirm(
             f"Fork generation {generation} from generation {parent}'s "
@@ -227,6 +274,7 @@ class OperatorConsole:
             self._print("Rollback cancelled.")
             return
         self._runtime.fork_from_generation(parent)
+        self._clear_agent_generation()
         self._print(
             f"Generation {self._runtime.generation_number} started from "
             f"generation {parent}."
@@ -243,8 +291,161 @@ class OperatorConsole:
             ):
                 self._print("Quit cancelled.")
                 return False
+        self._terminate_agent_session(interrupt=True)
         self._runtime.stop()
         return True
+
+    def _start_agent(self, prompt: str | None = None) -> None:
+        if self._runtime.state is not RuntimeState.RUNNING:
+            raise RuntimeError("CodexOS generation is not running")
+        generation = self._runtime.generation_number
+        with self._agent_lock:
+            if self._turn_thread is not None:
+                raise RuntimeError("Codex implementor turn is already active")
+            if self._agent_unavailable_generation == generation:
+                raise RuntimeError(
+                    "Codex session failed and cannot be replaced in this generation"
+                )
+            session = self._session
+            if session is None:
+                session = CodexGenerationSession(
+                    self._runtime,
+                    self._codex_executable,
+                    self._codex_auth_file,
+                    objective=self._objective,
+                    reviewer_codex_executable=self._reviewer_codex_executable,
+                    reviewer_auth_file=self._reviewer_auth_file,
+                )
+                self._session = session
+                self._session_generation = generation
+                initial = True
+            else:
+                if self._session_generation != generation:
+                    raise RuntimeError("Codex session belongs to another generation")
+                if not session.healthy:
+                    raise RuntimeError("Codex generation session is unusable")
+                initial = False
+            turn = threading.Thread(
+                target=self._run_agent_turn,
+                args=(session, initial, prompt),
+                name="codexos-implementor-turn",
+                daemon=True,
+            )
+            self._turn_thread = turn
+            turn.start()
+        self._print(f"Codex turn started for generation {generation}.")
+
+    def _run_agent_turn(
+        self,
+        session: CodexGenerationSession,
+        initial: bool,
+        prompt: str | None,
+    ) -> None:
+        result: CodexGenerationResult | None = None
+        error: Exception | None = None
+        try:
+            if initial:
+                result = session.run_initial_turn()
+            else:
+                result = session.run_continuation_turn(prompt or CONTINUE_PROMPT)
+        except (OSError, RuntimeError, CodexGenerationWorkerError) as caught:
+            error = caught
+        finally:
+            with self._agent_lock:
+                self._turn_thread = None
+
+        if error is not None:
+            if session.healthy:
+                self._print(f"Codex turn failed: {error}")
+            else:
+                generation = self._runtime.generation_number
+                session.close()
+                with self._agent_lock:
+                    if self._session is session:
+                        self._session = None
+                        self._agent_unavailable_generation = generation
+                self._print(f"Codex session failed: {error}")
+            return
+
+        if result is None:
+            return
+        if result.turn_status == "interrupted":
+            self._print("Codex turn interrupted.")
+        elif self._runtime.state is RuntimeState.AWAITING_NEXT_GENERATION:
+            session.close()
+            with self._agent_lock:
+                if self._session is session:
+                    self._session = None
+            self._print(
+                f"Generation {self._runtime.generation_number} completed cooperatively."
+            )
+            self._print_gate()
+        else:
+            self._print(result.summary)
+        if result.final_message:
+            self._print("Codex:")
+            self._print_indented(result.final_message)
+
+    def _pause(self) -> None:
+        with self._agent_lock:
+            session = self._session
+            active = self._turn_thread is not None
+        if active:
+            if session is None:
+                raise RuntimeError("Codex turn has no generation session")
+            session.interrupt_turn(self._interrupt_timeout_seconds)
+            self._resume_agent_after_pause = True
+        else:
+            self._resume_agent_after_pause = False
+        self._runtime.pause()
+        self._print(f"Generation {self._runtime.generation_number} paused.")
+
+    def _resume(self) -> None:
+        restart_agent = self._resume_agent_after_pause
+        self._runtime.resume()
+        self._resume_agent_after_pause = False
+        generation = self._runtime.generation_number
+        if restart_agent:
+            self._start_agent(RESUME_PROMPT)
+            self._print(
+                f"Generation {generation} resumed; Codex continued in the same session."
+            )
+        else:
+            self._print(f"Generation {generation} resumed.")
+
+    def _terminate_agent_session(self, *, interrupt: bool) -> None:
+        with self._agent_lock:
+            session = self._session
+            turn = self._turn_thread
+        if session is None:
+            return
+        if interrupt and turn is not None:
+            try:
+                session.interrupt_turn(self._interrupt_timeout_seconds)
+            except (OSError, RuntimeError, CodexGenerationWorkerError):
+                pass
+        session.close()
+        if turn is not None and turn is not threading.current_thread():
+            turn.join(timeout=self._interrupt_timeout_seconds)
+        with self._agent_lock:
+            if self._session is session:
+                self._session = None
+            self._turn_thread = None
+
+    def _require_agent_stopped_at_gate(self) -> None:
+        with self._agent_lock:
+            if self._turn_thread is not None or self._session is not None:
+                raise RuntimeError(
+                    "previous generation Codex session is still active"
+                )
+
+    def _clear_agent_generation(self) -> None:
+        with self._agent_lock:
+            self._session = None
+            self._turn_thread = None
+            self._session_generation = None
+            self._agent_unavailable_generation = None
+        self._resume_agent_after_pause = False
 
     def _print_gate(self) -> None:
         generation = self._runtime.generation_number
@@ -295,8 +496,9 @@ class OperatorConsole:
         return self._readline(prompt).strip() in {"y", "Y"}
 
     def _readline(self, prompt: str) -> str:
-        self._output.write(prompt)
-        self._output.flush()
+        with self._output_lock:
+            self._output.write(prompt)
+            self._output.flush()
         line = self._input.readline()
         if line == "":
             raise EOFError
@@ -308,7 +510,8 @@ class OperatorConsole:
             self._print(f"  {line}")
 
     def _print(self, text: str = "") -> None:
-        print(text, file=self._output)
+        with self._output_lock:
+            print(text, file=self._output)
 
 
 def main(
