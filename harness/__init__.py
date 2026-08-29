@@ -1,6 +1,11 @@
 """External CodexOS harness."""
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
+from .codex_generation_worker import (
+    CodexGenerationResult,
+    CodexGenerationWorker,
+    CodexGenerationWorkerError,
+)
 from .framing import Frame, FramingError, encode_frame, read_frame
 from .generation_finish_host_service import (
     CodexOSHostServices,
@@ -30,6 +35,9 @@ __all__ = [
     "BuildResult",
     "BuildStatus",
     "ArchivedGeneration",
+    "CodexGenerationResult",
+    "CodexGenerationWorker",
+    "CodexGenerationWorkerError",
     "CodexOSHostServices",
     "CodexOSRun",
     "Frame",
