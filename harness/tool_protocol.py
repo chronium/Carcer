@@ -6,7 +6,12 @@ import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .build_host_service import BuildHostService
 from .framing import MAX_PAYLOAD_SIZE, Frame, encode_frame, read_frame
+from .host_service_protocol import (
+    HOST_SERVICE_REQUEST,
+    decode_host_service_request,
+)
 from .serial import SerialConnection
 
 _LIST_TOOLS_REQUEST = 0x0001
@@ -36,8 +41,13 @@ class ToolResult:
 class ToolClient:
     """Synchronously discover and invoke tools provided by one guest."""
 
-    def __init__(self, connection: SerialConnection) -> None:
+    def __init__(
+        self,
+        connection: SerialConnection,
+        build_service: BuildHostService | None = None,
+    ) -> None:
         self._connection = connection
+        self._build_service = build_service
         self._next_request_id = 1
 
     def list_tools(self) -> list[str]:
@@ -79,7 +89,19 @@ class ToolClient:
             payload=payload,
         )
         self._connection.write(encode_frame(request))
-        response = read_frame(self._connection, _RESPONSE_TIMEOUT_SECONDS)
+
+        while True:
+            response = read_frame(self._connection, _RESPONSE_TIMEOUT_SECONDS)
+            if response.message_type == HOST_SERVICE_REQUEST:
+                if self._build_service is None:
+                    raise ToolProtocolError(
+                        "received a host-service request without a build service"
+                    )
+                host_request = decode_host_service_request(response)
+                host_response = self._build_service.handle_request(host_request)
+                self._connection.write(encode_frame(host_response))
+                continue
+            break
 
         if response.request_id != request_id:
             raise ToolProtocolError(

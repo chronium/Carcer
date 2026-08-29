@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from .framing import MAX_PAYLOAD_SIZE, Frame
 
 
-_HOST_SERVICE_REQUEST = 0x0003
+HOST_SERVICE_REQUEST = 0x0003
 _HOST_SERVICE_RESPONSE = 0x8003
 _MAX_SERVICE_NAME_LENGTH = 255
 _MAX_ARGUMENTS = 64
@@ -30,7 +30,7 @@ class HostServiceRequest:
 def decode_host_service_request(frame: Frame) -> HostServiceRequest:
     """Decode and validate one version 1 host-service request frame."""
 
-    if frame.message_type != _HOST_SERVICE_REQUEST:
+    if frame.message_type != HOST_SERVICE_REQUEST:
         raise HostServiceProtocolError(
             f"expected HOST_SERVICE_REQUEST, got message type 0x{frame.message_type:04x}"
         )
