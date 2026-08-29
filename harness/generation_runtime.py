@@ -128,6 +128,33 @@ class CodexOSRun:
         self._pending_finish = None
         self._state = RuntimeState.RUNNING
 
+    def fork_from_generation(self, generation_number: int) -> None:
+        if self._state is not RuntimeState.AWAITING_NEXT_GENERATION:
+            raise RuntimeError("CodexOS run is not awaiting a generation")
+        if self._generation_number is None:
+            raise RuntimeError("CodexOS generation number is unavailable")
+        if self.active_pid is not None:
+            raise RuntimeError("CodexOS QEMU process is still running")
+        if type(generation_number) is not int:
+            raise TypeError("generation number must be an integer")
+        if generation_number < 0:
+            raise ValueError("generation number must not be negative")
+        if generation_number >= self._generation_number:
+            raise ValueError("fork parent must be an earlier generation")
+
+        image, handoff = self._load_fork_generation(generation_number)
+        next_generation = self._generation_number + 1
+        self._boot_generation(
+            next_generation,
+            image,
+            generation_number,
+            "rollback",
+        )
+        self._generation_number = next_generation
+        self._previous_handoff = handoff
+        self._pending_finish = None
+        self._state = RuntimeState.RUNNING
+
     def stop(self) -> None:
         if self._state is RuntimeState.STOPPED:
             return
@@ -145,6 +172,39 @@ class CodexOSRun:
         if self._state is not RuntimeState.RUNNING or self._tool_client is None:
             raise RuntimeError("CodexOS generation is not running")
         return self._tool_client
+
+    def _load_fork_generation(self, generation_number: int) -> tuple[Path, str]:
+        archive = self._run_directory / f"generation-{generation_number:04d}"
+        if archive.is_symlink() or not archive.is_dir():
+            raise FileNotFoundError(f"generation archive is missing: {archive}")
+
+        metadata_path = archive / "metadata.json"
+        handoff_path = archive / "handoff.txt"
+        successor = archive / "successor"
+        if successor.is_symlink() or not successor.is_dir():
+            raise FileNotFoundError(
+                f"generation archive artifact is missing: {successor}"
+            )
+        image = successor / "codexos.iso"
+        for required in (metadata_path, handoff_path, image):
+            if required.is_symlink() or not required.is_file():
+                raise FileNotFoundError(
+                    f"generation archive artifact is missing: {required}"
+                )
+
+        try:
+            metadata = json.loads(metadata_path.read_bytes().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "generation archive metadata is malformed"
+            ) from error
+        _validate_generation_metadata(metadata, generation_number)
+
+        try:
+            handoff = handoff_path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("generation handoff is not valid UTF-8") from error
+        return image, handoff
 
     def _boot_generation(
         self,
@@ -349,6 +409,32 @@ def _materialize_snapshot(snapshot: bytes, destination: Path) -> None:
             raise ValueError(f"source path escapes archive: {entry.path!r}")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(entry.content)
+
+
+def _validate_generation_metadata(
+    metadata: object,
+    expected_generation: int,
+) -> None:
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "generation",
+        "parent_generation",
+        "transition",
+    }:
+        raise ValueError("generation archive metadata is malformed")
+
+    generation = metadata["generation"]
+    parent = metadata["parent_generation"]
+    transition = metadata["transition"]
+    if type(generation) is not int or generation != expected_generation:
+        raise ValueError("generation archive metadata has the wrong generation")
+    if generation == 0:
+        if parent is not None or transition != "initial":
+            raise ValueError("generation archive metadata is malformed")
+        return
+    if type(parent) is not int or parent < 0 or parent >= generation:
+        raise ValueError("generation archive metadata is malformed")
+    if transition not in {"successor", "rollback"}:
+        raise ValueError("generation archive metadata is malformed")
 
 
 def _wait_for_ready(serial: SerialConnection) -> None:

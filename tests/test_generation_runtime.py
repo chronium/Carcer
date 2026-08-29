@@ -23,14 +23,18 @@ _TOOLS = [
 
 
 class GenerationRuntimeIntegrationTest(unittest.TestCase):
-    def test_finishes_archives_waits_and_explicitly_starts_successor(self) -> None:
+    def test_preserves_history_when_forking_from_archived_generation(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         image = _build_seed(repository)
         qemu = shutil.which("qemu-system-x86_64")
         self.assertIsNotNone(qemu, "qemu-system-x86_64 must be installed")
         original_kernel = (repository / "seed" / "kernel.c").read_bytes()
-        mutation = b"\n/* GENERATION-RUNTIME-SUCCESSOR */\n"
-        handoff = "Generation zero selected this exact successor."
+        mutation_a = b"\n/* GENERATION-RUNTIME-A */\n"
+        mutation_b = b"\n/* GENERATION-RUNTIME-B */\n"
+        mutation_c = b"\n/* GENERATION-RUNTIME-C */\n"
+        generation_zero_handoff = "Generation zero selected mutation A."
+        generation_one_handoff = "Generation one selected mutation B."
+        generation_two_handoff = "Generation two followed the rollback fork."
 
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
@@ -46,6 +50,8 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 generation_zero_pid = runtime.active_pid
                 self.assertIsNotNone(generation_zero_pid)
                 self.assertEqual(runtime.list_tools(), _TOOLS)
+                with self.assertRaisesRegex(RuntimeError, "not awaiting"):
+                    runtime.fork_from_generation(0)
                 initial_iso.unlink()
 
                 write = runtime.invoke_tool(
@@ -53,7 +59,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     [
                         b"seed/kernel.c",
                         str(len(original_kernel)).encode("ascii"),
-                        mutation,
+                        mutation_a,
                     ],
                 )
                 self.assertEqual(write.status, 0)
@@ -61,7 +67,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertEqual(build.status, 0, build.output.decode())
                 finish = runtime.invoke_tool(
                     "finish_generation",
-                    [handoff.encode("utf-8")],
+                    [generation_zero_handoff.encode("utf-8")],
                 )
                 self.assertEqual(finish.status, 0)
                 self.assertEqual(finish.output, b"")
@@ -84,19 +90,22 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 )
                 pending = runtime.pending_generation_finish
                 self.assertIsNotNone(pending)
-                self.assertEqual(runtime.previous_handoff, handoff)
+                self.assertEqual(
+                    runtime.previous_handoff,
+                    generation_zero_handoff,
+                )
                 self.assertEqual(
                     (archive / "handoff.txt").read_bytes(),
-                    handoff.encode("utf-8"),
+                    generation_zero_handoff.encode("utf-8"),
                 )
                 self.assertEqual(
                     (archive / "source.snapshot").read_bytes(),
                     pending.source_snapshot,
                 )
-                expected_kernel = original_kernel + mutation
+                expected_a = original_kernel + mutation_a
                 self.assertEqual(
                     (archive / "source" / "seed" / "kernel.c").read_bytes(),
-                    expected_kernel,
+                    expected_a,
                 )
                 self.assertEqual(
                     pending.kernel_elf,
@@ -159,22 +168,35 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertEqual(runtime.generation_number, 1)
                 self.assertIsNotNone(runtime.active_pid)
                 generation_one_pid = runtime.active_pid
-                self.assertEqual(runtime.previous_handoff, handoff)
+                self.assertEqual(
+                    runtime.previous_handoff,
+                    generation_zero_handoff,
+                )
                 self.assertIsNone(runtime.pending_generation_finish)
                 read = runtime.invoke_tool(
                     "read",
                     [
                         b"seed/kernel.c",
                         b"0",
-                        str(len(expected_kernel)).encode("ascii"),
+                        str(len(expected_a)).encode("ascii"),
                     ],
                 )
                 self.assertEqual(read.status, 0)
-                self.assertEqual(read.output, expected_kernel)
+                self.assertEqual(read.output, expected_a)
+
+                write = runtime.invoke_tool(
+                    "write",
+                    [
+                        b"seed/kernel.c",
+                        str(len(expected_a)).encode("ascii"),
+                        mutation_b,
+                    ],
+                )
+                self.assertEqual(write.status, 0)
+                expected_b = expected_a + mutation_b
 
                 build = runtime.invoke_tool("build", [])
                 self.assertEqual(build.status, 0, build.output.decode())
-                generation_one_handoff = "Generation one selected its successor."
                 finish = runtime.invoke_tool(
                     "finish_generation",
                     [generation_one_handoff.encode("utf-8")],
@@ -210,6 +232,155 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                     initial_iso_bytes,
                 )
 
+                generation_zero_contents = _archive_contents(archive)
+                generation_one_contents = _archive_contents(
+                    generation_one_archive
+                )
+
+                with self.assertRaisesRegex(ValueError, "negative"):
+                    runtime.fork_from_generation(-1)
+                with self.assertRaisesRegex(ValueError, "earlier"):
+                    runtime.fork_from_generation(1)
+                with self.assertRaisesRegex(ValueError, "earlier"):
+                    runtime.fork_from_generation(2)
+
+                hidden_archive = run_directory / ".generation-0000-hidden"
+                archive.rename(hidden_archive)
+                try:
+                    with self.assertRaisesRegex(FileNotFoundError, "missing"):
+                        runtime.fork_from_generation(0)
+                finally:
+                    hidden_archive.rename(archive)
+
+                successor_iso = archive / "successor" / "codexos.iso"
+                hidden_iso = archive / "successor" / ".codexos.iso-hidden"
+                successor_iso.rename(hidden_iso)
+                try:
+                    with self.assertRaisesRegex(FileNotFoundError, "missing"):
+                        runtime.fork_from_generation(0)
+                finally:
+                    hidden_iso.rename(successor_iso)
+
+                metadata_path = archive / "metadata.json"
+                metadata_bytes = metadata_path.read_bytes()
+                metadata_path.write_bytes(b"not JSON")
+                try:
+                    with self.assertRaisesRegex(ValueError, "malformed"):
+                        runtime.fork_from_generation(0)
+                finally:
+                    metadata_path.write_bytes(metadata_bytes)
+
+                handoff_path = archive / "handoff.txt"
+                handoff_bytes = handoff_path.read_bytes()
+                handoff_path.write_bytes(b"\xff")
+                try:
+                    with self.assertRaisesRegex(ValueError, "UTF-8"):
+                        runtime.fork_from_generation(0)
+                finally:
+                    handoff_path.write_bytes(handoff_bytes)
+
+                self.assertEqual(
+                    _archive_contents(archive),
+                    generation_zero_contents,
+                )
+                self.assertEqual(
+                    _archive_contents(generation_one_archive),
+                    generation_one_contents,
+                )
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
+                self.assertIsNone(runtime.active_pid)
+
+                selected_successor = successor_iso.read_bytes()
+                runtime.fork_from_generation(0)
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertEqual(runtime.generation_number, 2)
+                generation_two_pid = runtime.active_pid
+                self.assertIsNotNone(generation_two_pid)
+                self.assertEqual(
+                    runtime.previous_handoff,
+                    generation_zero_handoff,
+                )
+                self.assertNotEqual(
+                    runtime.previous_handoff,
+                    generation_one_handoff,
+                )
+                self.assertIsNone(runtime.pending_generation_finish)
+
+                read = runtime.invoke_tool(
+                    "read",
+                    [
+                        b"seed/kernel.c",
+                        b"0",
+                        str(len(expected_b)).encode("ascii"),
+                    ],
+                )
+                self.assertEqual(read.status, 0)
+                self.assertEqual(read.output, expected_a)
+                self.assertIn(mutation_a, read.output)
+                self.assertNotIn(mutation_b, read.output)
+
+                write = runtime.invoke_tool(
+                    "write",
+                    [
+                        b"seed/kernel.c",
+                        str(len(expected_a)).encode("ascii"),
+                        mutation_c,
+                    ],
+                )
+                self.assertEqual(write.status, 0)
+                build = runtime.invoke_tool("build", [])
+                self.assertEqual(build.status, 0, build.output.decode())
+                finish = runtime.invoke_tool(
+                    "finish_generation",
+                    [generation_two_handoff.encode("utf-8")],
+                )
+                self.assertEqual(finish.status, 0)
+                self.assertIs(
+                    runtime.state,
+                    RuntimeState.AWAITING_NEXT_GENERATION,
+                )
+                self.assertIsNone(runtime.active_pid)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(generation_two_pid, 0)
+
+                generation_two_archive = run_directory / "generation-0002"
+                self.assertEqual(
+                    json.loads(
+                        (generation_two_archive / "metadata.json").read_text()
+                    ),
+                    {
+                        "generation": 2,
+                        "parent_generation": 0,
+                        "transition": "rollback",
+                    },
+                )
+                self.assertEqual(
+                    (
+                        generation_two_archive / "boot" / "codexos.iso"
+                    ).read_bytes(),
+                    selected_successor,
+                )
+                self.assertEqual(
+                    (
+                        generation_two_archive
+                        / "source"
+                        / "seed"
+                        / "kernel.c"
+                    ).read_bytes(),
+                    expected_a + mutation_c,
+                )
+                self.assertEqual(
+                    _archive_contents(archive),
+                    generation_zero_contents,
+                )
+                self.assertEqual(
+                    _archive_contents(generation_one_archive),
+                    generation_one_contents,
+                )
+
                 runtime.stop()
                 self.assertIs(runtime.state, RuntimeState.STOPPED)
                 self.assertIsNone(runtime.active_pid)
@@ -217,7 +388,11 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertTrue(archive.is_dir())
                 self.assertEqual(
                     {path.name for path in run_directory.iterdir()},
-                    {"generation-0000", "generation-0001"},
+                    {
+                        "generation-0000",
+                        "generation-0001",
+                        "generation-0002",
+                    },
                 )
             finally:
                 runtime.stop()
@@ -234,6 +409,8 @@ class GenerationRuntimeStateTests(unittest.TestCase):
             runtime = CodexOSRun(Path(temporary) / "run")
             with self.assertRaisesRegex(RuntimeError, "not awaiting"):
                 runtime.continue_generation()
+            with self.assertRaisesRegex(RuntimeError, "not awaiting"):
+                runtime.fork_from_generation(0)
             runtime.stop()
             runtime.stop()
             self.assertIs(runtime.state, RuntimeState.STOPPED)
@@ -269,6 +446,14 @@ def _build_seed(repository: Path) -> Path:
     if build.returncode != 0:
         raise AssertionError(build.stdout)
     return repository / "build" / "seed" / "codexos-seed.iso"
+
+
+def _archive_contents(archive: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(archive).as_posix(): path.read_bytes()
+        for path in sorted(archive.rglob("*"))
+        if path.is_file()
+    }
 
 
 if __name__ == "__main__":
