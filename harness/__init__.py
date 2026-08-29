@@ -2,6 +2,10 @@
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
 from .framing import Frame, FramingError, encode_frame, read_frame
+from .generation_finish_host_service import (
+    CodexOSHostServices,
+    PendingGenerationFinish,
+)
 from .host_service_protocol import (
     HostServiceProtocolError,
     HostServiceRequest,
@@ -24,6 +28,7 @@ __all__ = [
     "BuildHostService",
     "BuildResult",
     "BuildStatus",
+    "CodexOSHostServices",
     "Frame",
     "FramingError",
     "HostServiceProtocolError",
@@ -31,6 +36,7 @@ __all__ = [
     "QmpClient",
     "QmpError",
     "QemuProcessController",
+    "PendingGenerationFinish",
     "SerialConnection",
     "SerialError",
     "SnapshotFile",

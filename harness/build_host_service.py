@@ -22,6 +22,7 @@ _BUILD_HARNESS_FAILURE = 2
 class StagedBuildArtifacts:
     kernel_elf: Path
     iso: Path
+    source_snapshot: bytes
 
 
 class BuildHostService:
@@ -73,6 +74,7 @@ class BuildHostService:
             self._latest_successful_build = StagedBuildArtifacts(
                 result.kernel_elf,
                 result.iso,
+                request.arguments[0],
             )
             status = _BUILD_SUCCESS
         elif result.status is BuildStatus.BUILD_FAILURE:

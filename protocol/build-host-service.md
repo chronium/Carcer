@@ -22,7 +22,8 @@ encoded as UTF-8. Empty diagnostics are valid. Kernel and ISO bytes and host
 filesystem paths are never returned through this protocol.
 
 On success, the harness retains `kernel.elf` and `codexos.iso` in host-owned
-staging storage selected by trusted harness code. Each attempt uses fresh
-storage. A failed attempt does not replace the latest successful artifacts.
-Generation switching, rebooting, and artifact archival are not part of this
-service.
+staging storage selected by trusted harness code, together with the exact
+validated source snapshot bytes that produced them. Each attempt uses fresh
+storage. A failed attempt does not replace the latest successful artifacts or
+their source snapshot. Generation switching, rebooting, and artifact archival
+are not part of this service.

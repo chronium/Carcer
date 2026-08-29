@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from harness import (
-    BuildHostService,
+    CodexOSHostServices,
     QemuProcessController,
     SerialConnection,
     ToolClient,
@@ -42,7 +42,7 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
-            build_service = BuildHostService(temporary_path / "staging")
+            host_services = CodexOSHostServices(temporary_path / "staging")
 
             first_serial_path = temporary_path / "first-serial.sock"
             first_serial = SerialConnection(first_serial_path)
@@ -59,7 +59,7 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
                 with first_serial:
                     _wait_for_ready(first_serial)
-                    client = ToolClient(first_serial, build_service)
+                    client = ToolClient(first_serial, host_services)
                     self.assertEqual(client.list_tools(), _TOOLS)
 
                     append = client.invoke_tool(
@@ -80,7 +80,7 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
                     success = client.invoke_tool("build", [])
                     self.assertEqual(success.status, 0, success.output.decode())
-                    successful_artifacts = build_service.latest_successful_build
+                    successful_artifacts = host_services.latest_successful_build
                     self.assertIsNotNone(successful_artifacts)
                     self.assertTrue(successful_artifacts.kernel_elf.is_file())
                     self.assertTrue(successful_artifacts.iso.is_file())
@@ -101,7 +101,7 @@ class GuestBuildIntegrationTest(unittest.TestCase):
                     self.assertIn(b"kernel.c", failure.output)
                     self.assertIn(b"error:", failure.output)
                     self.assertEqual(
-                        build_service.latest_successful_build,
+                        host_services.latest_successful_build,
                         successful_artifacts,
                     )
                     self.assertTrue(successful_artifacts.iso.is_file())
