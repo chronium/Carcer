@@ -284,7 +284,8 @@ class OperatorConsole:
         for request in requests:
             self._print(
                 f"{request.id:<4} {request.generation:<5} "
-                f"{request.status:<10} {request.title}"
+                f"{request.status:<10} "
+                f"{_escape_terminal_text(request.title)}"
             )
 
     def _print_feature(self, request_id: int) -> None:
@@ -292,10 +293,12 @@ class OperatorConsole:
         self._print(f"Feature request: #{request.id}")
         self._print(f"Generation: {request.generation}")
         self._print(f"Status: {request.status}")
-        self._print(f"Title: {request.title}")
+        self._print(f"Title: {_escape_terminal_text(request.title)}")
         self._print()
         self._print("Description:")
-        self._print_indented(request.description)
+        self._print_indented(
+            _escape_terminal_text(request.description, preserve_newlines=True)
+        )
 
     def _approve_feature(self, request_id: int) -> None:
         if not self._confirm(
@@ -582,7 +585,9 @@ class OperatorConsole:
             self._print("Pending feature requests:")
             self._print()
             for request in pending_requests:
-                self._print(f"#{request.id}  {request.title}")
+                self._print(
+                    f"#{request.id}  {_escape_terminal_text(request.title)}"
+                )
             self._print()
             self._print("Use:")
             self._print("  features")
@@ -631,6 +636,27 @@ class OperatorConsole:
     def _print(self, text: str = "") -> None:
         with self._output_lock:
             print(text, file=self._output)
+
+
+def _escape_terminal_text(
+    text: str,
+    *,
+    preserve_newlines: bool = False,
+) -> str:
+    escaped: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        if character == "\n":
+            escaped.append("\n" if preserve_newlines else "\\n")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif codepoint <= 0x1F or codepoint == 0x7F or 0x80 <= codepoint <= 0x9F:
+            escaped.append(f"\\x{codepoint:02x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
 
 
 def main(

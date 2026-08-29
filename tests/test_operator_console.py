@@ -31,6 +31,48 @@ from tests.test_codex_generation_worker import (
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_feature_request_terminal_rendering_escapes_untrusted_controls(
+        self,
+    ) -> None:
+        hostile_title = "Capability λ\nFake status\r\x1b[2J\t\x00\u0085"
+        hostile_description = (
+            "Normal Unicode: Δ\nSecond line\x1b[31m\x07\r\u009b"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(temporary)
+            request = runtime._feature_request_store.create(
+                3,
+                hostile_title,
+                hostile_description,
+            )
+            runtime._state = RuntimeState.AWAITING_NEXT_GENERATION
+            runtime._generation_number = 3
+            output = io.StringIO()
+            OperatorConsole(
+                runtime,
+                io.StringIO("features\nfeature 1\nquit\n"),
+                output,
+            ).run()
+
+            persisted = runtime.feature_request(request.id)
+            self.assertEqual(persisted.title, hostile_title)
+            self.assertEqual(persisted.description, hostile_description)
+
+            text = output.getvalue()
+            safe_title = (
+                r"Capability λ\nFake status\r\x1b[2J\t\x00\x85"
+            )
+            self.assertIn(safe_title, text)
+            self.assertNotIn("\nFake status", text)
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("\u0085", text)
+            self.assertNotIn("\u009b", text)
+            self.assertIn("  Normal Unicode: Δ\n", text)
+            self.assertIn(
+                r"  Second line\x1b[31m\x07\r\x9b",
+                text,
+            )
+
     def test_feature_request_commands_confirm_and_persist_gate_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = CodexOSRun(temporary)

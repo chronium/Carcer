@@ -37,6 +37,8 @@ _TOOLS = [
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
     def test_feature_request_bridge_and_approved_prompt_are_concrete(self) -> None:
+        approved_title = "Approved title\nraw\r\x1b[2J"
+        approved_description = "Approved description\nraw\x07\u009b"
         scenario = {
             "tool_calls": [
                 {
@@ -59,7 +61,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime = _runtime_mock()
             runtime.feature_requests.return_value = (
                 FeatureRequest(
-                    3, 0, "Approved title", "Approved description", "approved"
+                    3, 0, approved_title, approved_description, "approved"
                 ),
                 FeatureRequest(
                     4, 0, "Pending title", "Pending description", "pending"
@@ -93,7 +95,10 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             turn = _request(record["messages"], "turn/start")
             prompt = turn["params"]["input"][0]["text"]
             self.assertIn("Approved external feature requests for this run:", prompt)
-            self.assertIn("#3: Approved title\nApproved description", prompt)
+            self.assertIn(
+                f"#3: {approved_title}\n{approved_description}",
+                prompt,
+            )
             self.assertNotIn("Pending title", prompt)
             self.assertNotIn("Denied title", prompt)
             self.assertIn("you may use request_feature", prompt)
