@@ -75,8 +75,10 @@ service-tier ID, and its catalog display name, when supplied, while implementor
 events also record agent contract version 4. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
 
-Contract version 3 applies to generations 0 through 9. Contract version 4 applies
-from generation 10 onward; historical events are not backfilled.
+In `experiment-002`, generations 0 through 9 ran under contract version 3.
+Generation 10 onward runs under contract version 4. Other runs record the
+contract version actually used in their implementor provenance; historical
+events are not backfilled.
 
 ## Post-generation exit interviews
 
