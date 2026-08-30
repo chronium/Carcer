@@ -45,6 +45,8 @@ class SerialProtocolDispatcher:
         self._failure: BaseException | None = None
         self._pending_response = False
         self._response: Frame | None = None
+        self._host_service_active = False
+        self._host_service_window = 0
         self._startup_buffer = bytearray()
         self._frame_buffer = bytearray()
         self._diagnostic = bytearray()
@@ -88,7 +90,6 @@ class SerialProtocolDispatcher:
         """Write one harness request and wait for its routed guest response."""
         if timeout_seconds <= 0:
             raise ValueError("response timeout must be positive")
-        deadline = time.monotonic() + timeout_seconds
         with self._exchange_lock:
             with self._condition:
                 if not self._ready:
@@ -98,10 +99,18 @@ class SerialProtocolDispatcher:
                     raise SerialError("serial protocol dispatcher is closed")
                 self._pending_response = True
                 self._response = None
+                host_service_window = self._host_service_window
             try:
                 self._write(encode_frame(request))
+                deadline = time.monotonic() + timeout_seconds
                 with self._condition:
                     while self._response is None and self._failure is None:
+                        if self._host_service_active:
+                            self._condition.wait()
+                            continue
+                        if self._host_service_window != host_service_window:
+                            host_service_window = self._host_service_window
+                            deadline = time.monotonic() + timeout_seconds
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("timed out waiting for tool response")
@@ -224,34 +233,43 @@ class SerialProtocolDispatcher:
         handler: HostServiceHandler | None,
     ) -> None:
         try:
-            request = decode_host_service_request(frame)
-        except HostServiceProtocolError as error:
-            if frame.request_id == 0:
-                raise
-            response = create_host_service_response(
-                frame.request_id,
-                1,
-                _bounded_diagnostic(str(error)),
-            )
-        else:
-            if handler is None:
+            with self._condition:
+                self._host_service_active = True
+                self._condition.notify_all()
+            try:
+                request = decode_host_service_request(frame)
+            except HostServiceProtocolError as error:
+                if frame.request_id == 0:
+                    raise
                 response = create_host_service_response(
-                    request.request_id,
+                    frame.request_id,
                     1,
-                    b"host services are not available",
+                    _bounded_diagnostic(str(error)),
                 )
             else:
-                try:
-                    response = handler.handle_request(request)
-                except Exception as error:
+                if handler is None:
                     response = create_host_service_response(
                         request.request_id,
-                        2,
-                        _bounded_diagnostic(
-                            "trusted host-service failure: " + str(error)
-                        ),
+                        1,
+                        b"host services are not available",
                     )
-        self._write(encode_frame(response))
+                else:
+                    try:
+                        response = handler.handle_request(request)
+                    except Exception as error:
+                        response = create_host_service_response(
+                            request.request_id,
+                            2,
+                            _bounded_diagnostic(
+                                "trusted host-service failure: " + str(error)
+                            ),
+                        )
+            self._write(encode_frame(response))
+        finally:
+            with self._condition:
+                self._host_service_active = False
+                self._host_service_window += 1
+                self._condition.notify_all()
 
     def _write(self, data: bytes) -> None:
         with self._write_lock:

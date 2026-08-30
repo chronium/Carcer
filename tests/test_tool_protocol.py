@@ -3,10 +3,12 @@ import shutil
 import struct
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 from harness import (
     TEST_HARDWARE_PROFILE,
@@ -21,6 +23,7 @@ from harness import (
     ToolClient,
     ToolProtocolError,
     ToolResult,
+    create_host_service_response,
     encode_frame,
 )
 
@@ -159,6 +162,73 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                     )
                 )
                 self.assertEqual(result.result(2), ToolResult(7, tool_output))
+
+    def test_host_service_execution_does_not_consume_tool_response_timeout(
+        self,
+    ) -> None:
+        handler_started = threading.Event()
+        release_handler = threading.Event()
+
+        class SlowHostService:
+            def handle_request(self, request):
+                handler_started.set()
+                if not release_handler.wait(1.0):
+                    raise AssertionError("test did not release host-service handler")
+                return create_host_service_response(
+                    request.request_id,
+                    0,
+                    b"trusted work completed",
+                )
+
+        with (
+            connected_protocol(SlowHostService()) as (protocol, peer),
+            ThreadPoolExecutor() as pool,
+            patch(
+                "harness.tool_protocol._RESPONSE_TIMEOUT_SECONDS",
+                0.05,
+            ),
+        ):
+            client = ToolClient(protocol)
+            first = pool.submit(client.list_tools)
+            first_request = receive_peer_frame(peer)
+            peer.sendall(host_request(78, "slow_trusted_service", ()))
+            self.assertTrue(handler_started.wait(1.0))
+            time.sleep(0.12)
+            self.assertFalse(first.done())
+
+            release_handler.set()
+            host_response = receive_peer_frame(peer)
+            self.assertEqual(
+                (host_response.message_type, host_response.request_id),
+                (0x8003, 78),
+            )
+            self.assertEqual(
+                host_response.payload,
+                struct.pack("<I", 0) + b"trusted work completed",
+            )
+            peer.sendall(
+                encode_frame(
+                    Frame(
+                        0x8001,
+                        first_request.request_id,
+                        struct.pack("<H", 0),
+                    )
+                )
+            )
+            self.assertEqual(first.result(1.0), [])
+
+            second = pool.submit(client.list_tools)
+            second_request = receive_peer_frame(peer)
+            peer.sendall(
+                encode_frame(
+                    Frame(
+                        0x8001,
+                        second_request.request_id,
+                        struct.pack("<H", 0),
+                    )
+                )
+            )
+            self.assertEqual(second.result(1.0), [])
 
     def test_rejects_mismatched_request_id_and_message_type(self) -> None:
         with connected_protocol() as (protocol, peer), ThreadPoolExecutor() as pool:
