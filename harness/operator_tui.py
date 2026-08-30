@@ -11,7 +11,7 @@ from pathlib import Path
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content, Span
 from textual.widgets import Input, Static
 from textual.timer import Timer
@@ -21,6 +21,7 @@ from .generation_git import GenerationGitRecorder
 from .generation_runtime import CodexOSRun, RuntimeState
 from .operator_console import OperatorConsole
 from .operator_tui_model import (
+    ActivityDisplayEntry,
     ActivityFollowState,
     OperatorActivityModel,
     safe_display_text,
@@ -28,6 +29,124 @@ from .operator_tui_model import (
 
 
 PAUSE_CONFIRMATION_SECONDS = 2.5
+
+_ACTIVITY_STYLES = {
+    "implementor": "bold cyan",
+    "reviewer": "bold magenta",
+    "reasoning": "italic bright_blue",
+    "tool": "bold yellow",
+    "tool-failed": "bold red",
+    "build": "bold green",
+    "operator": "bold white",
+    "harness": "bold green",
+}
+
+
+class ActivityRow(Static):
+    """One mounted transcript widget for one stable logical activity key."""
+
+    def __init__(self, entry: ActivityDisplayEntry) -> None:
+        self._entry = entry
+        super().__init__(_render_activity_entry(entry), markup=False)
+
+    @property
+    def entry(self) -> ActivityDisplayEntry:
+        return self._entry
+
+    def update_entry(self, entry: ActivityDisplayEntry) -> None:
+        if entry == self._entry:
+            return
+        self._entry = entry
+        self.update(_render_activity_entry(entry))
+
+
+class ActivityTranscript(Vertical):
+    """Incrementally reconcile ordered model entries to keyed row widgets."""
+
+    def __init__(self) -> None:
+        super().__init__(id="activity-rows")
+        self._rows: dict[str, ActivityRow] = {}
+        self._entries: dict[str, ActivityDisplayEntry] = {}
+        self._order: tuple[str, ...] = ()
+
+    @property
+    def row_keys(self) -> tuple[str, ...]:
+        return self._order
+
+    @property
+    def rows(self) -> tuple[ActivityRow, ...]:
+        return tuple(self._rows[key] for key in self._order)
+
+    def row_for(self, key: str) -> ActivityRow:
+        return self._rows[key]
+
+    def on_resize(self, event: events.Resize) -> None:
+        app = self.app
+        if isinstance(app, OperatorTui):
+            app._sync_activity_anchor()
+
+    def reconcile(self, entries: tuple[ActivityDisplayEntry, ...]) -> None:
+        desired_order = tuple(entry.key for entry in entries)
+        desired_keys = set(desired_order)
+        entries_by_key = {entry.key: entry for entry in entries}
+
+        for key in self._order:
+            if key not in desired_keys:
+                self._rows.pop(key).remove()
+                self._entries.pop(key, None)
+
+        for entry in entries:
+            row = self._rows.get(entry.key)
+            if row is not None and self._entries[entry.key] != entry:
+                row.update_entry(entry)
+                self._entries[entry.key] = entry
+
+        index = 0
+        while index < len(desired_order):
+            if desired_order[index] in self._rows:
+                index += 1
+                continue
+            missing: list[ActivityRow] = []
+            while index < len(desired_order):
+                key = desired_order[index]
+                if key in self._rows:
+                    break
+                entry = entries_by_key[key]
+                row = ActivityRow(entry)
+                self._rows[key] = row
+                self._entries[key] = entry
+                missing.append(row)
+                index += 1
+            if index < len(desired_order):
+                self.mount(*missing, before=self._rows[desired_order[index]])
+            else:
+                self.mount(*missing)
+
+        for index, key in enumerate(desired_order):
+            row = self._rows[key]
+            current = self.children[index]
+            if current is not row:
+                self.move_child(row, before=current)
+
+        self._order = desired_order
+
+
+def _render_activity_entry(entry: ActivityDisplayEntry) -> Content:
+    parts = [entry.label]
+    spans = [
+        Span(
+            0,
+            len(entry.label),
+            _ACTIVITY_STYLES.get(entry.category, "bold"),
+        )
+    ]
+    if entry.body:
+        parts.append(
+            "\n" + "\n".join(
+                f"  {line}" for line in entry.body.splitlines() or [""]
+            )
+        )
+    return Content("".join(parts), spans)
 
 
 @dataclass(slots=True)
@@ -135,9 +254,17 @@ class OperatorTui(App[None]):
         scrollbar-size-vertical: 1;
         padding: 0 1;
     }
-    #activity {
+    #activity-rows {
         width: 1fr;
         height: auto;
+    }
+    ActivityRow {
+        width: 1fr;
+        height: auto;
+        margin-bottom: 1;
+    }
+    ActivityRow:last-child {
+        margin-bottom: 0;
     }
     #follow-indicator {
         height: 1;
@@ -229,7 +356,7 @@ class OperatorTui(App[None]):
     def compose(self) -> ComposeResult:
         yield Static("", id="status-header")
         with VerticalScroll(id="activity-scroll"):
-            yield Static("", id="activity", markup=False)
+            yield ActivityTranscript()
         yield Static("", id="follow-indicator")
         with Horizontal(id="command-row"):
             yield Static("codexos>", id="command-prompt")
@@ -237,6 +364,7 @@ class OperatorTui(App[None]):
 
     def on_mount(self) -> None:
         self._refresh_header()
+        self.call_after_refresh(self._sync_activity_anchor)
         self.set_interval(0.05, self._drain_activity)
         self.set_interval(0.25, self._refresh_header)
         self._executor.start()
@@ -364,54 +492,26 @@ class OperatorTui(App[None]):
 
     def _activity_changed(self, count: int) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
-        saved_y = pane.scroll_y
+        pane.anchor(False)
         self._follow.arrived(count)
-        self.query_one("#activity", Static).update(self._render_activity())
-        if self._follow.following:
-            self.call_after_refresh(pane.scroll_end, animate=False, immediate=True)
-        else:
-            self.call_after_refresh(
-                pane.scroll_to,
-                y=saved_y,
-                animate=False,
-                immediate=True,
-            )
+        self.query_one(ActivityTranscript).reconcile(self._model.entries)
+        self.call_after_refresh(self._sync_activity_anchor)
         self._refresh_follow_indicator()
 
-    def _render_activity(self) -> Content:
-        parts: list[str] = []
-        spans: list[Span] = []
-        length = 0
-        styles = {
-            "implementor": "bold cyan",
-            "reviewer": "bold magenta",
-            "reasoning": "italic bright_blue",
-            "tool": "bold yellow",
-            "tool-failed": "bold red",
-            "build": "bold green",
-            "operator": "bold white",
-            "harness": "bold green",
-        }
-        for index, entry in enumerate(self._model.entries):
-            if index:
-                parts.append("\n\n")
-                length += 2
-            parts.append(entry.label)
-            spans.append(
-                Span(
-                    length,
-                    length + len(entry.label),
-                    styles.get(entry.category, "bold"),
-                )
-            )
-            length += len(entry.label)
-            if entry.body:
-                body = "\n" + "\n".join(
-                    f"  {line}" for line in entry.body.splitlines() or [""]
-                )
-                parts.append(body)
-                length += len(body)
-        return Content("".join(parts), spans)
+    def _sync_activity_anchor(self) -> None:
+        pane = self.query_one("#activity-scroll", VerticalScroll)
+        if self._follow.following and pane.max_scroll_y > 0:
+            pane.anchor()
+            return
+        was_anchored = pane.is_anchored
+        pane.anchor(False)
+        if self._follow.following:
+            # Textual 8.2.8 may leave a negative scroll position when anchored
+            # content shrinks to fit; scroll_to() is a no-op without overflow.
+            pane.scroll_target_y = 0
+            pane.set_scroll(None, 0)
+            if was_anchored:
+                pane.refresh(layout=True)
 
     def _refresh_header(self) -> None:
         try:
@@ -519,19 +619,20 @@ class OperatorTui(App[None]):
     def action_activity_page_up(self) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.scrolled(pane.scroll_y)
+        pane.anchor(False)
         pane.scroll_page_up(animate=False)
         self._refresh_follow_indicator()
 
     def action_activity_page_down(self) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.scrolled(pane.scroll_y)
+        pane.anchor(False)
         pane.scroll_page_down(animate=False)
         self._refresh_follow_indicator()
 
     def action_activity_end(self) -> None:
-        pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.return_to_live()
-        pane.scroll_end(animate=False, immediate=True)
+        self._sync_activity_anchor()
         self._refresh_follow_indicator()
 
     def action_pause_shortcut(self) -> None:
@@ -567,11 +668,13 @@ class OperatorTui(App[None]):
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.scrolled(pane.scroll_y)
+        pane.anchor(False)
         self._refresh_follow_indicator()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.scrolled(pane.scroll_y)
+        pane.anchor(False)
         self._refresh_follow_indicator()
 
 

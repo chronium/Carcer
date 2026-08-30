@@ -64,3 +64,18 @@ history is not a transcript archive, does not enter `events.jsonl` or OTLP, and
 never becomes guest or successor memory. Slow, absent, stopped, or broken
 observation remains unable to affect Codex turns, reviewer consultations, guest
 tools, builds, or generation lifecycle.
+
+The transcript keeps event interpretation in the Textual-independent
+`OperatorActivityModel`. Each resulting keyed logical entry has one mounted
+Textual row. New keys mount rows, streamed updates change only their existing
+row, and scrollback trimming unmounts only the discarded keys; ordinary deltas
+never reconstruct the complete transcript widget tree. This preserves stable
+row identity and historical viewport position while activity continues below.
+
+Live follow uses the scroll container's bottom anchor. Manual scrolling releases
+that anchor while new events and row updates continue to accumulate, and `End`
+returns to the newest row and clears the unread count. Display history remains
+bounded to 800 logical entries and 2 MiB, with each individual payload rendered
+up to 64 KiB and an explicit marker when older displayed activity is discarded.
+These are UI bounds only: they neither truncate nor apply backpressure to the
+semantic `CodexActivityStream`.
