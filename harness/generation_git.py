@@ -43,6 +43,7 @@ class GenerationGitRecorder:
         self._git_executable = git
         self._repository = Path(repository).resolve()
         self._run_directory = Path(run_directory).resolve()
+        self._run_identifier = self._run_directory.name
         if not base_ref:
             raise GenerationGitRecorderError("Git base ref must not be empty")
         if self._run_directory.is_symlink() or not self._run_directory.is_dir():
@@ -57,6 +58,21 @@ class GenerationGitRecorder:
             raise GenerationGitRecorderError(
                 "Git repository path must be its worktree root"
             )
+        if self._run_identifier == "experiment":
+            raise GenerationGitRecorderError(
+                "run identifier 'experiment' is reserved for legacy generation tags"
+            )
+        tag_ref = "refs/tags/" + _generation_tag(self._run_identifier, 0)
+        valid_ref = self._git(
+            self._repository,
+            ["check-ref-format", tag_ref],
+            check=False,
+        )
+        if valid_ref.returncode != 0:
+            raise GenerationGitRecorderError(
+                "run-directory basename cannot form a Git tag namespace: "
+                + self._run_identifier
+            )
         self._base_commit = self._resolve_commit(base_ref)
 
     def reconcile(self) -> list[GenerationGitRecord]:
@@ -67,11 +83,17 @@ class GenerationGitRecorder:
                 if archive.outcome == "completed":
                     records.append(self._record(archive))
                 elif self._resolve_optional_tag(
-                    _generation_tag(archive.generation)
+                    _generation_tag(
+                        self._run_identifier,
+                        archive.generation,
+                    )
                 ) is not None:
                     raise GenerationGitRecorderError(
                         "aborted generation has a conflicting Git tag: "
-                        + _generation_tag(archive.generation)
+                        + _generation_tag(
+                            self._run_identifier,
+                            archive.generation,
+                        )
                     )
             return records
         except GenerationGitRecorderError:
@@ -88,12 +110,19 @@ class GenerationGitRecorder:
         snapshot = snapshot_path.read_bytes()
         entries = decode_source_snapshot(snapshot)
         parent = self._parent_commit(archive)
-        tag = _generation_tag(archive.generation)
+        tag = _generation_tag(self._run_identifier, archive.generation)
         message = _commit_message(archive, snapshot)
+        tag_message = _tag_message(archive, self._run_identifier)
 
         existing = self._resolve_optional_tag(tag)
         if existing is not None:
-            self._verify_existing(tag, existing, parent, message)
+            self._verify_existing(
+                tag,
+                existing,
+                parent,
+                message,
+                tag_message,
+            )
             return GenerationGitRecord(
                 archive.generation,
                 tag,
@@ -104,6 +133,8 @@ class GenerationGitRecorder:
         with tempfile.TemporaryDirectory(
             prefix=f"codexos-generation-{archive.generation:04d}-git-"
         ) as temporary:
+            tag_message_path = Path(temporary) / "tag-message"
+            tag_message_path.write_text(tag_message, encoding="utf-8")
             worktree = Path(temporary) / "worktree"
             self._git(
                 self._repository,
@@ -122,7 +153,17 @@ class GenerationGitRecorder:
                 commit = self._resolve_commit("HEAD", worktree)
                 self._git(
                     self._repository,
-                    ["tag", "--no-sign", "--no-annotate", tag, commit],
+                    [
+                        "tag",
+                        "--annotate",
+                        "--no-sign",
+                        "--cleanup=verbatim",
+                        "--file",
+                        str(tag_message_path),
+                        "--",
+                        tag,
+                        commit,
+                    ],
                 )
             except BaseException:
                 failed = True
@@ -161,7 +202,7 @@ class GenerationGitRecorder:
             raise GenerationGitRecorderError(
                 f"generation {archive.generation} has no parent generation"
             )
-        tag = _generation_tag(parent)
+        tag = _generation_tag(self._run_identifier, parent)
         commit = self._resolve_optional_tag(tag)
         if commit is None:
             raise GenerationGitRecorderError(
@@ -175,7 +216,16 @@ class GenerationGitRecorder:
         commit: str,
         parent: str,
         message: str,
+        tag_message: str,
     ) -> None:
+        object_type = self._git_text(
+            self._repository,
+            ["cat-file", "-t", f"refs/tags/{tag}"],
+        ).strip()
+        if object_type != "tag":
+            raise GenerationGitRecorderError(
+                f"generation tag is not annotated: {tag}"
+            )
         ancestry = self._git_text(
             self._repository,
             ["rev-list", "--parents", "-n", "1", commit],
@@ -202,6 +252,33 @@ class GenerationGitRecorder:
         if existing_message != message:
             raise GenerationGitRecorderError(
                 f"generation tag has conflicting provenance: {tag}"
+            )
+        raw_tag = self._git(
+            self._repository,
+            ["cat-file", "tag", f"refs/tags/{tag}"],
+        ).stdout
+        tag_separator = raw_tag.find(b"\n\n")
+        if tag_separator < 0:
+            raise GenerationGitRecorderError(
+                f"generation tag object is malformed: {tag}"
+            )
+        tag_headers = raw_tag[:tag_separator].splitlines()
+        if (
+            f"object {commit}".encode("ascii") not in tag_headers
+            or b"type commit" not in tag_headers
+        ):
+            raise GenerationGitRecorderError(
+                f"generation tag does not directly target its commit: {tag}"
+            )
+        try:
+            existing_tag_message = raw_tag[tag_separator + 2 :].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise GenerationGitRecorderError(
+                f"generation tag message is not UTF-8: {tag}"
+            ) from error
+        if existing_tag_message != tag_message:
+            raise GenerationGitRecorderError(
+                f"generation tag has conflicting annotation: {tag}"
             )
 
     def _replace_seed_tree(
@@ -360,8 +437,8 @@ class GenerationGitRecorder:
         return result
 
 
-def _generation_tag(generation: int) -> str:
-    return f"experiment/generation-{generation:04d}"
+def _generation_tag(run_identifier: str, generation: int) -> str:
+    return f"{run_identifier}/generation-{generation:04d}"
 
 
 def _commit_message(archive: ArchivedGeneration, snapshot: bytes) -> str:
@@ -379,6 +456,28 @@ def _commit_message(archive: ArchivedGeneration, snapshot: bytes) -> str:
         "Outcome: completed\n"
         f"Source-Snapshot-SHA256: {digest}\n"
         "Recorded-By: CodexOS harness\n"
+    )
+
+
+def _tag_message(archive: ArchivedGeneration, run_identifier: str) -> str:
+    parent = (
+        "none"
+        if archive.parent_generation is None
+        else str(archive.parent_generation)
+    )
+    if archive.handoff is None:
+        raise GenerationGitRecorderError(
+            f"completed generation {archive.generation} has no handoff"
+        )
+    return (
+        f"CodexOS generation {archive.generation}\n\n"
+        f"Run: {run_identifier}\n"
+        f"Generation: {archive.generation}\n"
+        f"Parent-Generation: {parent}\n"
+        f"Transition: {archive.transition}\n"
+        "Outcome: completed\n\n"
+        "Handoff:\n"
+        f"{archive.handoff}"
     )
 
 

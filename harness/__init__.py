@@ -1,6 +1,7 @@
 """External CodexOS harness."""
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
+from .candidate_boot import CandidateBootResult, CandidateBootValidator
 from .codex_generation_worker import (
     CodexGenerationResult,
     CodexGenerationSession,
@@ -54,6 +55,8 @@ from .trusted_build import BuildResult, BuildStatus, build_source_snapshot
 
 __all__ = [
     "BuildHostService",
+    "CandidateBootResult",
+    "CandidateBootValidator",
     "BuildResult",
     "BuildStatus",
     "ArchivedGeneration",

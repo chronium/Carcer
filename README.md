@@ -93,6 +93,13 @@ A generation is one boot of the evolving operating system plus one fresh Codex s
 
 A generation may perform many edits and builds.
 
+A guest-visible build is successful only when its exact candidate image both
+compiles and proves that it can boot and speak the canonical development
+protocol under the current trusted hardware profile. Compile success alone is
+not sufficient to make a source snapshot eligible for generation completion.
+The trusted details are documented in
+[`docs/validated-successors-and-provenance.md`](docs/validated-successors-and-provenance.md).
+
 When the guest requests a restart, it is requesting the end of the current generation.
 
 The harness must then:

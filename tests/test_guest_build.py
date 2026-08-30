@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
+    CandidateBootValidator,
     CodexOSHostServices,
     QemuProcessController,
     SerialConnection,
@@ -51,7 +53,14 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
-            host_services = CodexOSHostServices(temporary_path / "staging")
+            host_services = CodexOSHostServices(
+                temporary_path / "staging",
+                CandidateBootValidator(
+                    qemu,
+                    TEST_HARDWARE_PROFILE,
+                    temporary_parent=temporary_path,
+                ),
+            )
 
             first_serial_path = temporary_path / "first-serial.sock"
             first_serial = SerialConnection(first_serial_path)

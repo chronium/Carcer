@@ -1,14 +1,17 @@
 import struct
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from harness import (
     BuildHostService,
+    CandidateBootValidator,
     CodexOSHostServices,
     FeatureRequestStore,
     HostServiceRequest,
     SnapshotFile,
+    TEST_HARDWARE_PROFILE,
     encode_source_snapshot,
 )
 
@@ -19,7 +22,10 @@ class BuildHostServiceIntegrationTests(unittest.TestCase):
         files = _current_seed_files(repository)
 
         with tempfile.TemporaryDirectory() as temporary:
-            service = BuildHostService(Path(temporary) / "staging")
+            service = BuildHostService(
+                Path(temporary) / "staging",
+                _candidate_validator(temporary),
+            )
             success = service.handle_request(
                 HostServiceRequest(
                     41,
@@ -70,7 +76,10 @@ class BuildHostServiceIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             staging = Path(temporary) / "staging"
-            service = BuildHostService(staging)
+            service = BuildHostService(
+                staging,
+                _candidate_validator(temporary),
+            )
 
             invalid = service.handle_request(
                 HostServiceRequest(50, "build", (b"\x01",))
@@ -99,6 +108,7 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             store = FeatureRequestStore(Path(temporary) / "run")
             service = CodexOSHostServices(
                 Path(temporary) / "staging",
+                _candidate_validator(temporary),
                 feature_request_store=store,
                 generation=7,
             )
@@ -162,7 +172,10 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
         snapshot = encode_source_snapshot(files)
 
         with tempfile.TemporaryDirectory() as temporary:
-            no_build = CodexOSHostServices(Path(temporary) / "no-build")
+            no_build = CodexOSHostServices(
+                Path(temporary) / "no-build",
+                _candidate_validator(temporary),
+            )
             no_success = no_build.handle_request(
                 HostServiceRequest(70, "finish_generation", (b"handoff", snapshot))
             )
@@ -187,7 +200,10 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             self.assertEqual(_response(malformed.payload)[0], 2)
             self.assertIsNone(no_build.pending_generation_finish)
 
-            service = CodexOSHostServices(Path(temporary) / "staging")
+            service = CodexOSHostServices(
+                Path(temporary) / "staging",
+                _candidate_validator(temporary),
+            )
             success = service.handle_request(
                 HostServiceRequest(74, "build", (snapshot,))
             )
@@ -250,6 +266,7 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
             store = FeatureRequestStore(Path(temporary) / "run")
             service = CodexOSHostServices(
                 Path(temporary) / "staging",
+                _candidate_validator(temporary),
                 feature_request_store=store,
                 generation=4,
             )
@@ -263,6 +280,17 @@ class GenerationFinishHostServiceIntegrationTests(unittest.TestCase):
 
 def _response(payload: bytes) -> tuple[int, bytes]:
     return struct.unpack_from("<I", payload)[0], payload[4:]
+
+
+def _candidate_validator(temporary: str) -> CandidateBootValidator:
+    qemu = shutil.which("qemu-system-x86_64")
+    if qemu is None:
+        raise AssertionError("qemu-system-x86_64 must be installed")
+    return CandidateBootValidator(
+        qemu,
+        TEST_HARDWARE_PROFILE,
+        temporary_parent=temporary,
+    )
 
 
 def _current_seed_files(repository: Path) -> tuple[SnapshotFile, ...]:

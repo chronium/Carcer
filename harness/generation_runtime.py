@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .candidate_boot import CandidateBootValidator
 from .feature_requests import FeatureRequest, FeatureRequestStore
 from .generation_finish_host_service import (
     CodexOSHostServices,
@@ -24,6 +25,7 @@ from .hardware import (
     discover_qemu_version,
     validate_hardware_manifest,
 )
+from .guest_startup import wait_for_ready
 from .observability import ExperimentObservability
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
@@ -31,7 +33,6 @@ from .serial import SerialConnection
 from .source_snapshot import decode_source_snapshot
 from .tool_protocol import ToolClient, ToolResult
 
-_READY_MARKER = b"CODEXOS-SEED-READY\n"
 _ABORT_MARKER = b"Generation aborted by operator."
 _STARTUP_TIMEOUT_SECONDS = 10.0
 _QEMU_EXIT_TIMEOUT_SECONDS = 2.0
@@ -520,6 +521,10 @@ class CodexOSRun:
         serial = SerialConnection(serial_path)
         host_services = CodexOSHostServices(
             workspace_path / "builds",
+            CandidateBootValidator(
+                self._qemu_executable,
+                self._hardware_profile,
+            ),
             feature_request_store=self._feature_request_store,
             generation=generation_number,
             observability=self._observability,
@@ -548,7 +553,7 @@ class CodexOSRun:
             )
             qmp.connect()
             serial.connect()
-            _wait_for_ready(serial)
+            wait_for_ready(serial, _STARTUP_TIMEOUT_SECONDS)
             self._tool_client = ToolClient(serial, host_services)
             self._current_boot_image = boot_image
             self._current_parent_generation = parent_generation
@@ -887,16 +892,3 @@ def _validate_generation_metadata(
     if transition not in {"successor", "rollback"}:
         raise ValueError("generation archive metadata is malformed")
     return outcome
-
-
-def _wait_for_ready(serial: SerialConnection) -> None:
-    received = bytearray()
-    deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
-    while _READY_MARKER not in received:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("timed out waiting for CODEXOS-SEED-READY")
-        try:
-            received.extend(serial.read(4096, min(0.5, remaining)))
-        except TimeoutError:
-            continue
