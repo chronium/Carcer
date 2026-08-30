@@ -510,7 +510,9 @@ class CodexGenerationSession:
                 if transcript is not None:
                     transcript.finish_turn(
                         turn_id,
-                        response=final_message,
+                        response=(
+                            final_message if status == "completed" else None
+                        ),
                         status=status,
                     )
             self._last_turn_status = status

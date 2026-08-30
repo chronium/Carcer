@@ -847,6 +847,107 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             self.assertIn(str(artifact.relative_to(repository)), output.getvalue())
             _assert_process_dead(self, fake.record()["pid"])
 
+    def test_end_interrupts_active_interview_before_persisting(self) -> None:
+        marker = "EXIT-INTERVIEW-END-ACTIVE"
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "finish_generation",
+                            "arguments": {"handoff": "Frozen handoff."},
+                        }
+                    ]
+                },
+                {
+                    "visible_activity": [
+                        {
+                            "kind": "reasoning_summary_delta",
+                            "text": "Captured before explicit end.",
+                        }
+                    ],
+                    "hold_for_interrupt": True,
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            fake = _fake_codex(scenario, root / "fake-codex")
+            runtime = _mock_runtime(root / "experiment-end", RuntimeState.RUNNING)
+
+            def finish(name: str, arguments: list[bytes]) -> ToolResult:
+                self.assertEqual(name, "finish_generation")
+                runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                runtime.active_pid = None
+                runtime.pending_generation_finish = PendingGenerationFinish(
+                    "Frozen handoff.",
+                    b"frozen snapshot",
+                    root / "kernel.elf",
+                    root / "codexos.iso",
+                )
+                runtime.previous_handoff = "Frozen handoff."
+                return ToolResult(0, b"")
+
+            runtime.invoke_tool.side_effect = finish
+            holder: dict[str, OperatorConsole] = {}
+
+            def wait_for_gate() -> None:
+                _wait_for(
+                    lambda: holder["console"].exit_interview_state == "available"
+                )
+
+            def wait_for_active_interview_turn() -> None:
+                _wait_for(
+                    lambda: holder["console"]._session is not None
+                    and holder["console"]._session.active_turn
+                )
+
+            output = io.StringIO()
+            console = OperatorConsole(
+                runtime,
+                _ObservedInput(
+                    [
+                        ("agent\n", None),
+                        ("interview\n", wait_for_gate),
+                        (marker + "\n", None),
+                        ("end\n", wait_for_active_interview_turn),
+                        ("status\n", None),
+                        ("quit\n", None),
+                    ]
+                ),
+                output,
+                codex_executable=str(fake.executable),
+                codex_auth_file=fake.auth_file,
+                interview_repository=repository,
+            )
+            holder["console"] = console
+            console.run()
+
+            artifact = (
+                repository
+                / "artifacts"
+                / "interviews"
+                / "experiment-end"
+                / "generation-0000.md"
+            )
+            transcript = artifact.read_text(encoding="utf-8")
+            self.assertIn("Interview status: interrupted", transcript)
+            self.assertNotIn("Interview status: completed", transcript)
+            self.assertIn(marker, transcript)
+            self.assertIn("Captured before explicit end.", transcript)
+            self.assertIn("Turn status: interrupted", transcript)
+            self.assertNotIn("### Sol\n", transcript)
+            methods = [
+                message.get("method") for message in fake.record()["messages"]
+            ]
+            self.assertEqual(methods.count("turn/interrupt"), 1)
+            self.assertIn("State: AWAITING_NEXT_GENERATION", output.getvalue())
+            self.assertIn("Codex session: none", output.getvalue())
+            self.assertIs(runtime.state, RuntimeState.STOPPED)
+            _assert_process_dead(self, fake.record()["pid"])
+
     def test_failed_turn_after_finish_is_not_retained_for_interview(self) -> None:
         scenario = {
             "tool_calls": [

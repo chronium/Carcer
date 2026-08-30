@@ -772,7 +772,6 @@ class OperatorConsole:
         self._terminate_agent_session(
             interrupt=True,
             end_interview=True,
-            interview_outcome="completed",
         )
         self._print("Exit interview ended.")
 
@@ -825,7 +824,6 @@ class OperatorConsole:
         *,
         interrupt: bool,
         end_interview: bool = False,
-        interview_outcome: str | None = None,
     ) -> None:
         with self._agent_lock:
             session = self._session
@@ -838,11 +836,13 @@ class OperatorConsole:
             except (OSError, RuntimeError, CodexGenerationWorkerError):
                 pass
         if self._interview_open:
-            self._persist_exit_interview(
-                session,
-                interview_outcome
-                or ("interrupted" if turn is not None else "incomplete"),
-            )
+            if turn is not None:
+                interview_outcome = "interrupted"
+            elif end_interview:
+                interview_outcome = "completed"
+            else:
+                interview_outcome = "incomplete"
+            self._persist_exit_interview(session, interview_outcome)
         if end_interview:
             try:
                 session.end_exit_interview()
