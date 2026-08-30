@@ -62,22 +62,27 @@ class GenerationGitRecorder:
             raise GenerationGitRecorderError(
                 "run identifier 'experiment' is reserved for legacy generation tags"
             )
-        tag_ref = "refs/tags/" + _generation_tag(self._run_identifier, 0)
-        valid_ref = self._git(
-            self._repository,
-            ["check-ref-format", tag_ref],
-            check=False,
-        )
-        if valid_ref.returncode != 0:
-            raise GenerationGitRecorderError(
-                "run-directory basename cannot form a Git tag namespace: "
-                + self._run_identifier
+        for ref in (
+            "refs/tags/" + _generation_tag(self._run_identifier, 0),
+            "refs/heads/" + _lineage_branch(self._run_identifier, 0),
+        ):
+            valid_ref = self._git(
+                self._repository,
+                ["check-ref-format", ref],
+                check=False,
             )
+            if valid_ref.returncode != 0:
+                raise GenerationGitRecorderError(
+                    "run-directory basename cannot form a Git tag namespace "
+                    "or lineage branch namespace: "
+                    + self._run_identifier
+                )
         self._base_commit = self._resolve_commit(base_ref)
 
     def reconcile(self) -> list[GenerationGitRecord]:
         try:
             archives = CodexOSRun(self._run_directory).archived_generations()
+            CodexOSRun._validate_archived_history(archives)
             records: list[GenerationGitRecord] = []
             for archive in archives:
                 if archive.outcome == "completed":
@@ -95,6 +100,7 @@ class GenerationGitRecorder:
                             archive.generation,
                         )
                     )
+            self._reconcile_lineages(archives, records)
             return records
         except GenerationGitRecorderError:
             raise
@@ -281,6 +287,194 @@ class GenerationGitRecorder:
                 f"generation tag has conflicting annotation: {tag}"
             )
 
+    def _reconcile_lineages(
+        self,
+        archives: list[ArchivedGeneration],
+        records: list[GenerationGitRecord],
+    ) -> None:
+        commits = {record.generation: record.commit for record in records}
+        generation_lineage: dict[int, int] = {}
+        lineage_commits: dict[int, list[tuple[int, str]]] = {}
+        next_lineage = 0
+        for archive in archives:
+            if archive.outcome != "completed":
+                continue
+            if archive.generation == 0:
+                lineage = next_lineage
+                next_lineage += 1
+            elif archive.transition == "rollback":
+                lineage = next_lineage
+                next_lineage += 1
+            else:
+                parent = archive.parent_generation
+                try:
+                    lineage = generation_lineage[parent]
+                except KeyError as error:
+                    raise GenerationGitRecorderError(
+                        f"generation {archive.generation} has no completed "
+                        "lineage parent"
+                    ) from error
+            generation_lineage[archive.generation] = lineage
+            lineage_commits.setdefault(lineage, []).append(
+                (archive.generation, commits[archive.generation])
+            )
+
+        expected = {
+            _lineage_branch(self._run_identifier, lineage): entries[-1][1]
+            for lineage, entries in lineage_commits.items()
+        }
+        self._reject_unexpected_lineage_refs(set(expected))
+        active_lineage = max(lineage_commits, default=None)
+        updates: list[tuple[str, str, str]] = []
+        for lineage, entries in lineage_commits.items():
+            branch = _lineage_branch(self._run_identifier, lineage)
+            expected_commit = entries[-1][1]
+            existing = self._resolve_optional_branch(branch)
+            if existing is None:
+                updates.append((branch, expected_commit, ""))
+                continue
+            if existing == expected_commit:
+                continue
+            known_positions = {
+                commit: position
+                for position, (_, commit) in enumerate(entries)
+            }
+            position = known_positions.get(existing)
+            if (
+                lineage != active_lineage
+                or position is None
+                or self._branch_has_reached(branch, expected_commit)
+            ):
+                raise GenerationGitRecorderError(
+                    f"lineage branch has conflicting provenance: {branch}"
+                )
+            if position >= len(entries) - 1 or not self._is_ancestor(
+                existing,
+                expected_commit,
+            ):
+                raise GenerationGitRecorderError(
+                    f"lineage branch cannot be fast-forwarded safely: {branch}"
+                )
+            updates.append((branch, expected_commit, existing))
+
+        for branch, new_commit, old_commit in updates:
+            self._git(
+                self._repository,
+                [
+                    "update-ref",
+                    "--create-reflog",
+                    "-m",
+                    "CodexOS lineage reconciliation",
+                    f"refs/heads/{branch}",
+                    new_commit,
+                    old_commit,
+                ],
+            )
+
+    def _reject_unexpected_lineage_refs(self, expected: set[str]) -> None:
+        prefix = f"refs/heads/{self._run_identifier}/lineage-"
+        refs = self._git_text(
+            self._repository,
+            [
+                "for-each-ref",
+                "--format=%(refname)",
+                f"refs/heads/{self._run_identifier}",
+            ],
+        ).splitlines()
+        for ref in refs:
+            if not ref.startswith(prefix):
+                continue
+            suffix = ref.removeprefix(prefix)
+            if (
+                suffix.isascii()
+                and suffix.isdecimal()
+                and ref == "refs/heads/" + _lineage_branch(
+                    self._run_identifier,
+                    int(suffix),
+                )
+                and ref.removeprefix("refs/heads/") not in expected
+            ):
+                raise GenerationGitRecorderError(
+                    f"unexpected lineage branch conflicts with archives: {ref}"
+                )
+
+    def _resolve_optional_branch(self, branch: str) -> str | None:
+        ref = f"refs/heads/{branch}"
+        exists = self._git(
+            self._repository,
+            ["show-ref", "--verify", "--quiet", ref],
+            check=False,
+        )
+        if exists.returncode == 1:
+            return None
+        if exists.returncode != 0:
+            raise GenerationGitRecorderError(
+                f"failed to inspect lineage branch {branch}: "
+                + _diagnostics(exists.stdout)
+            )
+        symbolic = self._git(
+            self._repository,
+            ["symbolic-ref", "--quiet", ref],
+            check=False,
+        )
+        if symbolic.returncode == 0:
+            raise GenerationGitRecorderError(
+                f"lineage branch must be a direct branch ref: {branch}"
+            )
+        if symbolic.returncode != 1:
+            raise GenerationGitRecorderError(
+                f"failed to inspect lineage branch {branch}: "
+                + _diagnostics(symbolic.stdout)
+            )
+        target = self._git_text(
+            self._repository,
+            ["rev-parse", "--verify", "--end-of-options", ref],
+        ).strip()
+        object_type = self._git_text(
+            self._repository,
+            ["cat-file", "-t", target],
+        ).strip()
+        if object_type != "commit":
+            raise GenerationGitRecorderError(
+                f"lineage branch does not directly target a commit: {branch}"
+            )
+        return target
+
+    def _branch_has_reached(self, branch: str, commit: str) -> bool:
+        ref = f"refs/heads/{branch}"
+        exists = self._git(
+            self._repository,
+            ["reflog", "exists", ref],
+            check=False,
+        )
+        if exists.returncode == 1:
+            return False
+        if exists.returncode != 0:
+            raise GenerationGitRecorderError(
+                f"failed to inspect lineage branch history {branch}: "
+                + _diagnostics(exists.stdout)
+            )
+        history = self._git_text(
+            self._repository,
+            ["reflog", "show", "--format=%H", ref],
+        ).splitlines()
+        return commit in history
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        result = self._git(
+            self._repository,
+            ["merge-base", "--is-ancestor", ancestor, descendant],
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise GenerationGitRecorderError(
+            "failed to verify lineage branch ancestry: "
+            + _diagnostics(result.stdout)
+        )
+
     def _replace_seed_tree(
         self,
         worktree: Path,
@@ -439,6 +633,10 @@ class GenerationGitRecorder:
 
 def _generation_tag(run_identifier: str, generation: int) -> str:
     return f"{run_identifier}/generation-{generation:04d}"
+
+
+def _lineage_branch(run_identifier: str, lineage: int) -> str:
+    return f"{run_identifier}/lineage-{lineage:04d}"
 
 
 def _commit_message(archive: ArchivedGeneration, snapshot: bytes) -> str:

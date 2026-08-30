@@ -37,3 +37,60 @@ rewriting them.
 The legacy `experiment/generation-*` tags published for experiment-001 predate
 run-scoped naming. They remain historical and immutable; new recorders neither
 migrate them nor use them as parents for another run.
+
+## Browsable lineage branches
+
+Provenance has four distinct layers:
+
+```text
+generation archives
+    authoritative experimental record
+
+<run>/generation-NNNN annotated tags
+    immutable exact generation provenance and handoff
+
+<run>/lineage-NNNN branches
+    derived browsable heads for autonomous Git lineages
+
+main
+    trusted harness development
+```
+
+The initial completed lineage is `lineage-0000`. Ordinary completed successor
+generations fast-forward that lineage branch. Each completed rollback starts the
+next lineage ordinal and leaves every older lineage head frozen at its last
+completed generation. Aborted generations create no source commit or tag, do not
+advance a branch, and do not consume a lineage number.
+
+For example:
+
+```text
+G0 -- G1 -- G2 -- G3
+          \
+           G4 -- G5
+
+experiment-002/lineage-0000 -> G3
+experiment-002/lineage-0001 -> G5
+```
+
+Each lineage branch points directly at an existing generation commit. No merge,
+rebase, or synthetic commit is involved. The generation commit parents already
+encode successor and rollback ancestry from the archives. Consequently, browsing
+a lineage shows the experiment-base repository plus autonomous guest-source
+evolution; it does not show current `main`, and merging `main` into a lineage
+would corrupt this projection.
+
+Lineage branches are reconstructible browsing aids, not authoritative records.
+Reconciliation first validates or reconstructs immutable generation tags and
+then creates missing branches or safely fast-forwards the currently growing
+lineage. It rejects rewound, sideways, foreign, or unexpected managed lineage
+refs and never force-updates or deletes them. Existing pre-lineage generation
+tags and commits remain unchanged when their missing lineage branch is added.
+
+The recorder operates only on local refs. A human must explicitly push any
+lineage branch, for example `<run>/lineage-0000`, to the chosen authoritative
+remote. The harness neither selects a remote nor performs network publication.
+
+```console
+git push REMOTE experiment-002/lineage-0000
+```
