@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .candidate_boot import CandidateBootValidator
+from .codex_activity import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
+    publish_activity,
+)
 from .framing import Frame
 from .host_service_protocol import (
     HostServiceRequest,
@@ -33,10 +39,15 @@ class BuildHostService:
         self,
         staging_directory: str | Path,
         candidate_validator: CandidateBootValidator,
+        *,
+        activity_stream: CodexActivityStream | None = None,
+        generation: int | None = None,
     ) -> None:
         self._staging_directory = Path(staging_directory)
         self._staging_directory.mkdir(parents=True, exist_ok=True)
         self._candidate_validator = candidate_validator
+        self._activity_stream = activity_stream
+        self._generation = generation
         self._latest_successful_build: StagedBuildArtifacts | None = None
 
     @property
@@ -50,7 +61,12 @@ class BuildHostService:
                 1,
                 f"unknown host service: {request.service_name}".encode("utf-8"),
             )
+        self._publish(CodexActivityKind.BUILD_STARTED)
         if len(request.arguments) != 1:
+            self._publish(
+                CodexActivityKind.BUILD_COMPLETED,
+                {"status": _BUILD_HARNESS_FAILURE},
+            )
             return create_host_service_response(
                 request.request_id,
                 _BUILD_HARNESS_FAILURE,
@@ -62,14 +78,26 @@ class BuildHostService:
                 tempfile.mkdtemp(prefix="build-attempt-", dir=self._staging_directory)
             )
         except OSError:
+            self._publish(
+                CodexActivityKind.BUILD_COMPLETED,
+                {"status": _BUILD_HARNESS_FAILURE},
+            )
             return create_host_service_response(
                 request.request_id,
                 _BUILD_HARNESS_FAILURE,
                 b"cannot create build attempt storage",
             )
         result = build_source_snapshot(request.arguments[0], attempt)
+        self._publish(
+            CodexActivityKind.BUILD_COMPILE_COMPLETED,
+            {"result": result.status.value},
+        )
         if result.status is BuildStatus.SUCCESS:
             if result.kernel_elf is None or result.iso is None:
+                self._publish(
+                    CodexActivityKind.BUILD_COMPLETED,
+                    {"status": _BUILD_HARNESS_FAILURE},
+                )
                 return create_host_service_response(
                     request.request_id,
                     _BUILD_HARNESS_FAILURE,
@@ -95,8 +123,25 @@ class BuildHostService:
             status = _BUILD_HARNESS_FAILURE
             diagnostics = result.diagnostics.encode("utf-8")
 
+        self._publish(
+            CodexActivityKind.BUILD_COMPLETED,
+            {"status": status},
+        )
         return create_host_service_response(
             request.request_id,
             status,
             diagnostics,
+        )
+
+    def _publish(
+        self,
+        kind: CodexActivityKind,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        publish_activity(
+            self._activity_stream,
+            self._generation,
+            CodexActivityRole.HARNESS,
+            kind,
+            data,
         )

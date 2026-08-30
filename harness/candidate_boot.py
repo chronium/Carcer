@@ -7,6 +7,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .codex_activity import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
+    publish_activity,
+)
 from .framing import FramingError
 from .guest_startup import (
     GuestReadyError,
@@ -41,6 +47,8 @@ class CandidateBootValidator:
         *,
         ready_timeout_seconds: float = _DEFAULT_READY_TIMEOUT_SECONDS,
         temporary_parent: str | Path | None = None,
+        activity_stream: CodexActivityStream | None = None,
+        generation: int | None = None,
     ) -> None:
         if ready_timeout_seconds <= 0:
             raise ValueError("candidate readiness timeout must be positive")
@@ -50,16 +58,23 @@ class CandidateBootValidator:
         self._temporary_parent = (
             None if temporary_parent is None else Path(temporary_parent)
         )
+        self._activity_stream = activity_stream
+        self._generation = generation
 
     def validate(self, candidate_iso: str | Path) -> CandidateBootResult:
         """Return guest failure or harness failure without leaking QEMU state."""
+        self._publish(CodexActivityKind.BUILD_CANDIDATE_STARTED)
         try:
             workspace = tempfile.TemporaryDirectory(
                 prefix="codexos-candidate-",
                 dir=self._temporary_parent,
             )
         except OSError as error:
-            return _harness_failure(f"could not create candidate workspace: {error}")
+            result = _harness_failure(
+                f"could not create candidate workspace: {error}"
+            )
+            self._publish_candidate_failure(result)
+            return result
 
         result: CandidateBootResult | None = None
         cleanup_error: str | None = None
@@ -68,6 +83,12 @@ class CandidateBootValidator:
                 Path(workspace.name),
                 Path(candidate_iso),
             )
+        except BaseException as error:
+            self._publish(
+                CodexActivityKind.BUILD_CANDIDATE_FAILED,
+                {"result": "exception", "error": type(error).__name__},
+            )
+            raise
         finally:
             try:
                 workspace.cleanup()
@@ -75,9 +96,13 @@ class CandidateBootValidator:
                 cleanup_error = f"could not remove candidate workspace: {error}"
 
         if cleanup_error is not None:
-            return _harness_failure(cleanup_error)
+            result = _harness_failure(cleanup_error)
+            self._publish_candidate_failure(result)
+            return result
         if result is None:
             raise RuntimeError("candidate validator produced no result")
+        if result.status is not BuildStatus.SUCCESS:
+            self._publish_candidate_failure(result)
         return result
 
     def _validate_in_workspace(
@@ -179,6 +204,7 @@ class CandidateBootValidator:
                     + escape_diagnostic_bytes(error.serial_output)
                 )
             return _guest_failure(detail)
+        self._publish(CodexActivityKind.BUILD_CANDIDATE_READY)
 
         try:
             ToolClient(serial).list_tools()
@@ -196,7 +222,27 @@ class CandidateBootValidator:
             return _harness_failure(
                 "candidate protocol validator failed internally: " + str(error)
             )
+        self._publish(CodexActivityKind.BUILD_PROTOCOL_VALIDATED)
         return CandidateBootResult(BuildStatus.SUCCESS, "")
+
+    def _publish_candidate_failure(self, result: CandidateBootResult) -> None:
+        self._publish(
+            CodexActivityKind.BUILD_CANDIDATE_FAILED,
+            {"result": result.status.value},
+        )
+
+    def _publish(
+        self,
+        kind: CodexActivityKind,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        publish_activity(
+            self._activity_stream,
+            self._generation,
+            CodexActivityRole.HARNESS,
+            kind,
+            data,
+        )
 
 
 def _guest_failure(detail: str) -> CandidateBootResult:

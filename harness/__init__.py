@@ -2,6 +2,12 @@
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
 from .candidate_boot import CandidateBootResult, CandidateBootValidator
+from .codex_activity import (
+    CodexActivityEvent,
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
+)
 from .codex_generation_worker import (
     CodexGenerationResult,
     CodexGenerationSession,
@@ -66,6 +72,10 @@ __all__ = [
     "CodexGenerationWorkerError",
     "CodexReviewWorker",
     "CodexReviewWorkerError",
+    "CodexActivityEvent",
+    "CodexActivityKind",
+    "CodexActivityRole",
+    "CodexActivityStream",
     "CodexOSHostServices",
     "CodexOSRun",
     "CodexOSHardwareProfile",

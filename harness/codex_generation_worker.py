@@ -11,6 +11,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .codex_activity import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
+    publish_activity,
+    publish_renderable_codex_notification,
+)
 from .codex_app_server import (
     CumulativeTokenUsage,
     CodexAppServer,
@@ -110,6 +117,7 @@ class CodexGenerationSession:
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
         reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
+        activity_stream: CodexActivityStream | None = None,
     ) -> None:
         self._codex_executable = codex_executable
         self._auth_file = (
@@ -127,6 +135,14 @@ class CodexGenerationSession:
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
         self._reviewer_service_tier = reviewer_service_tier
         self._runtime = runtime
+        runtime_activity = getattr(runtime, "activity_stream", None)
+        self._activity_stream = (
+            activity_stream
+            if activity_stream is not None
+            else runtime_activity
+            if isinstance(runtime_activity, CodexActivityStream)
+            else None
+        )
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._service_tier = service_tier
@@ -214,6 +230,16 @@ class CodexGenerationSession:
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.SESSION_STARTED,
+                {
+                    "model": self._model,
+                    "reasoning_effort": self._reasoning_effort,
+                    "service_tier": self._service_tier,
+                },
+                thread_id=thread_id,
+            )
         except CodexAppServerError as error:
             server.close()
             self._healthy = False
@@ -282,6 +308,13 @@ class CodexGenerationSession:
                 "agent_contract_version": AGENT_CONTRACT_VERSION,
             },
         )
+        self._publish_activity(
+            CodexActivityRole.IMPLEMENTOR,
+            CodexActivityKind.TURN_STARTED,
+            {"turn_number": turn_number},
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
         try:
             status, final_message = self._wait_for_turn(thread_id, turn_id)
             self._last_turn_status = status
@@ -299,6 +332,18 @@ class CodexGenerationSession:
                     ),
                     "result": status,
                 },
+            )
+            terminal_kind = (
+                CodexActivityKind.TURN_COMPLETED
+                if status == "completed"
+                else CodexActivityKind.TURN_INTERRUPTED
+            )
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                terminal_kind,
+                {"turn_number": turn_number, "status": status},
+                thread_id=thread_id,
+                turn_id=turn_id,
             )
             return CodexGenerationResult(
                 turn_status=status,
@@ -361,6 +406,7 @@ class CodexGenerationSession:
     def close(self) -> None:
         self.cancel_review()
         server = self._server
+        thread_id = self._thread_id
         self._server = None
         self._thread_id = None
         self._healthy = False
@@ -377,6 +423,12 @@ class CodexGenerationSession:
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.SESSION_STOPPED,
+                {},
+                thread_id=thread_id,
+            )
             self._started = False
 
     def _wait_for_turn(
@@ -391,6 +443,14 @@ class CodexGenerationSession:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
+            publish_renderable_codex_notification(
+                self._activity_stream,
+                self._generation_number,
+                CodexActivityRole.IMPLEMENTOR,
+                message,
+                thread_id,
+                turn_id,
+            )
             if method == "thread/tokenUsage/updated":
                 self._record_token_usage(params, thread_id, turn_id)
                 continue
@@ -441,6 +501,13 @@ class CodexGenerationSession:
                 "result": "failed",
             },
         )
+        self._publish_activity(
+            CodexActivityRole.IMPLEMENTOR,
+            CodexActivityKind.TURN_FAILED,
+            {"turn_number": turn_number, "status": "failed"},
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+        )
 
     def _service_tier_name_data(self) -> dict[str, object]:
         if self._service_tier_name is None:
@@ -485,6 +552,27 @@ class CodexGenerationSession:
         if observability is not None:
             observability.record(event, self._generation_number, data)
 
+    def _publish_activity(
+        self,
+        role: CodexActivityRole,
+        kind: CodexActivityKind,
+        data: Mapping[str, object] | None = None,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        item_id: str | None = None,
+    ) -> None:
+        publish_activity(
+            self._activity_stream,
+            self._generation_number,
+            role,
+            kind,
+            data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=item_id,
+        )
+
     def _handle_server_request(
         self,
         message: Mapping[str, object],
@@ -524,6 +612,16 @@ class CodexGenerationSession:
         thread_id: str,
         turn_id: str,
     ) -> dict[str, object]:
+        activity_data = _dynamic_tool_activity_data(params)
+        call_id = _activity_call_id(params)
+        self._publish_activity(
+            CodexActivityRole.IMPLEMENTOR,
+            CodexActivityKind.TOOL_STARTED,
+            activity_data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=call_id,
+        )
         try:
             values = object_value(params, "dynamic tool request")
             _validate_tool_call(values, thread_id, turn_id)
@@ -533,6 +631,14 @@ class CodexGenerationSession:
             arguments = _arguments(values.get("arguments"))
             if values.get("namespace") is None and tool == "review":
                 review = self._run_review(arguments)
+                self._publish_activity(
+                    CodexActivityRole.IMPLEMENTOR,
+                    CodexActivityKind.TOOL_COMPLETED,
+                    {**activity_data, "success": True, "result": review},
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=call_id,
+                )
                 return {
                     "contentItems": [{"type": "inputText", "text": review}],
                     "success": True,
@@ -580,6 +686,26 @@ class CodexGenerationSession:
                         "diagnostics_bytes": len(result.output),
                     },
                 )
+            activity_kind = (
+                CodexActivityKind.TOOL_COMPLETED
+                if result.status == 0
+                else CodexActivityKind.TOOL_FAILED
+            )
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                activity_kind,
+                {
+                    **activity_data,
+                    "success": result.status == 0,
+                    "result": {
+                        "status": result.status,
+                        "output": result.output,
+                    },
+                },
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
             return {
                 "contentItems": [
                     {"type": "inputText", "text": _format_tool_result(result)}
@@ -594,12 +720,30 @@ class CodexGenerationSession:
             ValueError,
             binascii.Error,
         ) as error:
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.TOOL_FAILED,
+                {**activity_data, "success": False, "error": str(error)},
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
             return {
                 "contentItems": [
                     {"type": "inputText", "text": f"Bridge error: {error}"}
                 ],
                 "success": False,
             }
+        except Exception as error:
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.TOOL_FAILED,
+                {**activity_data, "success": False, "error": str(error)},
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
+            raise
 
     def _run_review(self, arguments: Mapping[str, object]) -> str:
         _check_fields(arguments, optional={"request", "focus"})
@@ -624,6 +768,7 @@ class CodexGenerationSession:
         reviewer = CodexReviewWorker(
             self._reviewer_codex_executable,
             self._reviewer_auth_file,
+            activity_stream=self._activity_stream,
         )
         with self._lock:
             self._active_reviewer = reviewer
@@ -744,6 +889,7 @@ class CodexGenerationWorker:
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
         reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
+        activity_stream: CodexActivityStream | None = None,
     ) -> None:
         self._codex_executable = codex_executable
         self._auth_file = auth_file
@@ -752,6 +898,7 @@ class CodexGenerationWorker:
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
         self._reviewer_service_tier = reviewer_service_tier
+        self._activity_stream = activity_stream
         self._running = False
 
     def run_generation(
@@ -779,6 +926,7 @@ class CodexGenerationWorker:
             reviewer_model=self._reviewer_model,
             reviewer_reasoning_effort=self._reviewer_reasoning_effort,
             reviewer_service_tier=self._reviewer_service_tier,
+            activity_stream=self._activity_stream,
         )
         try:
             return session.run_initial_turn()
@@ -1124,6 +1272,23 @@ def _validate_tool_call(
         raise ValueError("dynamic tool request has the wrong thread ID")
     if values.get("turnId") != turn_id:
         raise ValueError("dynamic tool request has the wrong turn ID")
+
+
+def _dynamic_tool_activity_data(params: object) -> dict[str, object]:
+    if not isinstance(params, dict):
+        return {"namespace": None, "tool": None, "arguments": params}
+    return {
+        "namespace": params.get("namespace"),
+        "tool": params.get("tool"),
+        "arguments": params.get("arguments"),
+    }
+
+
+def _activity_call_id(params: object) -> str | None:
+    if not isinstance(params, dict):
+        return None
+    call_id = params.get("callId")
+    return call_id if isinstance(call_id, str) else None
 
 
 def _arguments(value: object) -> dict[str, object]:
