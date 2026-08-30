@@ -349,7 +349,7 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
                         0,
                     )
 
-    async def test_feature_request_renders_recording_and_pending_as_distinct_states(self) -> None:
+    async def test_feature_request_renders_pending_as_creation_time_status(self) -> None:
         model = OperatorActivityModel()
         request = {
             "tool": "request_feature",
@@ -391,7 +391,11 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(transcript.rows[0], row)
             recorded = str(row.render())
             self.assertIn("recorded · request 4", recorded)
-            self.assertIn("trusted status: pending · not provisioned", recorded)
+            self.assertIn("initial status: pending", recorded)
+            self.assertIn("recording did not provision the capability", recorded)
+            self.assertNotIn("trusted status", recorded)
+            self.assertNotIn("approved", recorded)
+            self.assertNotIn("denied", recorded)
             self.assertNotIn("completed", recorded)
 
             failed_request = {
@@ -585,6 +589,36 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(row.detail_expanded)
             self.assertTrue(row.query_one(".tool-detail").display)
             self.assertIn("guest read failed", str(row.query_one(".tool-detail").render()))
+
+    async def test_failed_write_displays_error_instead_of_source_payload(self) -> None:
+        model = OperatorActivityModel()
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.TOOL_FAILED,
+                {
+                    "tool": "write",
+                    "arguments": {
+                        "path": "seed/tasks.c",
+                        "offset": 0,
+                        "data": "int attempted_write;\n" * 100,
+                    },
+                    "error": "guest write failed",
+                },
+                item_id="failed-write",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            row = transcript.rows[0]
+            self.assertIsInstance(row, ToolRow)
+            self.assertTrue(row.detail_expanded)
+            detail = str(row.query_one(".tool-detail").render())
+            self.assertIn("guest write failed", detail)
+            self.assertNotIn("attempted_write", detail)
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):

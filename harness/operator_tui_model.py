@@ -45,10 +45,8 @@ class FeatureRequestRecordingState(StrEnum):
     FAILED = "failed"
 
 
-class FeatureRequestTrustedStatus(StrEnum):
+class FeatureRequestInitialStatus(StrEnum):
     PENDING = "pending"
-    APPROVED = "approved"
-    DENIED = "denied"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +86,7 @@ class ToolPresentation:
 class FeatureRequestPresentation:
     role: CodexActivityRole
     recording_state: FeatureRequestRecordingState
-    trusted_status: FeatureRequestTrustedStatus | None
+    initial_status: FeatureRequestInitialStatus | None
     title: str
     description: str
     request_id: str = ""
@@ -387,7 +385,7 @@ class OperatorActivityModel:
             self._consume_feature_request(key, event, arguments)
             return
         summary = _tool_summary(tool, arguments)
-        detail = self._tool_detail(tool, arguments, event.data, existing)
+        detail = self._tool_detail(tool, arguments, event.data, existing, state)
         result_note = ""
         result = event.data.get("result")
         if (
@@ -420,8 +418,8 @@ class OperatorActivityModel:
             CodexActivityKind.TOOL_COMPLETED: FeatureRequestRecordingState.RECORDED,
             CodexActivityKind.TOOL_FAILED: FeatureRequestRecordingState.FAILED,
         }[event.kind]
-        trusted_status = (
-            FeatureRequestTrustedStatus.PENDING
+        initial_status = (
+            FeatureRequestInitialStatus.PENDING
             if recording_state is FeatureRequestRecordingState.RECORDED
             else None
         )
@@ -438,7 +436,7 @@ class OperatorActivityModel:
                 FeatureRequestPresentation(
                     event.role,
                     recording_state,
-                    trusted_status,
+                    initial_status,
                     safe_display_text(
                         title
                         if isinstance(title, str)
@@ -461,17 +459,23 @@ class OperatorActivityModel:
         arguments: dict[str, object],
         data: dict[str, object],
         existing: ToolPresentation | None,
+        state: ActivityDisplayState,
     ) -> ToolDetailPresentation | None:
+        error = data.get("error")
+        result = data.get("result")
+        if state is ActivityDisplayState.FAILED:
+            if not _empty_payload(error):
+                return _payload_presentation(error, self._display_bytes)
+            if not _empty_payload(result):
+                return _payload_presentation(result, self._display_bytes)
         if tool == "write":
             content = arguments.get("data", arguments.get("content"))
             if content is not None:
                 return _payload_presentation(
                     content, self._display_bytes, arguments.get("encoding")
                 )
-        error = data.get("error")
         if not _empty_payload(error):
             return _payload_presentation(error, self._display_bytes)
-        result = data.get("result")
         if (
             isinstance(result, dict)
             and result.get("status") == 0
@@ -891,10 +895,9 @@ def _entry_text(entry: ActivityDisplayEntry) -> str:
         ]
         if presentation.request_id:
             lines.append(f"request {presentation.request_id}")
-        if presentation.trusted_status is not None:
-            lines.append(
-                f"trusted status: {presentation.trusted_status.value} · not provisioned"
-            )
+        if presentation.initial_status is not None:
+            lines.append(f"initial status: {presentation.initial_status.value}")
+            lines.append("recording did not provision the capability")
         if presentation.error:
             lines.append(presentation.error)
         return "\n".join(line for line in lines if line)
@@ -933,8 +936,8 @@ def _presentation_text(presentation: ActivityPresentation) -> str:
         return "\n".join(
             (
                 presentation.recording_state.value,
-                presentation.trusted_status.value
-                if presentation.trusted_status is not None
+                presentation.initial_status.value
+                if presentation.initial_status is not None
                 else "",
                 presentation.title,
                 presentation.description,

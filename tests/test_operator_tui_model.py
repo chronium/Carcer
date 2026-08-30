@@ -13,7 +13,7 @@ from harness.operator_tui_model import (
     BuildPresentation,
     FeatureRequestPresentation,
     FeatureRequestRecordingState,
-    FeatureRequestTrustedStatus,
+    FeatureRequestInitialStatus,
     LifecyclePresentation,
     OperatorActivityModel,
     OperatorPresentation,
@@ -238,7 +238,47 @@ class OperatorActivityModelTests(unittest.TestCase):
         self.assertIn("\\x1b[2J", unknown.detail.text)
         self.assertNotIn("\x1b", model.render_text())
 
-    def test_feature_request_separates_recording_from_trusted_status(self) -> None:
+    def test_failed_write_prioritizes_diagnostic_over_source_payload(self) -> None:
+        source = "int attempted_write;\n" * 20
+        write = {
+            "tool": "write",
+            "arguments": {
+                "path": "seed/tasks.c",
+                "offset": 0,
+                "data": source,
+            },
+        }
+        model = OperatorActivityModel()
+        model.consume(
+            _event(
+                1,
+                CodexActivityKind.TOOL_FAILED,
+                {**write, "error": "guest write failed"},
+                item_id="write-error",
+            )
+        )
+        error_failure = model.entries[0].presentation
+        self.assertEqual(error_failure.state, ActivityDisplayState.FAILED)
+        self.assertEqual(error_failure.detail.text, "guest write failed")
+        self.assertNotIn("attempted_write", error_failure.detail.text)
+
+        model.consume(
+            _event(
+                2,
+                CodexActivityKind.TOOL_FAILED,
+                {
+                    **write,
+                    "result": {"status": 2, "output": b"write rejected by guest"},
+                },
+                item_id="write-result",
+            )
+        )
+        result_failure = model.entries[1].presentation
+        self.assertEqual(result_failure.state, ActivityDisplayState.FAILED)
+        self.assertEqual(result_failure.detail.text, "write rejected by guest")
+        self.assertNotIn("attempted_write", result_failure.detail.text)
+
+    def test_feature_request_records_only_creation_time_status(self) -> None:
         model = OperatorActivityModel()
         request = {
             "tool": "request_feature",
@@ -276,11 +316,17 @@ class OperatorActivityModelTests(unittest.TestCase):
             recorded.recording_state, FeatureRequestRecordingState.RECORDED
         )
         self.assertEqual(
-            recorded.trusted_status, FeatureRequestTrustedStatus.PENDING
+            recorded.initial_status, FeatureRequestInitialStatus.PENDING
         )
         self.assertEqual(recorded.request_id, "4")
         self.assertIn("recorded", model.render_text())
-        self.assertIn("trusted status: pending · not provisioned", model.render_text())
+        self.assertIn("initial status: pending", model.render_text())
+        self.assertIn(
+            "recording did not provision the capability", model.render_text()
+        )
+        self.assertNotIn("trusted status", model.render_text())
+        self.assertNotIn("approved", model.render_text())
+        self.assertNotIn("denied", model.render_text())
         self.assertNotIn("completed", model.render_text())
 
         failed_request = {
@@ -299,7 +345,7 @@ class OperatorActivityModelTests(unittest.TestCase):
         self.assertEqual(
             failed.recording_state, FeatureRequestRecordingState.FAILED
         )
-        self.assertIsNone(failed.trusted_status)
+        self.assertIsNone(failed.initial_status)
         self.assertEqual(failed.request_id, "")
         self.assertEqual(failed.error, "request rejected")
 

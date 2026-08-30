@@ -466,10 +466,9 @@ def _feature_content(presentation: FeatureRequestPresentation) -> Content:
         presentation.description,
         recording,
     ]
-    if presentation.trusted_status is not None:
-        lines.append(
-            f"trusted status: {presentation.trusted_status.value} · not provisioned"
-        )
+    if presentation.initial_status is not None:
+        lines.append(f"initial status: {presentation.initial_status.value}")
+        lines.append("recording did not provision the capability")
     if presentation.error:
         lines.append(presentation.error)
     text = "\n".join(line for line in lines if line)
