@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
+    CandidateBootValidator,
     CodexOSHostServices,
     QemuProcessController,
     SerialConnection,
@@ -37,7 +39,10 @@ class GuestFinishGenerationIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
-            host_services = CodexOSHostServices(temporary_path / "staging")
+            host_services = CodexOSHostServices(
+                temporary_path / "staging",
+                _candidate_validator(temporary_path),
+            )
             with _running_guest(image, temporary_path, "accepted") as (
                 controller,
                 serial,
@@ -99,7 +104,10 @@ class GuestFinishGenerationIntegrationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
-            host_services = CodexOSHostServices(temporary_path / "staging")
+            host_services = CodexOSHostServices(
+                temporary_path / "staging",
+                _candidate_validator(temporary_path),
+            )
             with _running_guest(image, temporary_path, "mismatch") as (
                 controller,
                 serial,
@@ -214,6 +222,17 @@ def _qemu_arguments(image: Path) -> list[str]:
         "none",
         "-no-reboot",
     ]
+
+
+def _candidate_validator(temporary: Path) -> CandidateBootValidator:
+    qemu = shutil.which("qemu-system-x86_64")
+    if qemu is None:
+        raise AssertionError("qemu-system-x86_64 must be installed")
+    return CandidateBootValidator(
+        qemu,
+        TEST_HARDWARE_PROFILE,
+        temporary_parent=temporary,
+    )
 
 
 def _wait_for_ready(serial: SerialConnection) -> None:

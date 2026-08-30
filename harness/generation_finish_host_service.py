@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
+from .candidate_boot import CandidateBootValidator
 from .feature_requests import (
     MAX_FEATURE_DESCRIPTION_BYTES,
     MAX_FEATURE_TITLE_BYTES,
@@ -42,6 +43,7 @@ class CodexOSHostServices:
     def __init__(
         self,
         staging_directory: str | Path,
+        candidate_validator: CandidateBootValidator,
         *,
         feature_request_store: FeatureRequestStore | None = None,
         generation: int | None = None,
@@ -51,7 +53,10 @@ class CodexOSHostServices:
             raise ValueError(
                 "feature-request store and generation must be supplied together"
             )
-        self._build_service = BuildHostService(staging_directory)
+        self._build_service = BuildHostService(
+            staging_directory,
+            candidate_validator,
+        )
         self._pending_finish: PendingGenerationFinish | None = None
         self._feature_request_store = feature_request_store
         self._generation = generation

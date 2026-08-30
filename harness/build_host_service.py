@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .candidate_boot import CandidateBootValidator
 from .framing import Frame
 from .host_service_protocol import (
     HostServiceRequest,
@@ -28,9 +29,14 @@ class StagedBuildArtifacts:
 class BuildHostService:
     """Synchronously service build requests into trusted staging storage."""
 
-    def __init__(self, staging_directory: str | Path) -> None:
+    def __init__(
+        self,
+        staging_directory: str | Path,
+        candidate_validator: CandidateBootValidator,
+    ) -> None:
         self._staging_directory = Path(staging_directory)
         self._staging_directory.mkdir(parents=True, exist_ok=True)
+        self._candidate_validator = candidate_validator
         self._latest_successful_build: StagedBuildArtifacts | None = None
 
     @property
@@ -62,8 +68,6 @@ class BuildHostService:
                 b"cannot create build attempt storage",
             )
         result = build_source_snapshot(request.arguments[0], attempt)
-        diagnostics = result.diagnostics.encode("utf-8")
-
         if result.status is BuildStatus.SUCCESS:
             if result.kernel_elf is None or result.iso is None:
                 return create_host_service_response(
@@ -71,16 +75,25 @@ class BuildHostService:
                     _BUILD_HARNESS_FAILURE,
                     b"trusted build returned no artifacts",
                 )
-            self._latest_successful_build = StagedBuildArtifacts(
-                result.kernel_elf,
-                result.iso,
-                request.arguments[0],
-            )
-            status = _BUILD_SUCCESS
+            validation = self._candidate_validator.validate(result.iso)
+            if validation.status is BuildStatus.SUCCESS:
+                self._latest_successful_build = StagedBuildArtifacts(
+                    result.kernel_elf,
+                    result.iso,
+                    request.arguments[0],
+                )
+                status = _BUILD_SUCCESS
+            elif validation.status is BuildStatus.BUILD_FAILURE:
+                status = _BUILD_FAILURE
+            else:
+                status = _BUILD_HARNESS_FAILURE
+            diagnostics = validation.diagnostics.encode("utf-8")
         elif result.status is BuildStatus.BUILD_FAILURE:
             status = _BUILD_FAILURE
+            diagnostics = result.diagnostics.encode("utf-8")
         else:
             status = _BUILD_HARNESS_FAILURE
+            diagnostics = result.diagnostics.encode("utf-8")
 
         return create_host_service_response(
             request.request_id,

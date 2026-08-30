@@ -1,4 +1,5 @@
 import socket
+import shutil
 import struct
 import tempfile
 import unittest
@@ -6,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from harness import (
+    TEST_HARDWARE_PROFILE,
+    CandidateBootValidator,
     CodexOSHostServices,
     Frame,
     SerialConnection,
@@ -101,7 +104,12 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
         tool_output = b"original tool result"
 
         with tempfile.TemporaryDirectory() as temporary:
-            host_services = CodexOSHostServices(Path(temporary) / "staging")
+            qemu = shutil.which("qemu-system-x86_64")
+            self.assertIsNotNone(qemu)
+            host_services = CodexOSHostServices(
+                Path(temporary) / "staging",
+                CandidateBootValidator(qemu, TEST_HARDWARE_PROFILE),
+            )
             with connected_serial_peer() as (serial, peer):
                 peer.sendall(
                     encode_frame(Frame(0x0003, 1, host_service_payload))
