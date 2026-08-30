@@ -254,6 +254,12 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "must not prevent another runnable user workload from making progress",
             "Doom must run concurrently with an unrelated user workload",
             "programs unknown to you during development",
+            "future or supplied workloads specify required observable outcomes "
+            "only",
+            "neither grant nor imply any supporting trusted-environment "
+            "capability",
+            "Do not assume an absent trusted-environment capability will appear "
+            "later",
             "development continues after Doom is playable",
             "not a prescribed kernel architecture or implementation sequence",
             "neither Unix, POSIX, System V",
@@ -271,11 +277,21 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "Permanently end the current generation",
             "matches the latest successful validated build",
             "handoff for the fresh successor session",
+            "distinguish implemented end-to-end capabilities and explicitly "
+            "provisioned trusted capabilities from unresolved dependencies or "
+            "assumptions",
+            "do not describe a future path as available unless all required steps "
+            "are implemented or explicitly provisioned",
             "advisory request to the human operator",
             "capability of the trusted external environment",
             "rather than human implementation of CodexOS kernel or userland "
             "functionality",
             "does not itself provision or change anything",
+            "may remain pending or be denied",
+            "does not require depending on it, waiting for it, or stopping "
+            "guest-side work",
+            "a local workaround does not by itself make that trusted-environment "
+            "request inappropriate",
             "not as a substitute for implementing functionality that belongs "
             "inside CodexOS",
             "fresh independent reviewer",
@@ -292,9 +308,20 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertIn(required, prompt)
         self.assertNotIn("Pending capability", prompt)
         self.assertNotIn("Denied capability", prompt)
+        for steering in (
+            "57 bytes",
+            "64 KiB",
+            "additional source capacity",
+            "asset transport",
+            "Limine module",
+            "keyboard input",
+            "exit interview",
+        ):
+            self.assertNotIn(steering, prompt)
+        self.assertNotIn("every workaround", prompt.lower())
 
-    def test_agent_contract_version_is_three(self) -> None:
-        self.assertEqual(AGENT_CONTRACT_VERSION, 3)
+    def test_agent_contract_version_is_four(self) -> None:
+        self.assertEqual(AGENT_CONTRACT_VERSION, 4)
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (
@@ -754,6 +781,14 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 descriptions["finish_generation"],
             )
             self.assertIn(
+                "distinguish implemented end-to-end capabilities",
+                descriptions["finish_generation"],
+            )
+            self.assertIn(
+                "unresolved dependencies or assumptions",
+                descriptions["finish_generation"],
+            )
+            self.assertIn(
                 "capability of the trusted external environment",
                 descriptions["request_feature"],
             )
@@ -764,6 +799,20 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertIn(
                 "does not itself provision or change anything",
+                descriptions["request_feature"],
+            )
+            self.assertIn(
+                "may remain pending or be denied",
+                descriptions["request_feature"],
+            )
+            self.assertIn(
+                "does not require depending on it, waiting for it, or stopping "
+                "guest-side work",
+                descriptions["request_feature"],
+            )
+            self.assertIn(
+                "a local workaround does not by itself make that trusted-"
+                "environment request inappropriate",
                 descriptions["request_feature"],
             )
             review_description = dynamic_tools[1]["description"]

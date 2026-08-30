@@ -49,7 +49,7 @@ DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_REASONING_SUMMARY = "auto"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
-AGENT_CONTRACT_VERSION = 3
+AGENT_CONTRACT_VERSION = 4
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -76,13 +76,20 @@ _BUILD_TOOL_DESCRIPTION = (
 _FINISH_GENERATION_TOOL_DESCRIPTION = (
     "Permanently end the current generation from the exact current source only "
     "when it matches the latest successful validated build, and provide a concise "
-    "handoff for the fresh successor session."
+    "handoff for the fresh successor session. In that handoff, distinguish "
+    "implemented end-to-end capabilities and explicitly provisioned trusted "
+    "capabilities from unresolved dependencies or assumptions; do not describe a "
+    "future path as available unless all required steps are implemented or "
+    "explicitly provisioned."
 )
 _REQUEST_FEATURE_TOOL_DESCRIPTION = (
     "Record an advisory request to the human operator for a capability of the "
     "trusted external environment rather than human implementation of CodexOS "
     "kernel or userland functionality. Requesting or approving it does not itself "
-    "provision or change anything."
+    "provision or change anything, and a request may remain pending or be denied. "
+    "Recording a legitimate request does not require depending on it, waiting for "
+    "it, or stopping guest-side work; a local workaround does not by itself make "
+    "that trusted-environment request inappropriate."
 )
 _REVIEW_TOOL_DESCRIPTION = (
     "Consult a fresh independent reviewer that inspects the current mutable "
@@ -1445,6 +1452,12 @@ def _implementor_contract() -> str:
         "unrelated user workload that continues making progress without depending "
         "on Doom voluntarily yielding. Future validation may use programs unknown "
         "to you during development to detect workload-specific overfitting.\n\n"
+        "Milestone descriptions, future validation requirements, and references "
+        "to future or supplied workloads specify required observable outcomes "
+        "only. They neither grant nor imply any supporting trusted-environment "
+        "capability beyond the current environment and approved feature requests. "
+        "Do not assume an absent trusted-environment capability will appear later "
+        "merely because a future outcome would require it.\n\n"
         "These requirements describe observable capabilities and environmental "
         "facts, not a prescribed kernel architecture or implementation sequence. "
         "The experiment requires neither Unix, POSIX, System V, nor any particular "
