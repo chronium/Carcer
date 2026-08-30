@@ -1,4 +1,5 @@
 #include "tasks.h"
+#include "files.h"
 #include "interrupts.h"
 #include "memory.h"
 #define TASK_MAX_COUNT 4u
@@ -11,6 +12,7 @@
 #define USER_IMAGE_BASE 0x400000ull
 #define USER_STACK_TOP 0x600000ull
 #define USER_ADDRESS_SPACE_PAGES 6u
+#define USER_EXEC_HEADER_SIZE 16u
 #define PAGE_ADDRESS_MASK 0x000ffffffffff000ull
 #define PAGE_USER_RW 7ull
 struct task_slot {
@@ -141,6 +143,22 @@ slot->runnable=1;
 interrupt_restore(flags);
 return identifier;
 }
+static uint32_t read_u32(const uint8_t *bytes) {
+return (uint32_t)bytes[0]|((uint32_t)bytes[1]<<8)|
+((uint32_t)bytes[2]<<16)|((uint32_t)bytes[3]<<24);
+}
+int task_create_user_file(const uint8_t *path,uint32_t path_length) {
+if(!tasks_ready||!path||!path_length) return -1;
+struct file *file=file_find(path,path_length);
+if(!file||file_size(file)<USER_EXEC_HEADER_SIZE) return -1;
+const uint8_t *data=file_content(file);
+uint32_t image_size=read_u32(data+4);
+uint32_t entry_offset=read_u32(data+8);
+if(data[0]!='C'||data[1]!='X'||data[2]!='E'||data[3]!='1'||
+read_u32(data+12)!=0||image_size!=file_size(file)-USER_EXEC_HEADER_SIZE)
+return -1;
+return task_create_user(data+USER_EXEC_HEADER_SIZE,image_size,entry_offset);
+}
 int task_destroy(uint32_t identifier) {
 uint64_t flags=interrupt_lock();
 int valid=tasks_ready&&identifier>0&&identifier<TASK_MAX_COUNT&&
@@ -194,7 +212,8 @@ static const uint8_t worker_up[]={
 static const uint8_t worker_down[]={
 0x48,0xb8,0x00,0x01,0x40,0,0,0,0,0,0x48,0xff,0x08,0xeb,0xfb
 };
-static const uint8_t worker_exit[]={
+static const uint8_t worker_file[]={
+'C','X','E','1',39,0,0,0,0,0,0,0,0,0,0,0,
 0xb8,99,0,0,0,0xcd,0x80,0x48,0x83,0xf8,0xff,0x75,12,
 0xb8,0,0,0,0,0xbf,42,0,0,0,0xcd,0x80,
 0xb8,0,0,0,0,0xbf,13,0,0,0,0xcd,0x80,0x0f,0x0b
@@ -238,8 +257,14 @@ int success=*a!=0&&*b!=0;
 (void)task_destroy((uint32_t)first);
 (void)task_destroy((uint32_t)second);
 if(!success) return 0;
-int exiting=task_create_user(worker_exit,sizeof(worker_exit),0);
-if(exiting<0) return 0;
+static const uint8_t worker_path[]="bin/abi-test.cxe";
+if(!file_write(worker_path,sizeof(worker_path)-1u,0,worker_file,sizeof(worker_file)))
+return 0;
+int exiting=task_create_user_file(worker_path,sizeof(worker_path)-1u);
+if(exiting<0) {
+(void)file_remove(worker_path,sizeof(worker_path)-1u);
+return 0;
+}
 start=timer_ticks();
 uint64_t released=0;
 while(!(released=task_reclaimed_pages((uint32_t)exiting,42))&&
@@ -251,6 +276,7 @@ return 0;
 }
 uint64_t reused=memory_pages_alloc(USER_ADDRESS_SPACE_PAGES);
 int recycled=reused==released;
-if(reused&&!memory_pages_free(reused,USER_ADDRESS_SPACE_PAGES)) return 0;
-return recycled;
+int freed=!reused||memory_pages_free(reused,USER_ADDRESS_SPACE_PAGES);
+int removed=file_remove(worker_path,sizeof(worker_path)-1u);
+return recycled&&freed&&removed;
 }
