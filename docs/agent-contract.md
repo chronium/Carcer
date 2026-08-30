@@ -12,10 +12,24 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
+Contract version 3 explicitly describes the trusted implementor tool surface.
+The source inspection and mutation tools operate only on persistent mutable guest
+source, build success includes candidate boot and protocol validation, generation
+finish is permanent and requires the matching validated build, and review is a
+fresh independent read-only advisory consultation.
+
+In particular, `request_feature` records an advisory request for a capability of
+the human-controlled trusted external environment. It is not a request for a human
+to implement CodexOS kernel or userland functionality, and neither requesting nor
+approving it provisions or changes anything by itself. Examples of likely future
+requests are intentionally omitted so the contract does not steer autonomous
+decisions.
+
 Current hardware facts are rendered from the trusted `CodexOSHardwareProfile`
 used by the running generation. The prompt does not carry a second copy of the
 `experiment-v1` constants. It also states the boundary around external feature
-requests and network reachability.
+requests and that provisioning one external capability grants no other trusted-
+environment capability implicitly.
 
 Guest-visible build success means the exact source snapshot compiled and linked,
 then booted under that current hardware profile, reached the canonical READY
@@ -37,7 +51,7 @@ continuation turns and pause/resume.
 
 Structured Codex lifecycle events record the requested service-tier ID and its
 catalog display name, when supplied, while implementor events also record agent
-contract version 2. These are serving and prompt provenance only. Model-token
+contract version 3. These are serving and prompt provenance only. Model-token
 metric labels remain exactly `model` and `role`.
 
 ## Adopting harness updates at a generation gate

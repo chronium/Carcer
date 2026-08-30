@@ -39,7 +39,7 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
-AGENT_CONTRACT_VERSION = 2
+AGENT_CONTRACT_VERSION = 3
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -55,6 +55,29 @@ _REVIEW_FOCUSES = {
     "security",
     "performance",
 }
+
+_BUILD_TOOL_DESCRIPTION = (
+    "Compile and link the exact current persistent mutable CodexOS guest source, "
+    "then validate that its candidate image boots under the current trusted "
+    "hardware profile, reaches the canonical READY state, and speaks the canonical "
+    "development protocol."
+)
+_FINISH_GENERATION_TOOL_DESCRIPTION = (
+    "Permanently end the current generation from the exact current source only "
+    "when it matches the latest successful validated build, and provide a concise "
+    "handoff for the fresh successor session."
+)
+_REQUEST_FEATURE_TOOL_DESCRIPTION = (
+    "Record an advisory request to the human operator for a capability of the "
+    "trusted external environment rather than human implementation of CodexOS "
+    "kernel or userland functionality. Requesting or approving it does not itself "
+    "provision or change anything."
+)
+_REVIEW_TOOL_DESCRIPTION = (
+    "Consult a fresh independent reviewer that inspects the current mutable "
+    "CodexOS guest source through restricted read-only tools. The reviewer is "
+    "advisory and cannot modify CodexOS."
+)
 
 
 class CodexGenerationWorkerError(RuntimeError):
@@ -827,12 +850,14 @@ def _dynamic_tool_namespace() -> dict[str, object]:
         "tools": [
             function(
                 "list",
-                "List mutable guest source paths, optionally by prefix.",
+                "List paths in the persistent mutable CodexOS guest source, "
+                "optionally by prefix.",
                 {"prefix": {"type": "string"}},
             ),
             function(
                 "read",
-                "Read exact bytes from a mutable guest source file.",
+                "Read exact bytes from the persistent mutable CodexOS guest "
+                "source.",
                 {
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
@@ -842,7 +867,8 @@ def _dynamic_tool_namespace() -> dict[str, object]:
             ),
             function(
                 "write",
-                "Overwrite or append exact bytes in the mutable guest source store.",
+                "Overwrite or append exact bytes in the persistent mutable "
+                "CodexOS guest source.",
                 {
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
@@ -857,7 +883,7 @@ def _dynamic_tool_namespace() -> dict[str, object]:
             ),
             function(
                 "truncate",
-                "Resize a mutable guest source file.",
+                "Resize a file in the persistent mutable CodexOS guest source.",
                 {
                     "path": {"type": "string"},
                     "size": {"type": "integer", "minimum": 0},
@@ -866,26 +892,24 @@ def _dynamic_tool_namespace() -> dict[str, object]:
             ),
             function(
                 "remove",
-                "Remove a mutable guest source file.",
+                "Remove a file from the persistent mutable CodexOS guest source.",
                 {"path": {"type": "string"}},
                 ["path"],
             ),
             function(
                 "build",
-                "Build the current mutable CodexOS source with the trusted "
-                "host service.",
+                _BUILD_TOOL_DESCRIPTION,
                 {},
             ),
             function(
                 "finish_generation",
-                "Select the matching successful build and finish this generation.",
+                _FINISH_GENERATION_TOOL_DESCRIPTION,
                 {"handoff": {"type": "string"}},
                 ["handoff"],
             ),
             function(
                 "request_feature",
-                "Record an advisory request for a capability in the trusted "
-                "external environment.",
+                _REQUEST_FEATURE_TOOL_DESCRIPTION,
                 {
                     "title": {"type": "string"},
                     "description": {"type": "string"},
@@ -899,8 +923,7 @@ def _dynamic_tool_namespace() -> dict[str, object]:
 def _review_dynamic_function() -> dict[str, object]:
     return _dynamic_function(
         "review",
-        "Launch a fresh independent read-only reviewer for the current "
-        "mutable CodexOS generation.",
+        _REVIEW_TOOL_DESCRIPTION,
         {
             "request": {"type": "string"},
             "focus": {
@@ -971,6 +994,8 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
     return (
         _implementor_contract()
         + "\n\n"
+        + _trusted_tools_contract()
+        + "\n\n"
         + _trusted_hardware_context(runtime.hardware_profile)
         + "\n\n"
         + approved_text
@@ -1014,25 +1039,35 @@ def _implementor_contract() -> str:
         "in guest state and/or summarize it in the generation handoff; Codex "
         "conversation history does not survive a generation boundary.\n\n"
         "Inspect the current system before deciding what to do. Choose the next "
-        "useful work yourself; no implementation sequence is prescribed.\n\n"
-        "Use build to validate changes. A successful build means the exact source "
-        "snapshot compiled and linked into a candidate image, that candidate booted "
-        "under the current trusted hardware profile, reached the canonical READY "
-        "state, and spoke the canonical development protocol. A candidate that "
-        "compiles but fails boot or protocol validation is a failed build and "
-        "remains repairable in this generation.\n\n"
-        "If progress genuinely requires hardware or another capability belonging to "
-        "the trusted external environment rather than CodexOS itself, you may use "
-        "request_feature. A feature request is advisory to the human operator; "
-        "requesting or approving it does not itself change the environment. Do not "
-        "use it as a substitute for implementing functionality inside CodexOS. "
-        "Future network hardware, if provisioned, would not by itself grant access "
-        "to trusted networks or the public Internet; reachability is a separate "
-        "trusted capability.\n\n"
-        "When you believe this generation should end, ensure the current source has "
-        "a successful matching build and call finish_generation with a concise "
-        "handoff for your successor. No human source edits or architectural guidance "
-        "are available through these tools."
+        "useful work yourself; no implementation sequence is prescribed."
+    )
+
+
+def _trusted_tools_contract() -> str:
+    return (
+        "Trusted tools available to you:\n\n"
+        "- list / read:\n"
+        "  Inspect the persistent mutable CodexOS guest source. These tools do not "
+        "expose the trusted host repository or host filesystem.\n\n"
+        "- write / truncate / remove:\n"
+        "  Modify the persistent mutable CodexOS guest source.\n\n"
+        "- build:\n"
+        f"  {_BUILD_TOOL_DESCRIPTION} A candidate that compiles but fails boot or "
+        "protocol validation is a failed build and remains repairable in this "
+        "generation.\n\n"
+        "- finish_generation:\n"
+        f"  {_FINISH_GENERATION_TOOL_DESCRIPTION} Conversation history is not part "
+        "of that handoff and does not survive the generation boundary.\n\n"
+        "- request_feature:\n"
+        f"  {_REQUEST_FEATURE_TOOL_DESCRIPTION} Use it for externally imposed "
+        "resources, hardware, or other trusted-environment capabilities, not as a "
+        "substitute for implementing functionality that belongs inside CodexOS.\n\n"
+        "- review:\n"
+        f"  {_REVIEW_TOOL_DESCRIPTION} Its response and transcript do not "
+        "automatically become memory for a successor generation.\n\n"
+        "Provisioning one external capability does not imply or grant any other "
+        "trusted-environment capability. No human source edits or architectural "
+        "guidance are available through these tools."
     )
 
 

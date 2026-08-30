@@ -87,11 +87,31 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "neither Unix, POSIX, System V",
             "improve the guest-side development environment and tooling",
             "conversation history does not survive a generation boundary",
-            "candidate booted under the current trusted hardware profile",
-            "reached the canonical READY state",
-            "spoke the canonical development protocol",
-            "requesting or approving it does not itself change the environment",
-            "would not by itself grant access to trusted networks or the public Internet",
+            "Trusted tools available to you",
+            "Inspect the persistent mutable CodexOS guest source",
+            "do not expose the trusted host repository or host filesystem",
+            "Modify the persistent mutable CodexOS guest source",
+            "Compile and link the exact current persistent mutable CodexOS "
+            "guest source",
+            "boots under the current trusted hardware profile",
+            "reaches the canonical READY state",
+            "speaks the canonical development protocol",
+            "Permanently end the current generation",
+            "matches the latest successful validated build",
+            "handoff for the fresh successor session",
+            "advisory request to the human operator",
+            "capability of the trusted external environment",
+            "rather than human implementation of CodexOS kernel or userland "
+            "functionality",
+            "does not itself provision or change anything",
+            "not as a substitute for implementing functionality that belongs "
+            "inside CodexOS",
+            "fresh independent reviewer",
+            "through restricted read-only tools",
+            "reviewer is advisory and cannot modify CodexOS",
+            "response and transcript do not automatically become memory",
+            "Provisioning one external capability does not imply or grant any "
+            "other trusted-environment capability",
             "Exact predecessor handoff.",
             "Later lineage was abandoned.",
             "Trusted operator objective.",
@@ -100,6 +120,9 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertIn(required, prompt)
         self.assertNotIn("Pending capability", prompt)
         self.assertNotIn("Denied capability", prompt)
+
+    def test_agent_contract_version_is_three(self) -> None:
+        self.assertEqual(AGENT_CONTRACT_VERSION, 3)
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (
@@ -436,7 +459,11 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertNotIn("Pending title", prompt)
             self.assertNotIn("Denied title", prompt)
-            self.assertIn("you may use request_feature", prompt)
+            self.assertIn("- request_feature:", prompt)
+            self.assertIn(
+                "capability of the trusted external environment",
+                prompt,
+            )
 
     def test_fresh_protocol_dynamic_tools_validation_and_cleanup(self) -> None:
         scenario = {
@@ -534,6 +561,47 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertEqual(dynamic_tools[1]["type"], "function")
             self.assertEqual(dynamic_tools[1]["name"], "review")
+            descriptions = {
+                tool["name"]: tool["description"]
+                for tool in dynamic_tools[0]["tools"]
+            }
+            self.assertIn(
+                "persistent mutable CodexOS guest source",
+                descriptions["read"],
+            )
+            self.assertIn(
+                "boots under the current trusted hardware profile",
+                descriptions["build"],
+            )
+            self.assertIn(
+                "Permanently end the current generation",
+                descriptions["finish_generation"],
+            )
+            self.assertIn(
+                "matches the latest successful validated build",
+                descriptions["finish_generation"],
+            )
+            self.assertIn(
+                "capability of the trusted external environment",
+                descriptions["request_feature"],
+            )
+            self.assertIn(
+                "rather than human implementation of CodexOS kernel or "
+                "userland functionality",
+                descriptions["request_feature"],
+            )
+            self.assertIn(
+                "does not itself provision or change anything",
+                descriptions["request_feature"],
+            )
+            review_description = dynamic_tools[1]["description"]
+            for expected in (
+                "fresh independent reviewer",
+                "restricted read-only tools",
+                "advisory",
+                "cannot modify CodexOS",
+            ):
+                self.assertIn(expected, review_description)
             config = tomllib.loads(record["config"])
             profile = config["permissions"]["codexos-implementor"]
             self.assertEqual(profile["filesystem"][":root"], "deny")
