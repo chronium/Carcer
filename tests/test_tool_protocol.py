@@ -2,16 +2,22 @@ import socket
 import shutil
 import struct
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
 from harness import (
     TEST_HARDWARE_PROFILE,
     CandidateBootValidator,
+    BuildStatus,
     CodexOSHostServices,
     Frame,
+    ProvidedAssets,
     SerialConnection,
+    SerialError,
+    SerialProtocolDispatcher,
     ToolClient,
     ToolProtocolError,
     ToolResult,
@@ -30,6 +36,17 @@ def connected_serial_peer():
                 peer, _ = listener.accept()
                 with peer:
                     yield serial, peer
+
+
+@contextmanager
+def connected_protocol(host_services=None):
+    with connected_serial_peer() as (serial, peer):
+        protocol = SerialProtocolDispatcher(serial, host_services=host_services)
+        protocol.start_ready()
+        try:
+            yield protocol, peer
+        finally:
+            protocol.close()
 
 
 def receive_peer_frame(peer: socket.socket) -> Frame:
@@ -52,6 +69,16 @@ def receive_exact(peer: socket.socket, size: int) -> bytes:
     return bytes(data)
 
 
+def host_request(request_id: int, name: str, arguments: tuple[bytes, ...]) -> bytes:
+    encoded_name = name.encode("utf-8")
+    payload = bytearray(struct.pack("<H", len(encoded_name)) + encoded_name)
+    payload.extend(struct.pack("<H", len(arguments)))
+    for argument in arguments:
+        payload.extend(struct.pack("<I", len(argument)))
+        payload.extend(argument)
+    return encode_frame(Frame(0x0003, request_id, bytes(payload)))
+
+
 class ToolProtocolIntegrationTest(unittest.TestCase):
     def test_list_tools_decodes_utf8_names(self) -> None:
         names = ["list", "café", "工具"]
@@ -59,23 +86,22 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             struct.pack("<H", len(name.encode("utf-8"))) + name.encode("utf-8")
             for name in names
         )
-
-        with connected_serial_peer() as (serial, peer):
-            peer.sendall(encode_frame(Frame(0x8001, 1, payload)))
-            self.assertEqual(ToolClient(serial).list_tools(), names)
-
+        with connected_protocol() as (protocol, peer), ThreadPoolExecutor() as pool:
+            result = pool.submit(ToolClient(protocol).list_tools)
             request = receive_peer_frame(peer)
             self.assertEqual(request, Frame(0x0001, 1, b""))
+            peer.sendall(encode_frame(Frame(0x8001, 1, payload)))
+            self.assertEqual(result.result(2), names)
 
     def test_invoke_tool_preserves_binary_arguments_and_output(self) -> None:
         arguments = [b"", b"\x00\xffargument", bytes(range(256))]
         output = b"\xff\x00binary output\x00"
-
-        with connected_serial_peer() as (serial, peer):
-            peer.sendall(encode_frame(Frame(0x8002, 1, struct.pack("<I", 7) + output)))
-            result = ToolClient(serial).invoke_tool("binary.tool", arguments)
-            self.assertEqual(result, ToolResult(status=7, output=output))
-
+        with connected_protocol() as (protocol, peer), ThreadPoolExecutor() as pool:
+            result = pool.submit(
+                ToolClient(protocol).invoke_tool,
+                "binary.tool",
+                arguments,
+            )
             request = receive_peer_frame(peer)
             self.assertEqual((request.message_type, request.request_id), (0x0002, 1))
             offset = 0
@@ -93,16 +119,13 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                 offset += argument_length
             self.assertEqual(decoded_arguments, arguments)
             self.assertEqual(offset, len(request.payload))
+            peer.sendall(
+                encode_frame(Frame(0x8002, 1, struct.pack("<I", 7) + output))
+            )
+            self.assertEqual(result.result(2), ToolResult(status=7, output=output))
 
     def test_handles_host_service_while_waiting_for_tool_response(self) -> None:
-        host_service_name = b"unknown"
-        host_service_payload = (
-            struct.pack("<H", len(host_service_name))
-            + host_service_name
-            + struct.pack("<H", 0)
-        )
         tool_output = b"original tool result"
-
         with tempfile.TemporaryDirectory() as temporary:
             qemu = shutil.which("qemu-system-x86_64")
             self.assertIsNotNone(qemu)
@@ -110,61 +133,198 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                 Path(temporary) / "staging",
                 CandidateBootValidator(qemu, TEST_HARDWARE_PROFILE),
             )
-            with connected_serial_peer() as (serial, peer):
-                peer.sendall(
-                    encode_frame(Frame(0x0003, 1, host_service_payload))
-                    + encode_frame(
-                        Frame(0x8002, 1, struct.pack("<I", 7) + tool_output)
-                    )
-                )
-
-                result = ToolClient(serial, host_services).invoke_tool("future", [])
-
+            with (
+                connected_protocol(host_services) as (protocol, peer),
+                ThreadPoolExecutor() as pool,
+            ):
+                result = pool.submit(ToolClient(protocol).invoke_tool, "future", [])
                 tool_request = receive_peer_frame(peer)
                 self.assertEqual(
                     (tool_request.message_type, tool_request.request_id),
                     (0x0002, 1),
                 )
+                peer.sendall(host_request(77, "unknown", ()))
                 host_response = receive_peer_frame(peer)
                 self.assertEqual(
                     (host_response.message_type, host_response.request_id),
-                    (0x8003, 1),
+                    (0x8003, 77),
                 )
                 self.assertNotEqual(
                     struct.unpack_from("<I", host_response.payload)[0],
                     0,
                 )
-                self.assertEqual(result, ToolResult(7, tool_output))
+                peer.sendall(
+                    encode_frame(
+                        Frame(0x8002, 1, struct.pack("<I", 7) + tool_output)
+                    )
+                )
+                self.assertEqual(result.result(2), ToolResult(7, tool_output))
 
     def test_rejects_mismatched_request_id_and_message_type(self) -> None:
-        with connected_serial_peer() as (serial, peer):
-            client = ToolClient(serial)
-
+        with connected_protocol() as (protocol, peer), ThreadPoolExecutor() as pool:
+            client = ToolClient(protocol)
+            first = pool.submit(client.list_tools)
+            receive_peer_frame(peer)
             peer.sendall(encode_frame(Frame(0x8001, 99, struct.pack("<H", 0))))
             with self.assertRaisesRegex(ToolProtocolError, "request ID"):
-                client.list_tools()
-
+                first.result(2)
+            second = pool.submit(client.list_tools)
+            receive_peer_frame(peer)
             peer.sendall(encode_frame(Frame(0x8002, 2, struct.pack("<I", 0))))
             with self.assertRaisesRegex(ToolProtocolError, "message type"):
-                client.list_tools()
+                second.result(2)
 
     def test_rejects_malformed_length_prefixed_payloads(self) -> None:
+        with connected_protocol() as (protocol, peer), ThreadPoolExecutor() as pool:
+            client = ToolClient(protocol)
+            responses = (
+                (Frame(0x8001, 1, struct.pack("<HH", 1, 5) + b"ab"), "truncated tool name"),
+                (Frame(0x8001, 2, struct.pack("<H", 0) + b"x"), "trailing data"),
+                (Frame(0x8001, 3, struct.pack("<HH", 1, 1) + b"\xff"), "UTF-8"),
+            )
+            for frame, message in responses:
+                result = pool.submit(client.list_tools)
+                receive_peer_frame(peer)
+                peer.sendall(encode_frame(frame))
+                with self.assertRaisesRegex(ToolProtocolError, message):
+                    result.result(2)
+
+    def test_idle_provided_asset_requests_are_serviced_after_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            supplied = Path(temporary) / "supplied"
+            asset = supplied / "alpha"
+            asset.mkdir(parents=True)
+            data = b"idle post-ready bytes\x00\xff"
+            (asset / "payload.bin").write_bytes(data)
+            assets = ProvidedAssets.from_directory(supplied)
+            with connected_protocol(assets) as (protocol, peer):
+                self.assertTrue(protocol.reader_alive)
+                peer.sendall(host_request(41, "list_provided_assets", ()))
+                listed = receive_peer_frame(peer)
+                self.assertEqual((listed.message_type, listed.request_id), (0x8003, 41))
+                self.assertEqual(struct.unpack_from("<I", listed.payload)[0], 0)
+                self.assertIn(b"alpha\tpayload.bin", listed.payload[4:])
+                for request_id, offset, length, expected in (
+                    (42, 0, 4, data[:4]),
+                    (43, 5, 7, data[5:12]),
+                    (44, len(data), 0, b""),
+                ):
+                    peer.sendall(
+                        host_request(
+                            request_id,
+                            "read_provided_asset",
+                            (b"alpha", str(offset).encode(), str(length).encode()),
+                        )
+                    )
+                    response = receive_peer_frame(peer)
+                    self.assertEqual(response.request_id, request_id)
+                    self.assertEqual(
+                        (struct.unpack_from("<I", response.payload)[0], response.payload[4:]),
+                        (0, expected),
+                    )
+
+    def test_candidate_validation_services_assets_after_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            supplied = Path(temporary) / "supplied"
+            asset = supplied / "alpha"
+            asset.mkdir(parents=True)
+            (asset / "payload.bin").write_bytes(b"candidate asset bytes")
+            assets = ProvidedAssets.from_directory(supplied)
+            validator = CandidateBootValidator(
+                "unused-qemu",
+                TEST_HARDWARE_PROFILE,
+                provided_assets=assets,
+            )
+            with connected_serial_peer() as (serial, peer), ThreadPoolExecutor() as pool:
+                protocol = SerialProtocolDispatcher(
+                    serial,
+                    startup_host_services=assets,
+                    host_services=assets,
+                )
+                try:
+                    result = pool.submit(validator._validate_guest, protocol)
+                    peer.sendall(b"CODEXOS-SEED-READY\n")
+                    tool_request = receive_peer_frame(peer)
+                    self.assertEqual(tool_request.message_type, 0x0001)
+                    peer.sendall(host_request(61, "list_provided_assets", ()))
+                    asset_response = receive_peer_frame(peer)
+                    self.assertEqual(
+                        (asset_response.message_type, asset_response.request_id),
+                        (0x8003, 61),
+                    )
+                    self.assertEqual(
+                        struct.unpack_from("<I", asset_response.payload)[0],
+                        0,
+                    )
+                    peer.sendall(
+                        encode_frame(
+                            Frame(
+                                0x8001,
+                                tool_request.request_id,
+                                struct.pack("<H", 0),
+                            )
+                        )
+                    )
+                    self.assertEqual(result.result(2).status, BuildStatus.SUCCESS)
+                finally:
+                    protocol.close()
+
+    def test_malformed_host_request_does_not_desynchronize_next_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            supplied = Path(temporary) / "supplied"
+            asset = supplied / "alpha"
+            asset.mkdir(parents=True)
+            (asset / "data").write_bytes(b"bytes")
+            assets = ProvidedAssets.from_directory(supplied)
+            with connected_protocol(assets) as (_protocol, peer):
+                peer.sendall(
+                    encode_frame(Frame(0x0003, 51, b"\x05\x00bad"))
+                    + host_request(52, "list_provided_assets", ())
+                )
+                malformed = receive_peer_frame(peer)
+                valid = receive_peer_frame(peer)
+                self.assertEqual(malformed.request_id, 51)
+                self.assertEqual(struct.unpack_from("<I", malformed.payload)[0], 1)
+                self.assertEqual(valid.request_id, 52)
+                self.assertEqual(struct.unpack_from("<I", valid.payload)[0], 0)
+
+    def test_dispatcher_is_the_only_serial_reader_and_stops_boundedly(self) -> None:
         with connected_serial_peer() as (serial, peer):
-            client = ToolClient(serial)
+            reader_threads: set[int] = set()
+            original_read = serial.read
 
-            truncated = struct.pack("<HH", 1, 5) + b"ab"
-            peer.sendall(encode_frame(Frame(0x8001, 1, truncated)))
-            with self.assertRaisesRegex(ToolProtocolError, "truncated tool name"):
-                client.list_tools()
+            def tracked_read(max_bytes: int, timeout_seconds: float) -> bytes:
+                reader_threads.add(threading.get_ident())
+                return original_read(max_bytes, timeout_seconds)
 
-            peer.sendall(encode_frame(Frame(0x8001, 2, struct.pack("<H", 0) + b"x")))
-            with self.assertRaisesRegex(ToolProtocolError, "trailing data"):
-                client.list_tools()
+            serial.read = tracked_read  # type: ignore[method-assign]
+            protocol = SerialProtocolDispatcher(serial)
+            protocol.start_ready()
+            try:
+                with ThreadPoolExecutor() as pool:
+                    result = pool.submit(ToolClient(protocol).list_tools)
+                    request = receive_peer_frame(peer)
+                    peer.sendall(
+                        encode_frame(
+                            Frame(0x8001, request.request_id, struct.pack("<H", 0))
+                        )
+                    )
+                    self.assertEqual(result.result(2), [])
+                self.assertEqual(len(reader_threads), 1)
+            finally:
+                protocol.close()
+            self.assertFalse(protocol.reader_alive)
 
-            invalid_utf8 = struct.pack("<HH", 1, 1) + b"\xff"
-            peer.sendall(encode_frame(Frame(0x8001, 3, invalid_utf8)))
-            with self.assertRaisesRegex(ToolProtocolError, "UTF-8"):
-                client.list_tools()
+    def test_close_interrupts_an_outstanding_exchange_without_deadlock(self) -> None:
+        with connected_serial_peer() as (serial, peer), ThreadPoolExecutor() as pool:
+            protocol = SerialProtocolDispatcher(serial)
+            protocol.start_ready()
+            result = pool.submit(ToolClient(protocol).list_tools)
+            receive_peer_frame(peer)
+            protocol.close()
+            with self.assertRaisesRegex(SerialError, "closed"):
+                result.result(2)
+            self.assertFalse(protocol.reader_alive)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from harness import (
 )
 from harness.codex_generation_worker import _implementor_prompt
 from harness.guest_startup import wait_for_ready
+from harness.serial_protocol import SerialProtocolDispatcher
 from harness.operator_console import main
 from tests.test_generation_git import (
     _archive_completed,
@@ -294,7 +295,15 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                 + b"CODEXOS-SEED-READY\n"
             )
 
-            wait_for_ready(serial, 1.0, assets)
+            protocol = SerialProtocolDispatcher(
+                serial,
+                startup_host_services=assets,
+                host_services=assets,
+            )
+            try:
+                wait_for_ready(protocol, 1.0)
+            finally:
+                protocol.close()
 
             self.assertEqual(len(serial.writes), 1)
             response = serial.writes[0]
@@ -422,16 +431,16 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                 TEST_HARDWARE_PROFILE,
                 provided_assets=assets,
             )
-            serial = Mock()
+            protocol = Mock(spec=SerialProtocolDispatcher)
             with (
                 patch("harness.candidate_boot.wait_for_ready") as ready,
                 patch("harness.candidate_boot.ToolClient") as client,
             ):
-                result = validator._validate_guest(serial)
+                result = validator._validate_guest(protocol)
 
             self.assertEqual(result.status.value, "success")
-            ready.assert_called_once_with(serial, 10.0, assets)
-            client.assert_called_once_with(serial, assets)
+            ready.assert_called_once_with(protocol, 10.0)
+            client.assert_called_once_with(protocol)
             client.return_value.list_tools.assert_called_once_with()
 
     def test_runtime_wires_one_snapshot_to_active_and_candidate_services(self) -> None:
@@ -473,7 +482,9 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                     frozen,
                 )
                 ready.assert_called_once()
-                self.assertIs(ready.call_args.args[2], frozen)
+                protocol = ready.call_args.args[0]
+                self.assertIs(protocol._startup_host_services, frozen)
+                self.assertIs(protocol._host_services, active)
                 runtime.stop()
 
 
@@ -613,6 +624,9 @@ class _ScriptedSerial:
 
     def write(self, data: bytes) -> None:
         self.writes.append(data)
+
+    def close(self) -> None:
+        pass
 
 
 if __name__ == "__main__":

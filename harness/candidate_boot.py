@@ -24,6 +24,7 @@ from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
 from .provided_assets import ProvidedAssets
 from .serial import SerialConnection, SerialError
+from .serial_protocol import SerialProtocolDispatcher
 from .tool_protocol import ToolClient, ToolProtocolError
 from .trusted_build import BuildStatus
 
@@ -117,6 +118,7 @@ class CandidateBootValidator:
         serial_path = workspace / "serial.sock"
         qmp = QmpClient(qmp_path)
         serial = SerialConnection(serial_path)
+        protocol: SerialProtocolDispatcher | None = None
         controller = QemuProcessController(self._qemu_executable)
         qmp_connected = False
         result: CandidateBootResult
@@ -165,12 +167,20 @@ class CandidateBootValidator:
                                 "CODEXOS-SEED-READY"
                             )
                     else:
-                        result = self._validate_guest(serial)
+                        protocol = SerialProtocolDispatcher(
+                            serial,
+                            startup_host_services=self._provided_assets,
+                            host_services=self._provided_assets,
+                        )
+                        result = self._validate_guest(protocol)
         finally:
             cleanup_errors: list[str] = []
             try:
-                serial.close()
-            except OSError as error:
+                if protocol is None:
+                    serial.close()
+                else:
+                    protocol.close()
+            except (OSError, SerialError) as error:
                 cleanup_errors.append(f"serial close failed: {error}")
             if qmp_connected:
                 try:
@@ -196,12 +206,14 @@ class CandidateBootValidator:
         cleanup_error = "; ".join(cleanup_errors) if cleanup_errors else None
         return result, cleanup_error
 
-    def _validate_guest(self, serial: SerialConnection) -> CandidateBootResult:
+    def _validate_guest(
+        self,
+        protocol: SerialProtocolDispatcher,
+    ) -> CandidateBootResult:
         try:
             wait_for_ready(
-                serial,
+                protocol,
                 self._ready_timeout_seconds,
-                self._provided_assets,
             )
         except GuestReadyError as error:
             detail = error.reason
@@ -214,11 +226,7 @@ class CandidateBootValidator:
         self._publish(CodexActivityKind.BUILD_CANDIDATE_READY)
 
         try:
-            client = (
-                ToolClient(serial)
-                if self._provided_assets is None
-                else ToolClient(serial, self._provided_assets)
-            )
+            client = ToolClient(protocol)
             client.list_tools()
         except (
             FramingError,

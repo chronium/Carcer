@@ -32,6 +32,7 @@ from .provided_assets import ProvidedAssets, configure_provided_assets
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
 from .serial import SerialConnection
+from .serial_protocol import SerialProtocolDispatcher
 from .source_snapshot import decode_source_snapshot
 from .tool_protocol import ToolClient, ToolResult
 
@@ -105,6 +106,7 @@ class CodexOSRun:
         self._controller: QemuProcessController | None = None
         self._qmp: QmpClient | None = None
         self._serial: SerialConnection | None = None
+        self._serial_protocol: SerialProtocolDispatcher | None = None
         self._host_services: CodexOSHostServices | None = None
         self._tool_client: ToolClient | None = None
 
@@ -635,6 +637,7 @@ class CodexOSRun:
         self._controller = controller
         self._qmp = qmp
         self._serial = serial
+        self._serial_protocol = None
         self._host_services = host_services
         self._tool_client = None
         self._current_hardware = hardware
@@ -652,12 +655,17 @@ class CodexOSRun:
             )
             qmp.connect()
             serial.connect()
-            wait_for_ready(
+            protocol = SerialProtocolDispatcher(
                 serial,
-                _STARTUP_TIMEOUT_SECONDS,
-                self._provided_assets,
+                startup_host_services=self._provided_assets,
+                host_services=host_services,
             )
-            self._tool_client = ToolClient(serial, host_services)
+            self._serial_protocol = protocol
+            wait_for_ready(
+                protocol,
+                _STARTUP_TIMEOUT_SECONDS,
+            )
+            self._tool_client = ToolClient(protocol)
             self._current_boot_image = boot_image
             self._current_parent_generation = parent_generation
             self._current_transition = transition
@@ -837,6 +845,7 @@ class CodexOSRun:
         controller = self._controller
         qmp = self._qmp
         serial = self._serial
+        protocol = self._serial_protocol
 
         try:
             if qmp is not None and controller is not None and controller.is_running:
@@ -850,17 +859,28 @@ class CodexOSRun:
             if controller is not None and controller.is_running:
                 controller.stop(timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS)
         finally:
-            if serial is not None:
-                serial.close()
-            if qmp is not None:
-                qmp.close()
-            if controller is not None:
-                controller.stop(timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS)
-            self._tool_client = None
-            self._host_services = None
-            self._serial = None
-            self._qmp = None
-            self._controller = None
+            try:
+                if protocol is not None:
+                    protocol.close()
+                elif serial is not None:
+                    serial.close()
+            finally:
+                try:
+                    if qmp is not None:
+                        qmp.close()
+                finally:
+                    try:
+                        if controller is not None:
+                            controller.stop(
+                                timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS
+                            )
+                    finally:
+                        self._tool_client = None
+                        self._host_services = None
+                        self._serial = None
+                        self._serial_protocol = None
+                        self._qmp = None
+                        self._controller = None
 
     def _cleanup_workspace(self) -> None:
         workspace = self._workspace

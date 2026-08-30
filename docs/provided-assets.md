@@ -24,6 +24,8 @@ Guest access uses the existing serial host-service framing. The precise
 `list_provided_assets` and `read_provided_asset` wire semantics are documented
 in [`../protocol/provided-assets-host-service.md`](../protocol/provided-assets-host-service.md).
 The active generation and candidate validation share the same in-memory
-snapshot. Asset bytes are not Codex dynamic-tool results and do not enter source
-snapshots, generation archives, autonomous Git commits, prompts, handoffs,
-interview artifacts, or operational telemetry.
+snapshot. One dispatcher owns each guest serial stream, so provided-asset
+requests are serviced before and after READY without waiting for unrelated
+development-tool traffic. Asset bytes are not Codex dynamic-tool results and
+do not enter source snapshots, generation archives, autonomous Git commits,
+prompts, handoffs, interview artifacts, or operational telemetry.

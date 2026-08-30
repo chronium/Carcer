@@ -58,6 +58,7 @@ from .provided_assets import (
 from .qmp import QmpClient, QmpError
 from .qemu import QemuProcessController
 from .serial import SerialConnection, SerialError
+from .serial_protocol import SerialProtocolDispatcher
 from .source_snapshot import (
     SnapshotFile,
     SourceSnapshotError,
@@ -113,6 +114,7 @@ __all__ = [
     "RuntimeState",
     "SerialConnection",
     "SerialError",
+    "SerialProtocolDispatcher",
     "SnapshotFile",
     "SourceSnapshotError",
     "StagedBuildArtifacts",

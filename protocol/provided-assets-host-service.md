@@ -36,8 +36,9 @@ status `2`.
 
 These services expose no host path and never reopen external files. The active
 generation and its ephemeral candidate-validation VMs use the same frozen
-in-memory snapshot. The provided-assets dispatcher is available while each VM
-is approaching canonical READY and during later guest-tool exchanges; other
-host services are not thereby enabled during startup. The interface does not
-define a guest filesystem,
-installation path, extraction behavior, executable format, or use policy.
+in-memory snapshot. The provided-assets dispatcher remains available whenever
+each VM is running, both while the guest is approaching canonical READY and
+after READY, independently of harness-initiated development-tool traffic.
+Other host services are not thereby enabled during startup. The interface does
+not define a guest filesystem, installation path, extraction behavior,
+executable format, or use policy.

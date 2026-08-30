@@ -9,6 +9,7 @@ from harness import (
     BuildStatus,
     QemuProcessController,
     SerialConnection,
+    SerialProtocolDispatcher,
     SnapshotFile,
     ToolClient,
     build_source_snapshot,
@@ -85,7 +86,9 @@ class TrustedBuildIntegrationTests(unittest.TestCase):
                         except TimeoutError:
                             continue
 
-                    client = ToolClient(serial)
+                    protocol = SerialProtocolDispatcher(serial)
+                    protocol.start_ready()
+                    client = ToolClient(protocol)
                     self.assertEqual(
                         client.list_tools(),
                         [
@@ -117,6 +120,7 @@ class TrustedBuildIntegrationTests(unittest.TestCase):
                     self.assertEqual(kernel.status, 0)
                     self.assertEqual(kernel.output, original["seed/kernel.c"])
                     self.assertTrue(controller.is_running)
+                    protocol.close()
 
             self.assertFalse(controller.is_running)
             with self.assertRaises(ProcessLookupError):

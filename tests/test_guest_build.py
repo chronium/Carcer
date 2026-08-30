@@ -12,6 +12,7 @@ from harness import (
     CodexOSHostServices,
     QemuProcessController,
     SerialConnection,
+    SerialProtocolDispatcher,
     ToolClient,
 )
 
@@ -77,63 +78,71 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
                 with first_serial:
                     _wait_for_ready(first_serial)
-                    client = ToolClient(first_serial, host_services)
-                    self.assertEqual(client.list_tools(), _TOOLS)
-
-                    append = client.invoke_tool(
-                        "write",
-                        [
-                            b"seed/kernel.c",
-                            str(len(original_kernel)).encode("ascii"),
-                            mutation,
-                        ],
+                    protocol = SerialProtocolDispatcher(
+                        first_serial,
+                        host_services=host_services,
                     )
-                    self.assertEqual(append.status, 0)
+                    protocol.start_ready()
+                    client = ToolClient(protocol)
+                    try:
+                        self.assertEqual(client.list_tools(), _TOOLS)
 
-                    ignored = client.invoke_tool(
-                        "write",
-                        [b"seed/../not-buildable.c", b"0", b"not valid C"],
-                    )
-                    self.assertEqual(ignored.status, 0)
+                        append = client.invoke_tool(
+                            "write",
+                            [
+                                b"seed/kernel.c",
+                                str(len(original_kernel)).encode("ascii"),
+                                mutation,
+                            ],
+                        )
+                        self.assertEqual(append.status, 0)
 
-                    success = client.invoke_tool("build", [])
-                    self.assertEqual(success.status, 0, success.output.decode())
-                    successful_artifacts = host_services.latest_successful_build
-                    self.assertIsNotNone(successful_artifacts)
-                    self.assertTrue(successful_artifacts.kernel_elf.is_file())
-                    self.assertTrue(successful_artifacts.iso.is_file())
+                        ignored = client.invoke_tool(
+                            "write",
+                            [b"seed/../not-buildable.c", b"0", b"not valid C"],
+                        )
+                        self.assertEqual(ignored.status, 0)
 
-                    invalid_offset = len(original_kernel) + len(mutation)
-                    break_source = client.invoke_tool(
-                        "write",
-                        [
-                            b"seed/kernel.c",
-                            str(invalid_offset).encode("ascii"),
-                            invalid_c,
-                        ],
-                    )
-                    self.assertEqual(break_source.status, 0)
+                        success = client.invoke_tool("build", [])
+                        self.assertEqual(success.status, 0, success.output.decode())
+                        successful_artifacts = host_services.latest_successful_build
+                        self.assertIsNotNone(successful_artifacts)
+                        self.assertTrue(successful_artifacts.kernel_elf.is_file())
+                        self.assertTrue(successful_artifacts.iso.is_file())
 
-                    failure = client.invoke_tool("build", [])
-                    self.assertEqual(failure.status, 1)
-                    self.assertIn(b"kernel.c", failure.output)
-                    self.assertIn(b"error:", failure.output)
-                    self.assertEqual(
-                        host_services.latest_successful_build,
-                        successful_artifacts,
-                    )
-                    self.assertTrue(successful_artifacts.iso.is_file())
+                        invalid_offset = len(original_kernel) + len(mutation)
+                        break_source = client.invoke_tool(
+                            "write",
+                            [
+                                b"seed/kernel.c",
+                                str(invalid_offset).encode("ascii"),
+                                invalid_c,
+                            ],
+                        )
+                        self.assertEqual(break_source.status, 0)
 
-                    repair = client.invoke_tool(
-                        "truncate",
-                        [b"seed/kernel.c", str(invalid_offset).encode("ascii")],
-                    )
-                    self.assertEqual(repair.status, 0)
-                    self.assertTrue(first_controller.is_running)
-                    self.assertEqual(
-                        (repository / "seed" / "kernel.c").read_bytes(),
-                        original_kernel,
-                    )
+                        failure = client.invoke_tool("build", [])
+                        self.assertEqual(failure.status, 1)
+                        self.assertIn(b"kernel.c", failure.output)
+                        self.assertIn(b"error:", failure.output)
+                        self.assertEqual(
+                            host_services.latest_successful_build,
+                            successful_artifacts,
+                        )
+                        self.assertTrue(successful_artifacts.iso.is_file())
+
+                        repair = client.invoke_tool(
+                            "truncate",
+                            [b"seed/kernel.c", str(invalid_offset).encode("ascii")],
+                        )
+                        self.assertEqual(repair.status, 0)
+                        self.assertTrue(first_controller.is_running)
+                        self.assertEqual(
+                            (repository / "seed" / "kernel.c").read_bytes(),
+                            original_kernel,
+                        )
+                    finally:
+                        protocol.close()
 
             self.assertFalse(first_controller.is_running)
             with self.assertRaises(ProcessLookupError):
@@ -154,23 +163,31 @@ class GuestBuildIntegrationTest(unittest.TestCase):
 
                 with second_serial:
                     _wait_for_ready(second_serial)
-                    successor = ToolClient(second_serial)
-                    self.assertEqual(successor.list_tools(), _TOOLS)
-                    expected_kernel = original_kernel + mutation
-                    read_kernel = successor.invoke_tool(
-                        "read",
-                        [
-                            b"seed/kernel.c",
-                            b"0",
-                            str(len(expected_kernel)).encode("ascii"),
-                        ],
-                    )
-                    self.assertEqual(read_kernel.status, 0)
-                    self.assertEqual(read_kernel.output, expected_kernel)
-                    listed = successor.invoke_tool("list", [b"seed/build"])
-                    self.assertEqual(listed.status, 0)
-                    self.assertEqual(listed.output, b"seed/build.c\nseed/build.h\n")
-                    self.assertTrue(second_controller.is_running)
+                    protocol = SerialProtocolDispatcher(second_serial)
+                    protocol.start_ready()
+                    try:
+                        successor = ToolClient(protocol)
+                        self.assertEqual(successor.list_tools(), _TOOLS)
+                        expected_kernel = original_kernel + mutation
+                        read_kernel = successor.invoke_tool(
+                            "read",
+                            [
+                                b"seed/kernel.c",
+                                b"0",
+                                str(len(expected_kernel)).encode("ascii"),
+                            ],
+                        )
+                        self.assertEqual(read_kernel.status, 0)
+                        self.assertEqual(read_kernel.output, expected_kernel)
+                        listed = successor.invoke_tool("list", [b"seed/build"])
+                        self.assertEqual(listed.status, 0)
+                        self.assertEqual(
+                            listed.output,
+                            b"seed/build.c\nseed/build.h\n",
+                        )
+                        self.assertTrue(second_controller.is_running)
+                    finally:
+                        protocol.close()
 
             self.assertFalse(second_controller.is_running)
             with self.assertRaises(ProcessLookupError):
