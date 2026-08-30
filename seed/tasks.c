@@ -11,18 +11,17 @@
 #define USER_CODE_SELECTOR 0x23u
 #define USER_IMAGE_BASE 0x400000ull
 #define USER_STACK_TOP 0x600000ull
-#define USER_ADDRESS_SPACE_PAGES 6u
+#define USER_FIXED_PAGES 5u
+#define USER_MAX_IMAGE_PAGES 511u
+#define USER_MAX_IMAGE_SIZE (USER_MAX_IMAGE_PAGES*MEMORY_PAGE_SIZE)
 #define USER_EXEC_HEADER_SIZE 16u
 #define PAGE_ADDRESS_MASK 0x000ffffffffff000ull
 #define PAGE_USER_RW 7ull
 struct task_slot {
 struct task_context context;
-uint64_t cr3;
-uint64_t pages;
-uint64_t retired_pages;
-uint64_t exit_status;
-uint8_t runnable;
-uint8_t exited;
+uint64_t cr3,pages,retired_pages,exit_status;
+uint32_t page_count,retired_count;
+uint8_t runnable,exited;
 };
 static struct task_slot task_slots[TASK_MAX_COUNT];
 static uint8_t task_stacks[TASK_MAX_COUNT-1u][TASK_STACK_SIZE] __attribute__((aligned(16)));
@@ -44,20 +43,24 @@ return value;
 static void write_cr3(uint64_t value) {
 __asm__ volatile("movq %0,%%cr3"::"r"(value):"memory");
 }
-static void copy_context(struct task_context *destination,const struct task_context *source) {
-volatile uint64_t *to=(volatile uint64_t *)destination;
-const volatile uint64_t *from=(const volatile uint64_t *)source;
-for(uint32_t index=0;index<TASK_CONTEXT_WORDS;++index) to[index]=from[index];
+static void copy_context(struct task_context *to,const struct task_context *from) {
+for(uint32_t i=0;i<TASK_CONTEXT_WORDS;++i)
+((volatile uint64_t *)to)[i]=((const volatile uint64_t *)from)[i];
 }
 static int free_slot(void) {
-for(uint32_t identifier=1;identifier<TASK_MAX_COUNT;++identifier)
-if(!task_slots[identifier].runnable&&!task_slots[identifier].pages)
-return (int)identifier;
+for(uint32_t id=1;id<TASK_MAX_COUNT;++id)
+if(!task_slots[id].runnable&&!task_slots[id].pages) return (int)id;
 return -1;
 }
 static void clear_context(struct task_context *context) {
-for(uint32_t index=0;index<TASK_CONTEXT_WORDS;++index)
-((uint64_t *)context)[index]=0;
+for(uint32_t i=0;i<TASK_CONTEXT_WORDS;++i) ((uint64_t *)context)[i]=0;
+}
+static int release_pages(struct task_slot *slot) {
+if(!slot->pages) return 1;
+if(!memory_pages_free(slot->pages,slot->page_count)) return 0;
+slot->pages=0;
+slot->page_count=0;
+return 1;
 }
 __attribute__((used)) static void task_finished(void) {
 task_slots[current_task].runnable=0;
@@ -68,14 +71,11 @@ __asm__ volatile("cli\ncall task_finished\nsti\n1: hlt\njmp 1b\n");
 int task_create(void (*entry)(void)) {
 if(!tasks_ready||entry==(void (*)(void))0) return -1;
 uint64_t flags=interrupt_lock();
-int identifier=free_slot();
-if(identifier<0) {
-interrupt_restore(flags);
-return -1;
-}
-struct task_slot *slot=&task_slots[identifier];
+int id=free_slot();
+if(id<0) { interrupt_restore(flags); return -1; }
+struct task_slot *slot=&task_slots[id];
 clear_context(&slot->context);
-uintptr_t stack=(uintptr_t)(task_stacks[identifier-1]+TASK_STACK_SIZE);
+uintptr_t stack=(uintptr_t)(task_stacks[id-1]+TASK_STACK_SIZE);
 stack=(stack&~(uintptr_t)15u)-sizeof(uint64_t);
 *(uint64_t *)stack=(uint64_t)(uintptr_t)task_return_stub;
 slot->context.rip=(uint64_t)(uintptr_t)entry;
@@ -84,111 +84,104 @@ slot->context.rflags=0x202u;
 slot->context.rsp=stack;
 slot->context.ss=KERNEL_DATA_SELECTOR;
 slot->cr3=task_slots[0].cr3;
-slot->pages=0;
-slot->retired_pages=0;
-slot->exit_status=0;
+slot->pages=slot->retired_pages=slot->exit_status=0;
+slot->page_count=slot->retired_count=0;
 slot->exited=0;
 slot->runnable=1;
 interrupt_restore(flags);
-return identifier;
+return id;
 }
-static uint64_t create_user_space(const uint8_t *image,uint32_t size) {
-uint64_t base=memory_pages_alloc(USER_ADDRESS_SPACE_PAGES);
+static uint64_t create_user_space(
+const uint8_t *image,uint32_t size,uint32_t *allocated_count
+) {
+uint32_t image_pages=(size+MEMORY_PAGE_SIZE-1u)/MEMORY_PAGE_SIZE;
+uint32_t total=USER_FIXED_PAGES+image_pages;
+uint64_t base=memory_pages_alloc(total);
 if(!base) return 0;
 uint64_t *root=(uint64_t *)memory_physical_to_virtual(base);
-uint64_t *kernel_root=(uint64_t *)memory_physical_to_virtual(task_slots[0].cr3&PAGE_ADDRESS_MASK);
-uint64_t *level3=(uint64_t *)memory_physical_to_virtual(base+MEMORY_PAGE_SIZE);
-uint64_t *level2=(uint64_t *)memory_physical_to_virtual(base+2u*MEMORY_PAGE_SIZE);
-uint64_t *level1=(uint64_t *)memory_physical_to_virtual(base+3u*MEMORY_PAGE_SIZE);
-uint8_t *user_image=(uint8_t *)memory_physical_to_virtual(base+4u*MEMORY_PAGE_SIZE);
-if(!root||!kernel_root||!level3||!level2||!level1||!user_image) {
-(void)memory_pages_free(base,USER_ADDRESS_SPACE_PAGES);
+uint64_t *kernel=(uint64_t *)memory_physical_to_virtual(
+task_slots[0].cr3&PAGE_ADDRESS_MASK);
+uint64_t *l3=(uint64_t *)memory_physical_to_virtual(base+MEMORY_PAGE_SIZE);
+uint64_t *l2=(uint64_t *)memory_physical_to_virtual(base+2u*MEMORY_PAGE_SIZE);
+uint64_t *l1=(uint64_t *)memory_physical_to_virtual(base+3u*MEMORY_PAGE_SIZE);
+uint8_t *copy=(uint8_t *)memory_physical_to_virtual(
+base+4u*MEMORY_PAGE_SIZE);
+if(!root||!kernel||!l3||!l2||!l1||!copy) {
+(void)memory_pages_free(base,total);
 return 0;
 }
-for(uint32_t index=0;index<512u;++index) root[index]=kernel_root[index];
+for(uint32_t i=0;i<512u;++i) root[i]=kernel[i];
 root[0]=(base+MEMORY_PAGE_SIZE)|PAGE_USER_RW;
-level3[0]=(base+2u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
-level2[2]=(base+3u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
-level1[0]=(base+4u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
-level1[511]=(base+5u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
-for(uint32_t index=0;index<size;++index) user_image[index]=image[index];
+l3[0]=(base+2u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
+l2[2]=(base+3u*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
+for(uint32_t i=0;i<image_pages;++i)
+l1[i]=(base+(4u+i)*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
+l1[511]=(base+(4u+image_pages)*MEMORY_PAGE_SIZE)|PAGE_USER_RW;
+for(uint32_t i=0;i<size;++i) copy[i]=image[i];
+*allocated_count=total;
 return base;
 }
 int task_create_user(const uint8_t *image,uint32_t size,uint32_t entry_offset) {
-if(!tasks_ready||!image||!size||size>MEMORY_PAGE_SIZE||entry_offset>=size) return -1;
+if(!tasks_ready||!image||!size||size>USER_MAX_IMAGE_SIZE||
+entry_offset>=size) return -1;
 uint64_t flags=interrupt_lock();
-int identifier=free_slot();
-if(identifier<0) {
-interrupt_restore(flags);
-return -1;
-}
-uint64_t pages=create_user_space(image,size);
-if(!pages) {
-interrupt_restore(flags);
-return -1;
-}
-struct task_slot *slot=&task_slots[identifier];
+int id=free_slot();
+if(id<0) { interrupt_restore(flags); return -1; }
+uint32_t count=0;
+uint64_t pages=create_user_space(image,size,&count);
+if(!pages) { interrupt_restore(flags); return -1; }
+struct task_slot *slot=&task_slots[id];
 clear_context(&slot->context);
 slot->context.rip=USER_IMAGE_BASE+entry_offset;
 slot->context.cs=USER_CODE_SELECTOR;
 slot->context.rflags=0x202u;
 slot->context.rsp=USER_STACK_TOP;
 slot->context.ss=USER_DATA_SELECTOR;
-slot->cr3=pages;
-slot->pages=pages;
-slot->retired_pages=0;
-slot->exit_status=0;
+slot->cr3=slot->pages=pages;
+slot->page_count=count;
+slot->retired_pages=slot->exit_status=0;
+slot->retired_count=0;
 slot->exited=0;
 slot->runnable=1;
 interrupt_restore(flags);
-return identifier;
+return id;
 }
-static uint32_t read_u32(const uint8_t *bytes) {
-return (uint32_t)bytes[0]|((uint32_t)bytes[1]<<8)|
-((uint32_t)bytes[2]<<16)|((uint32_t)bytes[3]<<24);
+static uint32_t read_u32(const uint8_t *p) {
+return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|
+((uint32_t)p[3]<<24);
 }
-int task_create_user_file(const uint8_t *path,uint32_t path_length) {
-if(!tasks_ready||!path||!path_length) return -1;
-struct file *file=file_find(path,path_length);
+int task_create_user_file(const uint8_t *path,uint32_t length) {
+if(!tasks_ready||!path||!length) return -1;
+struct file *file=file_find(path,length);
 if(!file||file_size(file)<USER_EXEC_HEADER_SIZE) return -1;
 const uint8_t *data=file_content(file);
-uint32_t image_size=read_u32(data+4);
-uint32_t entry_offset=read_u32(data+8);
+uint32_t size=read_u32(data+4),entry=read_u32(data+8);
 if(data[0]!='C'||data[1]!='X'||data[2]!='E'||data[3]!='1'||
-read_u32(data+12)!=0||image_size!=file_size(file)-USER_EXEC_HEADER_SIZE)
-return -1;
-return task_create_user(data+USER_EXEC_HEADER_SIZE,image_size,entry_offset);
+read_u32(data+12)!=0||size!=file_size(file)-USER_EXEC_HEADER_SIZE) return -1;
+return task_create_user(data+USER_EXEC_HEADER_SIZE,size,entry);
 }
-int task_destroy(uint32_t identifier) {
+int task_destroy(uint32_t id) {
 uint64_t flags=interrupt_lock();
-int valid=tasks_ready&&identifier>0&&identifier<TASK_MAX_COUNT&&
-identifier!=current_task&&task_slots[identifier].runnable;
-if(valid&&task_slots[identifier].pages)
-valid=memory_pages_free(task_slots[identifier].pages,USER_ADDRESS_SPACE_PAGES);
-if(valid) {
-task_slots[identifier].runnable=0;
-task_slots[identifier].pages=0;
-}
+int valid=tasks_ready&&id>0&&id<TASK_MAX_COUNT&&id!=current_task&&
+task_slots[id].runnable&&release_pages(&task_slots[id]);
+if(valid) task_slots[id].runnable=0;
 interrupt_restore(flags);
 return valid;
 }
 struct task_context *tasks_schedule(struct task_context *frame) {
 if(!tasks_ready) return frame;
 uint32_t previous=current_task;
-if(task_slots[previous].runnable) copy_context(&task_slots[previous].context,frame);
+if(task_slots[previous].runnable)
+copy_context(&task_slots[previous].context,frame);
 uint32_t next=previous;
 for(uint32_t distance=1;distance<=TASK_MAX_COUNT;++distance) {
 uint32_t candidate=(previous+distance)%TASK_MAX_COUNT;
-if(task_slots[candidate].runnable) {
-next=candidate;
-break;
-}
+if(task_slots[candidate].runnable) { next=candidate; break; }
 }
 current_task=next;
 if(task_slots[next].cr3!=read_cr3()) write_cr3(task_slots[next].cr3);
-if(previous!=next&&!task_slots[previous].runnable&&task_slots[previous].pages&&
-memory_pages_free(task_slots[previous].pages,USER_ADDRESS_SPACE_PAGES))
-task_slots[previous].pages=0;
+if(previous!=next&&!task_slots[previous].runnable)
+(void)release_pages(&task_slots[previous]);
 return &task_slots[next].context;
 }
 struct task_context *tasks_system_call(struct task_context *frame) {
@@ -196,14 +189,13 @@ if(!tasks_ready||!frame||current_task==0||!task_slots[current_task].pages) {
 if(frame) frame->rax=UINT64_MAX;
 return frame;
 }
-if(frame->rax!=0) {
-frame->rax=UINT64_MAX;
-return frame;
-}
-task_slots[current_task].retired_pages=task_slots[current_task].pages;
-task_slots[current_task].exit_status=frame->rdi;
-task_slots[current_task].exited=1;
-task_slots[current_task].runnable=0;
+if(frame->rax!=0) { frame->rax=UINT64_MAX; return frame; }
+struct task_slot *slot=&task_slots[current_task];
+slot->retired_pages=slot->pages;
+slot->retired_count=slot->page_count;
+slot->exit_status=frame->rdi;
+slot->exited=1;
+slot->runnable=0;
 return tasks_schedule(frame);
 }
 static const uint8_t worker_up[]={
@@ -212,35 +204,36 @@ static const uint8_t worker_up[]={
 static const uint8_t worker_down[]={
 0x48,0xb8,0x00,0x01,0x40,0,0,0,0,0,0x48,0xff,0x08,0xeb,0xfb
 };
-static const uint8_t worker_file[]={
-'C','X','E','1',39,0,0,0,0,0,0,0,0,0,0,0,
+static const uint8_t worker_header[]={
+'C','X','E','1',0x27,0x10,0,0,0,0x10,0,0,0,0,0,0
+};
+static const uint8_t worker_code[]={
 0xb8,99,0,0,0,0xcd,0x80,0x48,0x83,0xf8,0xff,0x75,12,
 0xb8,0,0,0,0,0xbf,42,0,0,0,0xcd,0x80,
 0xb8,0,0,0,0,0xbf,13,0,0,0,0xcd,0x80,0x0f,0x0b
 };
-static uint64_t task_reclaimed_pages(uint32_t identifier,uint64_t status) {
-uint64_t flags=interrupt_lock();
-uint64_t result=0;
-if(identifier<TASK_MAX_COUNT&&task_slots[identifier].exited&&
-task_slots[identifier].exit_status==status&&!task_slots[identifier].runnable&&
-!task_slots[identifier].pages)
-result=task_slots[identifier].retired_pages;
+static uint64_t reclaimed(uint32_t id,uint64_t status,uint32_t *count) {
+uint64_t flags=interrupt_lock(),result=0;
+*count=0;
+if(id<TASK_MAX_COUNT&&task_slots[id].exited&&
+task_slots[id].exit_status==status&&!task_slots[id].runnable&&
+!task_slots[id].pages) {
+result=task_slots[id].retired_pages;
+*count=task_slots[id].retired_count;
+}
 interrupt_restore(flags);
 return result;
 }
 int tasks_init(void) {
 uint64_t flags=interrupt_lock();
-for(uint32_t index=0;index<TASK_MAX_COUNT;++index) {
-task_slots[index].runnable=0;
-task_slots[index].exited=0;
-task_slots[index].pages=0;
-task_slots[index].retired_pages=0;
-task_slots[index].exit_status=0;
+for(uint32_t i=0;i<TASK_MAX_COUNT;++i) {
+task_slots[i].runnable=task_slots[i].exited=0;
+task_slots[i].pages=task_slots[i].retired_pages=task_slots[i].exit_status=0;
+task_slots[i].page_count=task_slots[i].retired_count=0;
 }
 current_task=0;
 task_slots[0].cr3=read_cr3();
-task_slots[0].runnable=1;
-tasks_ready=1;
+task_slots[0].runnable=tasks_ready=1;
 interrupt_restore(flags);
 int first=task_create_user(worker_up,sizeof(worker_up),0);
 int second=task_create_user(worker_down,sizeof(worker_down),0);
@@ -248,8 +241,10 @@ if(first<0||second<0) {
 if(first>0) (void)task_destroy((uint32_t)first);
 return 0;
 }
-volatile uint64_t *a=(volatile uint64_t *)((uint8_t *)memory_physical_to_virtual(task_slots[first].pages+4u*MEMORY_PAGE_SIZE)+0x100u);
-volatile uint64_t *b=(volatile uint64_t *)((uint8_t *)memory_physical_to_virtual(task_slots[second].pages+4u*MEMORY_PAGE_SIZE)+0x100u);
+volatile uint64_t *a=(volatile uint64_t *)((uint8_t *)
+memory_physical_to_virtual(task_slots[first].pages+4u*MEMORY_PAGE_SIZE)+0x100u);
+volatile uint64_t *b=(volatile uint64_t *)((uint8_t *)
+memory_physical_to_virtual(task_slots[second].pages+4u*MEMORY_PAGE_SIZE)+0x100u);
 uint64_t start=timer_ticks();
 while((*a==0||*b==0)&&timer_ticks()-start<TIMER_FREQUENCY_HZ)
 __asm__ volatile("pause");
@@ -257,26 +252,34 @@ int success=*a!=0&&*b!=0;
 (void)task_destroy((uint32_t)first);
 (void)task_destroy((uint32_t)second);
 if(!success) return 0;
-static const uint8_t worker_path[]="bin/abi-test.cxe";
-if(!file_write(worker_path,sizeof(worker_path)-1u,0,worker_file,sizeof(worker_file)))
+static const uint8_t path[]="bin/abi-test.cxe";
+if(!file_write(path,sizeof(path)-1u,0,worker_header,sizeof(worker_header)))
 return 0;
-int exiting=task_create_user_file(worker_path,sizeof(worker_path)-1u);
+uint32_t image_size=MEMORY_PAGE_SIZE+sizeof(worker_code);
+if(!file_truncate(path,sizeof(path)-1u,USER_EXEC_HEADER_SIZE+image_size)||
+!file_write(path,sizeof(path)-1u,USER_EXEC_HEADER_SIZE+MEMORY_PAGE_SIZE,
+worker_code,sizeof(worker_code))) {
+(void)file_remove(path,sizeof(path)-1u);
+return 0;
+}
+int exiting=task_create_user_file(path,sizeof(path)-1u);
 if(exiting<0) {
-(void)file_remove(worker_path,sizeof(worker_path)-1u);
+(void)file_remove(path,sizeof(path)-1u);
 return 0;
 }
 start=timer_ticks();
 uint64_t released=0;
-while(!(released=task_reclaimed_pages((uint32_t)exiting,42))&&
-timer_ticks()-start<TIMER_FREQUENCY_HZ)
-__asm__ volatile("pause");
-if(!released) {
+uint32_t count=0;
+while(!(released=reclaimed((uint32_t)exiting,42,&count))&&
+timer_ticks()-start<TIMER_FREQUENCY_HZ) __asm__ volatile("pause");
+if(!released||count!=USER_FIXED_PAGES+2u) {
 (void)task_destroy((uint32_t)exiting);
+(void)file_remove(path,sizeof(path)-1u);
 return 0;
 }
-uint64_t reused=memory_pages_alloc(USER_ADDRESS_SPACE_PAGES);
+uint64_t reused=memory_pages_alloc(count);
 int recycled=reused==released;
-int freed=!reused||memory_pages_free(reused,USER_ADDRESS_SPACE_PAGES);
-int removed=file_remove(worker_path,sizeof(worker_path)-1u);
+int freed=!reused||memory_pages_free(reused,count);
+int removed=file_remove(path,sizeof(path)-1u);
 return recycled&&freed&&removed;
 }

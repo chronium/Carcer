@@ -16,9 +16,16 @@ the image into a private address space, and starts at image base plus entry
 offset. Thus the backing file may be changed or removed after a successful
 load without changing the running task.
 
-Current CXE1 limits are one nonempty image page (at most 4096 bytes), entry
-inside the image, image base `0x400000`, and a zeroed one-page stack ending at
-`0x600000`. These are current implementation limits, not workload semantics.
+A CXE1 image is a nonempty flat byte image based at `0x400000`. It may span
+up to 511 pages (2,093,056 bytes), and its entry offset must identify a byte
+inside the image. All image pages are currently readable, writable, and
+executable. Zero-filled tail bytes in the final image page are available to
+the program. A separate zeroed one-page stack ends at `0x600000`. These are
+current implementation limits, not workload semantics.
+
+Each task's address-space allocation is sized from its image page count and
+is privately owned. Exit or destruction reclaims the dynamically sized
+allocation only after execution has switched to another address space.
 
 ## System calls
 
