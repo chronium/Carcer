@@ -18,6 +18,7 @@ from typing import Any, TextIO
 _PROCESS_EXIT_TIMEOUT_SECONDS = 2.0
 MAX_ERROR_OUTPUT = 64 * 1024
 _CLOSED = object()
+_REASONING_SUMMARIES = frozenset({"auto", "concise", "detailed", "none"})
 
 
 class CodexAppServerError(RuntimeError):
@@ -202,8 +203,14 @@ class CodexAppServer:
         model: str,
         effort: str,
         service_tier: str,
+        reasoning_summary: str,
     ) -> str:
         """Validate one exact catalog configuration and return its tier name."""
+        if reasoning_summary not in _REASONING_SUMMARIES:
+            raise CodexAppServerError(
+                "unsupported reasoning summary setting: "
+                f"{reasoning_summary!r}"
+            )
         cursor: str | None = None
         while True:
             response = object_value(
@@ -338,6 +345,7 @@ class CodexAppServer:
         prompt: str,
         model: str,
         effort: str,
+        reasoning_summary: str,
         service_tier: str,
         permission_profile: str,
     ) -> str:
@@ -353,6 +361,7 @@ class CodexAppServer:
                     "model": model,
                     "permissions": permission_profile,
                     "serviceTier": service_tier,
+                    "summary": reasoning_summary,
                     "threadId": thread_id,
                 },
             ),

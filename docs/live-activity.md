@@ -23,7 +23,8 @@ Only app-server content explicitly exposed as renderable text may be surfaced.
 The current installed protocol provides agent-message text and explicit
 reasoning-summary text/deltas. Opaque/private reasoning state and raw reasoning
 content are ignored; the harness does not decode, infer, or reconstruct hidden
-reasoning.
+reasoning. Sol and Luna use high reasoning effort and explicitly request the
+separate `auto` reasoning-summary mode.
 
 ## Interactive operator interface
 
@@ -44,6 +45,13 @@ command input. Manual scrolling suspends live follow and shows the count of new
 activity. `End` returns to the newest item and resumes following. Mouse-wheel
 scrolling is also supported by terminals that report it. Confirmation prompts
 remain inside the full-screen interface and default to No.
+
+While a generation is running, one `Esc` press only arms a pause confirmation;
+it has no runtime effect and leaves command input intact. A second `Esc` within
+2.5 seconds submits the ordinary authoritative `pause` command. The armed state
+expires automatically and is cleared by other input, commands, generation/state
+changes, and shutdown. An existing in-TUI confirmation takes precedence, where
+`Esc` rejects it as No rather than arming pause.
 
 Renderable reasoning is labelled as a reasoning summary. It is only the summary
 text deliberately exposed by app-server, never full/private chain-of-thought.

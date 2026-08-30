@@ -30,6 +30,7 @@ from .tool_protocol import ToolResult
 
 DEFAULT_REVIEWER_MODEL = "gpt-5.6-luna"
 DEFAULT_REVIEWER_REASONING_EFFORT = "high"
+DEFAULT_REVIEWER_REASONING_SUMMARY = "auto"
 DEFAULT_REVIEWER_SERVICE_TIER = "priority"
 
 _PERMISSION_PROFILE = "codexos-reviewer"
@@ -76,6 +77,7 @@ class CodexReviewWorker:
         request: str | None,
         model: str = DEFAULT_REVIEWER_MODEL,
         reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        reasoning_summary: str = DEFAULT_REVIEWER_REASONING_SUMMARY,
         service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
     ) -> str:
         if runtime.state is not RuntimeState.RUNNING:
@@ -101,15 +103,17 @@ class CodexReviewWorker:
                         "Codex reviewer consultation was cancelled"
                     )
                 service_tier_name = server.validate_model(
-                    model,
-                    reasoning_effort,
-                    service_tier,
+                    model=model,
+                    effort=reasoning_effort,
+                    service_tier=service_tier,
+                    reasoning_summary=reasoning_summary,
                 )
                 self._record(
                     runtime,
                     "review_started",
                     model,
                     reasoning_effort,
+                    reasoning_summary,
                     service_tier,
                     service_tier_name,
                     focus,
@@ -150,6 +154,7 @@ class CodexReviewWorker:
                         prompt=_reviewer_prompt(objective, focus, request),
                         model=model,
                         effort=reasoning_effort,
+                        reasoning_summary=reasoning_summary,
                         service_tier=service_tier,
                         permission_profile=_PERMISSION_PROFILE,
                     )
@@ -184,6 +189,7 @@ class CodexReviewWorker:
                 f"review_{outcome}",
                 model,
                 reasoning_effort,
+                reasoning_summary,
                 service_tier,
                 service_tier_name,
                 focus,
@@ -340,6 +346,7 @@ class CodexReviewWorker:
         event: str,
         model: str,
         reasoning_effort: str,
+        reasoning_summary: str,
         service_tier: str,
         service_tier_name: str | None,
         focus: str,
@@ -350,6 +357,7 @@ class CodexReviewWorker:
         data: dict[str, object] = {
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "reasoning_summary": reasoning_summary,
             "service_tier": service_tier,
             "focus": focus,
         }

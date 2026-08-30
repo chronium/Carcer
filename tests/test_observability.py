@@ -24,9 +24,13 @@ from harness.observability import (
 )
 from harness.codex_generation_worker import (
     AGENT_CONTRACT_VERSION,
+    DEFAULT_REASONING_SUMMARY,
     DEFAULT_SERVICE_TIER,
 )
-from harness.codex_review_worker import DEFAULT_REVIEWER_SERVICE_TIER
+from harness.codex_review_worker import (
+    DEFAULT_REVIEWER_REASONING_SUMMARY,
+    DEFAULT_REVIEWER_SERVICE_TIER,
+)
 from harness import (
     TEST_HARDWARE_PROFILE,
     CodexGenerationWorker,
@@ -131,6 +135,7 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 {
                     "model": "gpt-5.6-sol",
                     "reasoning_effort": "high",
+                    "reasoning_summary": DEFAULT_REASONING_SUMMARY,
                     "service_tier": DEFAULT_SERVICE_TIER,
                     "service_tier_name": "Fast",
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
@@ -142,6 +147,7 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 {
                     "model": "gpt-5.6-sol",
                     "reasoning_effort": "high",
+                    "reasoning_summary": DEFAULT_REASONING_SUMMARY,
                     "service_tier": DEFAULT_SERVICE_TIER,
                     "service_tier_name": "Fast",
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
@@ -156,6 +162,7 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 {
                     "model": "gpt-5.6-luna",
                     "reasoning_effort": "high",
+                    "reasoning_summary": DEFAULT_REVIEWER_REASONING_SUMMARY,
                     "service_tier": DEFAULT_REVIEWER_SERVICE_TIER,
                     "service_tier_name": "Fast",
                     "focus": "security",
@@ -504,6 +511,10 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
                 "Fast",
             )
             self.assertEqual(
+                implementor_started["data"]["reasoning_summary"],
+                DEFAULT_REASONING_SUMMARY,
+            )
+            self.assertEqual(
                 implementor_started["data"]["agent_contract_version"],
                 3,
             )
@@ -517,6 +528,10 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 review_started["data"]["service_tier_name"],
                 "Fast",
+            )
+            self.assertEqual(
+                review_started["data"]["reasoning_summary"],
+                DEFAULT_REVIEWER_REASONING_SUMMARY,
             )
             serialized = json.dumps(events, ensure_ascii=False)
             self.assertNotIn("OBSERVABILITY-HANDOFF-SECRET", serialized)

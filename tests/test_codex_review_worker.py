@@ -22,7 +22,10 @@ from harness import (
     ToolResult,
 )
 from harness.observability import ExperimentObservability
-from harness.codex_review_worker import DEFAULT_REVIEWER_SERVICE_TIER
+from harness.codex_review_worker import (
+    DEFAULT_REVIEWER_REASONING_SUMMARY,
+    DEFAULT_REVIEWER_SERVICE_TIER,
+)
 from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _build_seed,
@@ -405,6 +408,10 @@ class CodexReviewerProtocolTests(unittest.TestCase):
             turn = _request(record["messages"], "turn/start")["params"]
             self.assertEqual(turn["model"], "gpt-5.6-luna")
             self.assertEqual(turn["effort"], "high")
+            self.assertEqual(
+                turn["summary"],
+                DEFAULT_REVIEWER_REASONING_SUMMARY,
+            )
             self.assertEqual(
                 turn["serviceTier"],
                 DEFAULT_REVIEWER_SERVICE_TIER,

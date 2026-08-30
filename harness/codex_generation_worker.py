@@ -30,6 +30,7 @@ from .codex_app_server import (
 from .codex_review_worker import (
     DEFAULT_REVIEWER_MODEL,
     DEFAULT_REVIEWER_REASONING_EFFORT,
+    DEFAULT_REVIEWER_REASONING_SUMMARY,
     DEFAULT_REVIEWER_SERVICE_TIER,
     CodexReviewWorker,
     CodexReviewWorkerError,
@@ -44,6 +45,7 @@ from .tool_protocol import ToolResult
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_SUMMARY = "auto"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
 AGENT_CONTRACT_VERSION = 3
@@ -110,12 +112,14 @@ class CodexGenerationSession:
         *,
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        reasoning_summary: str = DEFAULT_REASONING_SUMMARY,
         service_tier: str = DEFAULT_SERVICE_TIER,
         objective: str | None = None,
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        reviewer_reasoning_summary: str = DEFAULT_REVIEWER_REASONING_SUMMARY,
         reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
         activity_stream: CodexActivityStream | None = None,
     ) -> None:
@@ -133,6 +137,7 @@ class CodexGenerationSession:
         )
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
+        self._reviewer_reasoning_summary = reviewer_reasoning_summary
         self._reviewer_service_tier = reviewer_service_tier
         self._runtime = runtime
         runtime_activity = getattr(runtime, "activity_stream", None)
@@ -145,6 +150,7 @@ class CodexGenerationSession:
         )
         self._model = model
         self._reasoning_effort = reasoning_effort
+        self._reasoning_summary = reasoning_summary
         self._service_tier = service_tier
         self._service_tier_name: str | None = None
         self._objective = objective
@@ -202,9 +208,10 @@ class CodexGenerationSession:
         try:
             server.__enter__()
             service_tier_name = server.validate_model(
-                self._model,
-                self._reasoning_effort,
-                self._service_tier,
+                model=self._model,
+                effort=self._reasoning_effort,
+                service_tier=self._service_tier,
+                reasoning_summary=self._reasoning_summary,
             )
             thread_id = server.start_thread(
                 model=self._model,
@@ -225,6 +232,7 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "reasoning_summary": self._reasoning_summary,
                     "service_tier": self._service_tier,
                     "service_tier_name": service_tier_name,
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
@@ -287,6 +295,7 @@ class CodexGenerationSession:
                     prompt=prompt,
                     model=self._model,
                     effort=self._reasoning_effort,
+                    reasoning_summary=self._reasoning_summary,
                     service_tier=self._service_tier,
                     permission_profile=_PERMISSION_PROFILE,
                 )
@@ -302,6 +311,7 @@ class CodexGenerationSession:
             {
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
+                "reasoning_summary": self._reasoning_summary,
                 "service_tier": self._service_tier,
                 **self._service_tier_name_data(),
                 "turn_number": turn_number,
@@ -323,6 +333,7 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "reasoning_summary": self._reasoning_summary,
                     "service_tier": self._service_tier,
                     **self._service_tier_name_data(),
                     "turn_number": turn_number,
@@ -418,6 +429,7 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "reasoning_summary": self._reasoning_summary,
                     "service_tier": self._service_tier,
                     **self._service_tier_name_data(),
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
@@ -493,6 +505,7 @@ class CodexGenerationSession:
             {
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
+                "reasoning_summary": self._reasoning_summary,
                 "service_tier": self._service_tier,
                 **self._service_tier_name_data(),
                 "turn_number": turn_number,
@@ -780,6 +793,7 @@ class CodexGenerationSession:
                 request=request,
                 model=self._reviewer_model,
                 reasoning_effort=self._reviewer_reasoning_effort,
+                reasoning_summary=self._reviewer_reasoning_summary,
                 service_tier=self._reviewer_service_tier,
             )
         finally:
@@ -888,6 +902,7 @@ class CodexGenerationWorker:
         reviewer_auth_file: str | Path | None = None,
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        reviewer_reasoning_summary: str = DEFAULT_REVIEWER_REASONING_SUMMARY,
         reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
         activity_stream: CodexActivityStream | None = None,
     ) -> None:
@@ -897,6 +912,7 @@ class CodexGenerationWorker:
         self._reviewer_auth_file = reviewer_auth_file
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
+        self._reviewer_reasoning_summary = reviewer_reasoning_summary
         self._reviewer_service_tier = reviewer_service_tier
         self._activity_stream = activity_stream
         self._running = False
@@ -907,6 +923,7 @@ class CodexGenerationWorker:
         *,
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        reasoning_summary: str = DEFAULT_REASONING_SUMMARY,
         service_tier: str = DEFAULT_SERVICE_TIER,
         objective: str | None = None,
     ) -> CodexGenerationResult:
@@ -919,12 +936,14 @@ class CodexGenerationWorker:
             self._auth_file,
             model=model,
             reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
             service_tier=service_tier,
             objective=objective,
             reviewer_codex_executable=self._reviewer_codex_executable,
             reviewer_auth_file=self._reviewer_auth_file,
             reviewer_model=self._reviewer_model,
             reviewer_reasoning_effort=self._reviewer_reasoning_effort,
+            reviewer_reasoning_summary=self._reviewer_reasoning_summary,
             reviewer_service_tier=self._reviewer_service_tier,
             activity_stream=self._activity_stream,
         )

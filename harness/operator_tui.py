@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,16 +14,20 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content, Span
 from textual.widgets import Input, Static
+from textual.timer import Timer
 
 from .codex_activity import CodexActivityStream
 from .generation_git import GenerationGitRecorder
-from .generation_runtime import CodexOSRun
+from .generation_runtime import CodexOSRun, RuntimeState
 from .operator_console import OperatorConsole
 from .operator_tui_model import (
     ActivityFollowState,
     OperatorActivityModel,
     safe_display_text,
 )
+
+
+PAUSE_CONFIRMATION_SECONDS = 2.5
 
 
 @dataclass(slots=True)
@@ -166,6 +171,7 @@ class OperatorTui(App[None]):
         Binding("pageup", "activity_page_up", "Scroll up", priority=True),
         Binding("pagedown", "activity_page_down", "Scroll down", priority=True),
         Binding("end", "activity_end", "Follow live", priority=True),
+        Binding("escape", "pause_shortcut", "Pause", show=False, priority=True),
         Binding("ctrl+c", "safe_quit", "Quit", show=False, priority=True),
         Binding("ctrl+d", "safe_quit", "Quit", show=False, priority=True),
     ]
@@ -192,6 +198,9 @@ class OperatorTui(App[None]):
         self._frontend_closing = False
         self._confirmation: _Confirmation | None = None
         self._confirmation_lock = threading.Lock()
+        self._pause_armed_deadline: float | None = None
+        self._pause_armed_generation: int | None = None
+        self._pause_arm_timer: Timer | None = None
         self._console = OperatorConsole(
             runtime,
             codex_executable=codex_executable,
@@ -234,6 +243,7 @@ class OperatorTui(App[None]):
 
     def on_unmount(self) -> None:
         self._frontend_closing = True
+        self._disarm_pause(refresh=False)
         self._executor.stop()
 
     def _receive_operator_output(self, text: str) -> None:
@@ -302,6 +312,7 @@ class OperatorTui(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value
         event.input.value = ""
+        self._disarm_pause(refresh=False)
         with self._confirmation_lock:
             confirmation = self._confirmation
             if confirmation is not None:
@@ -316,10 +327,21 @@ class OperatorTui(App[None]):
             return
         if not value.strip():
             return
+        self._submit_operator_command(value, event.input)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key != "escape" and self._pause_armed_deadline is not None:
+            self._disarm_pause()
+
+    def _submit_operator_command(
+        self,
+        value: str,
+        input_widget: Input,
+    ) -> None:
         self._model.append_operator_output(f"codexos> {value}")
         self._activity_changed(1)
         self._busy = True
-        event.input.disabled = True
+        input_widget.disabled = True
         self._refresh_header()
         self._executor.submit(value)
 
@@ -403,6 +425,11 @@ class OperatorTui(App[None]):
             generation = None
             state = "unknown"
             pending = 0
+        if self._pause_armed_deadline is not None and (
+            state != RuntimeState.RUNNING.name
+            or generation != self._pause_armed_generation
+        ):
+            self._disarm_pause(refresh=False)
         busy = "command busy" if self._busy else "command idle"
         header = (
             f"{self._runtime.run_directory.name}   "
@@ -418,7 +445,76 @@ class OperatorTui(App[None]):
             text = "live"
         else:
             text = f"↓ {self._follow.new_events} new   End: return to live"
+        pause_hint = self._pause_hint()
+        if pause_hint:
+            text += f"   {pause_hint}"
         self.query_one("#follow-indicator", Static).update(text)
+
+    def _pause_hint(self) -> str:
+        if self._busy:
+            return ""
+        with self._confirmation_lock:
+            if self._confirmation is not None:
+                return ""
+        if self._runtime.state is not RuntimeState.RUNNING:
+            return ""
+        if (
+            self._pause_armed_deadline is not None
+            and self._pause_armed_generation == self._runtime.generation_number
+            and time.monotonic() <= self._pause_armed_deadline
+        ):
+            return "Esc again to confirm pause"
+        return "Esc: pause"
+
+    def _arm_pause(self) -> None:
+        self._disarm_pause(refresh=False)
+        self._pause_armed_deadline = (
+            time.monotonic() + PAUSE_CONFIRMATION_SECONDS
+        )
+        self._pause_armed_generation = self._runtime.generation_number
+        self._pause_arm_timer = self.set_timer(
+            PAUSE_CONFIRMATION_SECONDS,
+            self._pause_arm_expired,
+        )
+        self._refresh_follow_indicator()
+
+    def _pause_arm_expired(self) -> None:
+        deadline = self._pause_armed_deadline
+        if deadline is None:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            self._pause_arm_timer = self.set_timer(
+                remaining,
+                self._pause_arm_expired,
+            )
+            return
+        self._pause_arm_timer = None
+        self._disarm_pause()
+
+    def _disarm_pause(self, *, refresh: bool = True) -> None:
+        timer = self._pause_arm_timer
+        self._pause_arm_timer = None
+        self._pause_armed_deadline = None
+        self._pause_armed_generation = None
+        if timer is not None:
+            timer.stop()
+        if refresh and self.is_mounted:
+            self._refresh_follow_indicator()
+
+    def _cancel_tui_confirmation(self) -> bool:
+        with self._confirmation_lock:
+            confirmation = self._confirmation
+            self._confirmation = None
+        if confirmation is None:
+            return False
+        confirmation.accepted = False
+        confirmation.completed.set()
+        input_widget = self.query_one("#command-input", Input)
+        input_widget.disabled = True
+        self.query_one("#command-prompt", Static).update("codexos>")
+        self._disarm_pause()
+        return True
 
     def action_activity_page_up(self) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
@@ -438,7 +534,28 @@ class OperatorTui(App[None]):
         pane.scroll_end(animate=False, immediate=True)
         self._refresh_follow_indicator()
 
+    def action_pause_shortcut(self) -> None:
+        if self._cancel_tui_confirmation():
+            return
+        if self._busy or self._runtime.state is not RuntimeState.RUNNING:
+            self._disarm_pause()
+            return
+        generation = self._runtime.generation_number
+        if (
+            self._pause_armed_deadline is not None
+            and self._pause_armed_generation == generation
+            and time.monotonic() <= self._pause_armed_deadline
+        ):
+            self._disarm_pause(refresh=False)
+            self._submit_operator_command(
+                "pause",
+                self.query_one("#command-input", Input),
+            )
+            return
+        self._arm_pause()
+
     def action_safe_quit(self) -> None:
+        self._disarm_pause(refresh=False)
         if self._busy:
             return
         input_widget = self.query_one("#command-input", Input)
