@@ -3,9 +3,9 @@
 #include <stdint.h>
 #define MEMORY_PAGE_SIZE 4096u
 struct memory_stats {
- uint64_t total_pages;
- uint64_t free_pages;
- uint64_t metadata_pages;
+uint64_t total_pages;
+uint64_t free_pages;
+uint64_t metadata_pages;
 };
 int memory_init(void);
 uint64_t memory_page_alloc(void);
