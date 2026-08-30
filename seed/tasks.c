@@ -17,7 +17,10 @@ struct task_slot {
 struct task_context context;
 uint64_t cr3;
 uint64_t pages;
+uint64_t retired_pages;
+uint64_t exit_status;
 uint8_t runnable;
+uint8_t exited;
 };
 static struct task_slot task_slots[TASK_MAX_COUNT];
 static uint8_t task_stacks[TASK_MAX_COUNT-1u][TASK_STACK_SIZE] __attribute__((aligned(16)));
@@ -46,7 +49,8 @@ for(uint32_t index=0;index<TASK_CONTEXT_WORDS;++index) to[index]=from[index];
 }
 static int free_slot(void) {
 for(uint32_t identifier=1;identifier<TASK_MAX_COUNT;++identifier)
-if(!task_slots[identifier].runnable) return (int)identifier;
+if(!task_slots[identifier].runnable&&!task_slots[identifier].pages)
+return (int)identifier;
 return -1;
 }
 static void clear_context(struct task_context *context) {
@@ -79,6 +83,9 @@ slot->context.rsp=stack;
 slot->context.ss=KERNEL_DATA_SELECTOR;
 slot->cr3=task_slots[0].cr3;
 slot->pages=0;
+slot->retired_pages=0;
+slot->exit_status=0;
+slot->exited=0;
 slot->runnable=1;
 interrupt_restore(flags);
 return identifier;
@@ -127,6 +134,9 @@ slot->context.rsp=USER_STACK_TOP;
 slot->context.ss=USER_DATA_SELECTOR;
 slot->cr3=pages;
 slot->pages=pages;
+slot->retired_pages=0;
+slot->exit_status=0;
+slot->exited=0;
 slot->runnable=1;
 interrupt_restore(flags);
 return identifier;
@@ -158,7 +168,25 @@ break;
 }
 current_task=next;
 if(task_slots[next].cr3!=read_cr3()) write_cr3(task_slots[next].cr3);
+if(previous!=next&&!task_slots[previous].runnable&&task_slots[previous].pages&&
+memory_pages_free(task_slots[previous].pages,USER_ADDRESS_SPACE_PAGES))
+task_slots[previous].pages=0;
 return &task_slots[next].context;
+}
+struct task_context *tasks_system_call(struct task_context *frame) {
+if(!tasks_ready||!frame||current_task==0||!task_slots[current_task].pages) {
+if(frame) frame->rax=UINT64_MAX;
+return frame;
+}
+if(frame->rax!=0) {
+frame->rax=UINT64_MAX;
+return frame;
+}
+task_slots[current_task].retired_pages=task_slots[current_task].pages;
+task_slots[current_task].exit_status=frame->rdi;
+task_slots[current_task].exited=1;
+task_slots[current_task].runnable=0;
+return tasks_schedule(frame);
 }
 static const uint8_t worker_up[]={
 0x48,0xb8,0x00,0x01,0x40,0,0,0,0,0,0x48,0xff,0x00,0xeb,0xfb
@@ -166,11 +194,29 @@ static const uint8_t worker_up[]={
 static const uint8_t worker_down[]={
 0x48,0xb8,0x00,0x01,0x40,0,0,0,0,0,0x48,0xff,0x08,0xeb,0xfb
 };
+static const uint8_t worker_exit[]={
+0xb8,99,0,0,0,0xcd,0x80,0x48,0x83,0xf8,0xff,0x75,12,
+0xb8,0,0,0,0,0xbf,42,0,0,0,0xcd,0x80,
+0xb8,0,0,0,0,0xbf,13,0,0,0,0xcd,0x80,0x0f,0x0b
+};
+static uint64_t task_reclaimed_pages(uint32_t identifier,uint64_t status) {
+uint64_t flags=interrupt_lock();
+uint64_t result=0;
+if(identifier<TASK_MAX_COUNT&&task_slots[identifier].exited&&
+task_slots[identifier].exit_status==status&&!task_slots[identifier].runnable&&
+!task_slots[identifier].pages)
+result=task_slots[identifier].retired_pages;
+interrupt_restore(flags);
+return result;
+}
 int tasks_init(void) {
 uint64_t flags=interrupt_lock();
 for(uint32_t index=0;index<TASK_MAX_COUNT;++index) {
 task_slots[index].runnable=0;
+task_slots[index].exited=0;
 task_slots[index].pages=0;
+task_slots[index].retired_pages=0;
+task_slots[index].exit_status=0;
 }
 current_task=0;
 task_slots[0].cr3=read_cr3();
@@ -191,5 +237,20 @@ __asm__ volatile("pause");
 int success=*a!=0&&*b!=0;
 (void)task_destroy((uint32_t)first);
 (void)task_destroy((uint32_t)second);
-return success;
+if(!success) return 0;
+int exiting=task_create_user(worker_exit,sizeof(worker_exit),0);
+if(exiting<0) return 0;
+start=timer_ticks();
+uint64_t released=0;
+while(!(released=task_reclaimed_pages((uint32_t)exiting,42))&&
+timer_ticks()-start<TIMER_FREQUENCY_HZ)
+__asm__ volatile("pause");
+if(!released) {
+(void)task_destroy((uint32_t)exiting);
+return 0;
+}
+uint64_t reused=memory_pages_alloc(USER_ADDRESS_SPACE_PAGES);
+int recycled=reused==released;
+if(reused&&!memory_pages_free(reused,USER_ADDRESS_SPACE_PAGES)) return 0;
+return recycled;
 }

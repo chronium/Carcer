@@ -2,6 +2,8 @@
 #include "tasks.h"
 #define IDT_ENTRY_COUNT 256u
 #define IDT_INTERRUPT_GATE 0x8eu
+#define IDT_USER_INTERRUPT_GATE 0xeeu
+#define SYSTEM_CALL_VECTOR 0x80u
 #define KERNEL_CODE_SELECTOR 0x08u
 #define INTERRUPT_STACK_SIZE (16u * 1024u)
 #define INTERRUPT_STACK_TABLE_INDEX 1u
@@ -64,6 +66,11 @@ __attribute__((used)) static struct task_context *timer_interrupt(struct task_co
 outb(PIC_MASTER_COMMAND,0x20u);
 return tasks_schedule(frame);
 }
+__attribute__((used)) static struct task_context *system_call_interrupt(
+struct task_context *frame
+) {
+return tasks_system_call(frame);
+}
 __attribute__((naked,used)) static void timer_interrupt_stub(void) {
 __asm__ volatile(
 "pushq %rax\n"
@@ -84,6 +91,45 @@ __asm__ volatile(
 "cld\n"
 "movq %rsp,%rdi\n"
 "call timer_interrupt\n"
+"movq %rax,%rsp\n"
+"popq %r15\n"
+"popq %r14\n"
+"popq %r13\n"
+"popq %r12\n"
+"popq %r11\n"
+"popq %r10\n"
+"popq %r9\n"
+"popq %r8\n"
+"popq %rdi\n"
+"popq %rsi\n"
+"popq %rbp\n"
+"popq %rdx\n"
+"popq %rcx\n"
+"popq %rbx\n"
+"popq %rax\n"
+"iretq\n"
+);
+}
+__attribute__((naked,used)) static void system_call_interrupt_stub(void) {
+__asm__ volatile(
+"pushq %rax\n"
+"pushq %rbx\n"
+"pushq %rcx\n"
+"pushq %rdx\n"
+"pushq %rbp\n"
+"pushq %rsi\n"
+"pushq %rdi\n"
+"pushq %r8\n"
+"pushq %r9\n"
+"pushq %r10\n"
+"pushq %r11\n"
+"pushq %r12\n"
+"pushq %r13\n"
+"pushq %r14\n"
+"pushq %r15\n"
+"cld\n"
+"movq %rsp,%rdi\n"
+"call system_call_interrupt\n"
 "movq %rax,%rsp\n"
 "popq %r15\n"
 "popq %r14\n"
@@ -145,13 +191,17 @@ __asm__ volatile(
 );
 return current_code_selector() == KERNEL_CODE_SELECTOR;
 }
-static void set_idt_entry(uint8_t vector, void (*handler)(void)) {
+static void set_idt_entry(
+uint8_t vector,
+void (*handler)(void),
+uint8_t attributes
+) {
 uint64_t address = (uint64_t)(uintptr_t)handler;
 struct idt_entry *entry = &idt[vector];
 entry->offset_low = (uint16_t)address;
 entry->selector = KERNEL_CODE_SELECTOR;
 entry->ist = INTERRUPT_STACK_TABLE_INDEX;
-entry->attributes = IDT_INTERRUPT_GATE;
+entry->attributes = attributes;
 entry->offset_middle = (uint16_t)(address >> 16);
 entry->offset_high = (uint32_t)(address >> 32);
 entry->reserved = 0;
@@ -195,9 +245,14 @@ if (!initialize_gdt()) {
 return 0;
 }
 for (uint16_t vector = 0; vector < IDT_ENTRY_COUNT; ++vector) {
-set_idt_entry((uint8_t)vector, interrupt_fatal_stub);
+set_idt_entry((uint8_t)vector,interrupt_fatal_stub,IDT_INTERRUPT_GATE);
 }
-set_idt_entry(PIC_TIMER_VECTOR, timer_interrupt_stub);
+set_idt_entry(PIC_TIMER_VECTOR,timer_interrupt_stub,IDT_INTERRUPT_GATE);
+set_idt_entry(
+SYSTEM_CALL_VECTOR,
+system_call_interrupt_stub,
+IDT_USER_INTERRUPT_GATE
+);
 load_idt();
 kernel_timer_ticks = 0;
 initialize_pic();
