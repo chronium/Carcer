@@ -98,6 +98,39 @@ class FeatureRequestStoreTests(unittest.TestCase):
                 ["request-000001.json"],
             )
 
+    def test_reads_authoritative_current_state_without_modifying_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_directory = Path(temporary) / "run"
+            reader = FeatureRequestStore(run_directory)
+            writer = FeatureRequestStore(run_directory)
+            first = writer.create(4, "Pending λ", "Exact pending text.")
+            second = writer.create(5, "Decision", "Exact decision text.")
+
+            self.assertEqual(reader.requests(), (first, second))
+            approved = writer.approve(first.id)
+            denied = writer.deny(second.id)
+            self.assertEqual(reader.request(first.id), approved)
+            self.assertEqual(reader.request(second.id), denied)
+            self.assertEqual(reader.requests(), (approved, denied))
+
+            records = run_directory / "feature-requests"
+            before = {
+                path.name: path.read_bytes()
+                for path in records.iterdir()
+            }
+            self.assertEqual(reader.requests(), (approved, denied))
+            self.assertEqual(reader.requests(), (approved, denied))
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in records.iterdir()},
+                before,
+            )
+            (records / "unexpected.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(
+                FeatureRequestError,
+                "invalid feature-request filename",
+            ):
+                reader.requests()
+
     def test_runtime_decisions_are_gate_only_and_survive_reconstruction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = CodexOSRun(temporary)

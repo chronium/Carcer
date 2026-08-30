@@ -54,6 +54,7 @@ _TOOLS = [
     "build",
     "finish_generation",
     "request_feature",
+    "list_requests",
 ]
 
 
@@ -188,6 +189,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
 
     def test_live_activity_payload_is_not_persisted_to_events_jsonl(self) -> None:
         marker = "LIVE-ACTIVITY-SOURCE-MARKER"
+        request_marker = "LIVE-ACTIVITY-REQUEST-MARKER"
         scenario = {
             "tool_calls": [
                 {
@@ -197,7 +199,8 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                         "offset": 0,
                         "data": marker,
                     },
-                }
+                },
+                {"tool": "list_requests", "arguments": {}},
             ]
         }
         with tempfile.TemporaryDirectory() as temporary, _fake_codex(
@@ -208,6 +211,15 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime = _runtime_mock()
             runtime.observability = observability
             runtime.invoke_tool.return_value = ToolResult(0, b"")
+            runtime.feature_requests.return_value = (
+                FeatureRequest(
+                    3,
+                    0,
+                    request_marker,
+                    "Request text stays out of operational telemetry.",
+                    "denied",
+                ),
+            )
 
             CodexGenerationWorker(
                 fake.executable,
@@ -216,13 +228,14 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             ).run_generation(runtime)
             observability.close()
 
+            activity = stream.drain()
+            self.assertTrue(any(marker in repr(event.data) for event in activity))
             self.assertTrue(
-                any(marker in repr(event.data) for event in stream.drain())
+                any(request_marker in repr(event.data) for event in activity)
             )
-            self.assertNotIn(
-                marker,
-                (Path(temporary) / "events.jsonl").read_text(encoding="utf-8"),
-            )
+            events = (Path(temporary) / "events.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn(marker, events)
+            self.assertNotIn(request_marker, events)
 
     def test_initial_prompt_states_the_behavioral_contract(self) -> None:
         runtime = _runtime_mock()
@@ -293,6 +306,13 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "guest-side work",
             "a local workaround does not by itself make that trusted-environment "
             "request inappropriate",
+            "- list_requests:",
+            "authoritative run-level external feature requests",
+            "Pending requests are recorded advisory requests, not provisioned or "
+            "promised",
+            "approved requests have already been provisioned",
+            "denied requests are unavailable under that request",
+            "read-only tool does not modify requests",
             "not as a substitute for implementing functionality that belongs "
             "inside CodexOS",
             "fresh independent reviewer",
@@ -321,8 +341,8 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotIn(steering, prompt)
         self.assertNotIn("every workaround", prompt.lower())
 
-    def test_agent_contract_version_is_four(self) -> None:
-        self.assertEqual(AGENT_CONTRACT_VERSION, 4)
+    def test_agent_contract_version_is_five(self) -> None:
+        self.assertEqual(AGENT_CONTRACT_VERSION, 5)
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (
@@ -660,10 +680,214 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotIn("Pending title", prompt)
             self.assertNotIn("Denied title", prompt)
             self.assertIn("- request_feature:", prompt)
+            self.assertIn("- list_requests:", prompt)
             self.assertIn(
                 "capability of the trusted external environment",
                 prompt,
             )
+
+    def test_list_requests_is_read_only_exact_and_idempotent(self) -> None:
+        requests = (
+            FeatureRequest(9, 4, "Denied λ", "Exact denied text.\n次", "denied"),
+            FeatureRequest(2, 1, "Pending", "Exact pending text.", "pending"),
+            FeatureRequest(5, 3, "Approved", "Exact approved text.", "approved"),
+        )
+        scenario = {
+            "tool_calls": [
+                {"tool": "list_requests", "arguments": {}},
+                {"tool": "list_requests", "arguments": {"unexpected": True}},
+                {"tool": "list_requests", "arguments": {}},
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.feature_requests.return_value = requests
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            results = fake.record()["tool_results"]
+
+        first = _dynamic_result_output(results[0])
+        third = _dynamic_result_output(results[2])
+        self.assertEqual(first, third)
+        self.assertEqual(
+            first,
+            {
+                "requests": [
+                    {
+                        "description": "Exact pending text.",
+                        "generation": 1,
+                        "id": 2,
+                        "status": "pending",
+                        "title": "Pending",
+                    },
+                    {
+                        "description": "Exact approved text.",
+                        "generation": 3,
+                        "id": 5,
+                        "status": "approved",
+                        "title": "Approved",
+                    },
+                    {
+                        "description": "Exact denied text.\n次",
+                        "generation": 4,
+                        "id": 9,
+                        "status": "denied",
+                        "title": "Denied λ",
+                    },
+                ]
+            },
+        )
+        self.assertFalse(results[1]["result"]["success"])
+        self.assertIn(
+            "unexpected argument: unexpected",
+            results[1]["result"]["contentItems"][0]["text"],
+        )
+        runtime.invoke_tool.assert_not_called()
+
+    def test_request_then_list_requests_observes_new_pending_record(self) -> None:
+        requests: list[FeatureRequest] = []
+        scenario = {
+            "tool_calls": [
+                {"tool": "list_requests", "arguments": {}},
+                {
+                    "tool": "request_feature",
+                    "arguments": {
+                        "title": "External capability λ",
+                        "description": "Exact advisory request.",
+                    },
+                },
+                {"tool": "list_requests", "arguments": {}},
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.feature_requests.side_effect = lambda: tuple(requests)
+
+            def invoke(tool: str, arguments: list[bytes]) -> ToolResult:
+                self.assertEqual(tool, "request_feature")
+                self.assertEqual(
+                    arguments,
+                    ["External capability λ".encode(), b"Exact advisory request."],
+                )
+                requests.append(
+                    FeatureRequest(
+                        1,
+                        runtime.generation_number,
+                        "External capability λ",
+                        "Exact advisory request.",
+                        "pending",
+                    )
+                )
+                return ToolResult(0, b"1")
+
+            runtime.invoke_tool.side_effect = invoke
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            results = fake.record()["tool_results"]
+
+        self.assertEqual(_dynamic_result_output(results[0]), {"requests": []})
+        self.assertEqual(
+            _dynamic_result_output(results[2]),
+            {
+                "requests": [
+                    {
+                        "description": "Exact advisory request.",
+                        "generation": runtime.generation_number,
+                        "id": 1,
+                        "status": "pending",
+                        "title": "External capability λ",
+                    }
+                ]
+            },
+        )
+        runtime.invoke_tool.assert_called_once()
+
+    def test_fresh_session_lists_current_authoritative_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = CodexOSRun(
+                Path(temporary) / "run",
+                hardware_profile=TEST_HARDWARE_PROFILE,
+            )
+            first = runtime._feature_request_store.create(
+                10,
+                "Provisioned capability",
+                "Exact provisioned scope.",
+            )
+            second = runtime._feature_request_store.create(
+                10,
+                "Denied capability",
+                "Exact denied scope.",
+            )
+            runtime._state = RuntimeState.RUNNING
+            runtime._generation_number = 10
+            runtime._current_transition = "successor"
+            runtime._previous_handoff = "Project rationale without request records."
+
+            with _fake_codex(
+                {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
+            ) as first_fake:
+                CodexGenerationWorker(
+                    first_fake.executable,
+                    first_fake.auth_file,
+                ).run_generation(runtime)
+                pending = _dynamic_result_output(
+                    first_fake.record()["tool_results"][0]
+                )
+
+            runtime._state = RuntimeState.AWAITING_NEXT_GENERATION
+            runtime.approve_feature_request(first.id)
+            runtime.deny_feature_request(second.id)
+            runtime._state = RuntimeState.RUNNING
+            runtime._generation_number = 11
+
+            with _fake_codex(
+                {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
+            ) as successor_fake:
+                CodexGenerationWorker(
+                    successor_fake.executable,
+                    successor_fake.auth_file,
+                ).run_generation(runtime)
+                record = successor_fake.record()
+                current = _dynamic_result_output(record["tool_results"][0])
+
+            self.assertEqual(
+                [request["status"] for request in pending["requests"]],
+                ["pending", "pending"],
+            )
+            self.assertEqual(
+                [request["status"] for request in current["requests"]],
+                ["approved", "denied"],
+            )
+            prompt = _request(record["messages"], "turn/start")["params"][
+                "input"
+            ][0]["text"]
+            self.assertIn("Project rationale without request records.", prompt)
+            self.assertNotIn("Denied capability", prompt)
+
+    def test_list_requests_is_not_invoked_automatically(self) -> None:
+        with _fake_codex({"final_message": "No tools requested."}) as fake:
+            runtime = _runtime_mock()
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            record = fake.record()
+
+        self.assertEqual(record["tool_results"], [])
+        runtime.invoke_tool.assert_not_called()
+        self.assertEqual(runtime.feature_requests.call_count, 1)
+        prompt = _request(record["messages"], "turn/start")["params"][
+            "input"
+        ][0]["text"]
+        self.assertIn("Approved external feature requests for this run: none.", prompt)
+        for steering in (
+            "check list_requests before every decision",
+            "create a request when the list is empty",
+            "an empty request list is a problem",
+        ):
+            self.assertNotIn(steering, prompt.lower())
 
     def test_fresh_protocol_dynamic_tools_validation_and_cleanup(self) -> None:
         scenario = {
@@ -816,6 +1040,38 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 "environment request inappropriate",
                 descriptions["request_feature"],
             )
+            list_requests = next(
+                tool
+                for tool in dynamic_tools[0]["tools"]
+                if tool["name"] == "list_requests"
+            )
+            self.assertEqual(
+                list_requests["inputSchema"],
+                {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            )
+            for expected in (
+                "authoritative run-level external feature requests",
+                "pending, approved, or denied status",
+                "not provisioned or promised",
+                "no ETA or approval probability",
+                "approved requests have already been provisioned",
+                "exact provisioned scope",
+                "denied requests are unavailable",
+                "read-only tool does not modify requests",
+            ):
+                self.assertIn(expected, list_requests["description"])
+            for steering in (
+                "before every decision",
+                "when the list is empty",
+                "create a request",
+                "source capacity",
+                "Doom assets",
+            ):
+                self.assertNotIn(steering, list_requests["description"])
             review_description = dynamic_tools[1]["description"]
             for expected in (
                 "fresh independent reviewer",
@@ -1070,7 +1326,14 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             approved = FeatureRequest(
                 1, 0, "Approved external capability", "Frozen decision.", "approved"
             )
-            runtime.feature_requests.return_value = (approved,)
+            denied = FeatureRequest(
+                2,
+                0,
+                "INTERVIEW-REQUEST-LEDGER-MARKER",
+                "Denied request stays outside interview artifacts.",
+                "denied",
+            )
+            runtime.feature_requests.return_value = (approved, denied)
 
             pending = PendingGenerationFinish(
                 "Immutable handoff.",
@@ -1108,7 +1371,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             self.assertEqual(
                 {path: path.read_bytes() for path in files}, before_files
             )
-            self.assertEqual(runtime.feature_requests(), (approved,))
+            self.assertEqual(runtime.feature_requests(), (approved, denied))
             self.assertEqual(
                 subprocess.check_output(
                     ["git", "rev-parse", "experiment-test/generation-0000"],
@@ -1127,7 +1390,9 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             )
             successor_prompt = _implementor_prompt(runtime, None)
             self.assertNotIn(marker, successor_prompt)
-            self.assertIn(marker, artifact.path.read_text(encoding="utf-8"))
+            artifact_text = artifact.path.read_text(encoding="utf-8")
+            self.assertIn(marker, artifact_text)
+            self.assertNotIn("INTERVIEW-REQUEST-LEDGER-MARKER", artifact_text)
             self.assertNotIn(marker, "".join(path.read_text(errors="ignore") for path in files))
             self.assertNotIn(
                 marker,
@@ -1158,6 +1423,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
         self,
     ) -> None:
         marker = "EXIT-INTERVIEW-SECRET-91f"
+        request_marker = "REQUEST-LEDGER-MUST-NOT-ENTER-INTERVIEW"
         denied_tools = [
             "list",
             "read",
@@ -1167,6 +1433,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             "build",
             "finish_generation",
             "request_feature",
+            "list_requests",
             "review",
         ]
         scenario = {
@@ -1218,6 +1485,15 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
         with _fake_codex(scenario) as fake:
             runtime = _runtime_mock()
             runtime.pending_generation_finish = None
+            runtime.feature_requests.return_value = (
+                FeatureRequest(
+                    8,
+                    0,
+                    request_marker,
+                    "Authoritative denied request text.",
+                    "denied",
+                ),
+            )
 
             def invoke(tool: str, arguments: list[bytes]) -> ToolResult:
                 self.assertEqual(tool, "finish_generation")
@@ -1235,6 +1511,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             )
 
             session.run_initial_turn()
+            request_reads_before_interview = runtime.feature_requests.call_count
             original_thread = session.thread_id
             original_pid = session.process_pid
             session.retain_for_exit_interview()
@@ -1270,9 +1547,14 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 ["Retrospective answer.", "Second retrospective answer."],
             )
             self.assertNotIn("PRIVATE", repr(transcript))
+            self.assertNotIn(request_marker, repr(transcript))
             self.assertEqual(session.thread_id, original_thread)
             self.assertEqual(session.process_pid, original_pid)
             runtime.invoke_tool.assert_called_once()
+            self.assertEqual(
+                runtime.feature_requests.call_count,
+                request_reads_before_interview,
+            )
             record = fake.record()
             turns = [
                 message["params"]
@@ -1758,6 +2040,11 @@ def _request(
     method: str,
 ) -> dict[str, object]:
     return next(message for message in messages if message.get("method") == method)
+
+
+def _dynamic_result_output(result: dict[str, object]) -> dict[str, object]:
+    bridge = json.loads(result["result"]["contentItems"][0]["text"])
+    return json.loads(bridge["output"])
 
 
 def _runtime_mock() -> Mock:

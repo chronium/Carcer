@@ -739,7 +739,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             self.assertIn("What did you verify?", transcript)
             self.assertIn("Second interview summary.", transcript)
             self.assertIn("Second retrospective answer.", transcript)
-            self.assertIn("Agent Contract: 4", transcript)
+            self.assertIn("Agent Contract: 5", transcript)
             self.assertIn("Interview status: completed", transcript)
             self.assertNotIn("Exit interview question sent.", transcript)
             self.assertNotIn("Generation 0 completed cooperatively", transcript)

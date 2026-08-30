@@ -34,12 +34,17 @@ class FeatureRequestStore:
         self._requests = self._read_all()
 
     def requests(self) -> tuple[FeatureRequest, ...]:
+        self._refresh()
         return tuple(
             self._requests[request_id] for request_id in sorted(self._requests)
         )
 
     def request(self, request_id: int) -> FeatureRequest:
         _validate_request_id(request_id)
+        self._refresh()
+        return self._cached_request(request_id)
+
+    def _cached_request(self, request_id: int) -> FeatureRequest:
         try:
             return self._requests[request_id]
         except KeyError as error:
@@ -76,7 +81,8 @@ class FeatureRequestStore:
 
     def _set_status(self, request_id: int, status: str) -> FeatureRequest:
         self._refresh()
-        current = self.request(request_id)
+        _validate_request_id(request_id)
+        current = self._cached_request(request_id)
         if current.status != "pending":
             raise FeatureRequestError(
                 f"feature request #{request_id} is already {current.status}"
