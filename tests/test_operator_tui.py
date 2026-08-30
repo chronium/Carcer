@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -65,6 +66,7 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("State: STOPPED", rendered)
             app.exit()
 
+        app._executor.join(2.0)
         self.assertEqual(runtime.stop.call_count, 1)
 
     async def test_manual_scroll_accumulates_new_activity_and_end_follows(self) -> None:
@@ -108,6 +110,8 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._follow.new_events, 0)
             app.exit()
 
+        app._executor.join(2.0)
+
     async def test_confirmation_stays_inside_tui_and_defaults_to_no(self) -> None:
         runtime = _runtime(Path("/tmp/tui-confirm"), RuntimeState.RUNNING)
         app = OperatorTui(runtime, CodexActivityStream())
@@ -124,12 +128,67 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._busy)
             app.exit()
 
+        app._executor.join(2.0)
+
 class _TtyStream(io.StringIO):
     def isatty(self) -> bool:
         return True
 
 
 class OperatorTuiSelectionTests(unittest.TestCase):
+    def _run_shutdown_scenario(self, scenario: str) -> None:
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tests.operator_tui_shutdown_scenario",
+                    scenario,
+                ],
+                cwd=Path(__file__).parent.parent,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"TUI shutdown scenario {scenario!r} deadlocked: {error}")
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=(
+                f"TUI shutdown scenario {scenario!r} failed\n"
+                f"stdout:\n{completed.stdout}\n"
+                f"stderr:\n{completed.stderr}"
+            ),
+        )
+
+    def test_quit_completes_without_command_worker_ui_deadlock(self) -> None:
+        self._run_shutdown_scenario("quit")
+
+    def test_ctrl_c_completes_safe_quit(self) -> None:
+        self._run_shutdown_scenario("ctrl-c")
+
+    def test_command_exception_exits_and_stops_executor(self) -> None:
+        self._run_shutdown_scenario("command-failure")
+
+    def test_pending_confirmation_is_cancelled_during_shutdown(self) -> None:
+        self._run_shutdown_scenario("pending-confirmation")
+
+    def test_executor_cleanup_is_idempotent_before_start(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-idempotent-cleanup"))
+        app = OperatorTui(runtime, CodexActivityStream())
+
+        app._executor.stop()
+        app._executor.stop()
+        app._executor.join(0.01)
+        app._executor.join(0.01)
+        app.operator_console.shutdown()
+        app.operator_console.shutdown()
+
+        self.assertFalse(app._executor.is_alive)
+        runtime.stop.assert_called_once_with()
+
     def test_tui_constructor_failure_stops_started_runtime(self) -> None:
         runtime = _runtime(Path("/tmp/tui-constructor-failure"))
         with patch(
