@@ -28,7 +28,8 @@ decisions.
 Current hardware facts are rendered from the trusted `CodexOSHardwareProfile`
 used by the running generation. The prompt does not carry a second copy of the
 `experiment-v1` constants. It also states the boundary around external feature
-requests and network reachability.
+requests and that provisioning one external capability grants no other trusted-
+environment capability implicitly.
 
 Guest-visible build success means the exact source snapshot compiled and linked,
 then booted under that current hardware profile, reached the canonical READY

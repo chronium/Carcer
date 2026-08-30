@@ -110,8 +110,8 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "through restricted read-only tools",
             "reviewer is advisory and cannot modify CodexOS",
             "response and transcript do not automatically become memory",
-            "would not by itself grant access to trusted networks or the public "
-            "Internet",
+            "Provisioning one external capability does not imply or grant any "
+            "other trusted-environment capability",
             "Exact predecessor handoff.",
             "Later lineage was abandoned.",
             "Trusted operator objective.",

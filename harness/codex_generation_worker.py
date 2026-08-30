@@ -1065,10 +1065,9 @@ def _trusted_tools_contract() -> str:
         "- review:\n"
         f"  {_REVIEW_TOOL_DESCRIPTION} Its response and transcript do not "
         "automatically become memory for a successor generation.\n\n"
-        "Future network hardware, if provisioned, would not by itself grant access "
-        "to trusted networks or the public Internet; reachability is a separate "
-        "trusted capability. No human source edits or architectural guidance are "
-        "available through these tools."
+        "Provisioning one external capability does not imply or grant any other "
+        "trusted-environment capability. No human source edits or architectural "
+        "guidance are available through these tools."
     )
 
 
