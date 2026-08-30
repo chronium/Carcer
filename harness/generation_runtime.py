@@ -28,6 +28,7 @@ from .hardware import (
 )
 from .guest_startup import wait_for_ready
 from .observability import ExperimentObservability
+from .provided_assets import ProvidedAssets, configure_provided_assets
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
 from .serial import SerialConnection
@@ -68,12 +69,16 @@ class CodexOSRun:
         hardware_profile: CodexOSHardwareProfile = EXPERIMENT_HARDWARE_PROFILE,
         observability: ExperimentObservability | None = None,
         activity_stream: CodexActivityStream | None = None,
+        provided_assets_directory: str | Path | None = None,
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
         self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._observability = observability
         self._activity_stream = activity_stream
+        self._provided_assets_directory = provided_assets_directory
+        self._provided_assets: ProvidedAssets | None = None
+        self._provided_assets_configured = False
         if observability is not None:
             observability.set_feature_requests_pending(
                 sum(
@@ -199,6 +204,7 @@ class CodexOSRun:
         image = Path(initial_iso).resolve()
         if not image.is_file():
             raise FileNotFoundError(image)
+        self._configure_provided_assets()
         self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
         self._state = RuntimeState.RUNNING
@@ -227,6 +233,7 @@ class CodexOSRun:
         if not archives:
             raise RuntimeError("run has no archived generation gate")
         self._validate_archived_history(archives)
+        self._configure_provided_assets()
         latest = archives[-1]
         pending: PendingGenerationFinish | None = None
         previous_handoff: str | None = None
@@ -613,11 +620,13 @@ class CodexOSRun:
                 self._hardware_profile,
                 activity_stream=self._activity_stream,
                 generation=generation_number,
+                provided_assets=self._provided_assets,
             ),
             feature_request_store=self._feature_request_store,
             generation=generation_number,
             observability=self._observability,
             activity_stream=self._activity_stream,
+            provided_assets=self._provided_assets,
         )
 
         self._workspace = workspace
@@ -643,7 +652,11 @@ class CodexOSRun:
             )
             qmp.connect()
             serial.connect()
-            wait_for_ready(serial, _STARTUP_TIMEOUT_SECONDS)
+            wait_for_ready(
+                serial,
+                _STARTUP_TIMEOUT_SECONDS,
+                self._provided_assets,
+            )
             self._tool_client = ToolClient(serial, host_services)
             self._current_boot_image = boot_image
             self._current_parent_generation = parent_generation
@@ -652,6 +665,15 @@ class CodexOSRun:
             self._shutdown_qemu()
             self._cleanup_workspace()
             raise
+
+    def _configure_provided_assets(self) -> None:
+        if self._provided_assets_configured:
+            return
+        self._provided_assets = configure_provided_assets(
+            self._run_directory,
+            self._provided_assets_directory,
+        )
+        self._provided_assets_configured = True
 
     def _finish_if_requested(self) -> None:
         if self._host_services is None:

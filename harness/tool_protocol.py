@@ -5,17 +5,14 @@ from __future__ import annotations
 import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from .framing import MAX_PAYLOAD_SIZE, Frame, encode_frame, read_frame
 from .host_service_protocol import (
     HOST_SERVICE_REQUEST,
+    HostServiceHandler,
     decode_host_service_request,
 )
 from .serial import SerialConnection
-
-if TYPE_CHECKING:
-    from .generation_finish_host_service import CodexOSHostServices
 
 _LIST_TOOLS_REQUEST = 0x0001
 _LIST_TOOLS_RESPONSE = 0x8001
@@ -47,7 +44,7 @@ class ToolClient:
     def __init__(
         self,
         connection: SerialConnection,
-        host_services: CodexOSHostServices | None = None,
+        host_services: HostServiceHandler | None = None,
     ) -> None:
         self._connection = connection
         self._host_services = host_services

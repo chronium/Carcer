@@ -22,6 +22,7 @@ from .guest_startup import (
 from .hardware import CodexOSHardwareProfile
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
+from .provided_assets import ProvidedAssets
 from .serial import SerialConnection, SerialError
 from .tool_protocol import ToolClient, ToolProtocolError
 from .trusted_build import BuildStatus
@@ -49,6 +50,7 @@ class CandidateBootValidator:
         temporary_parent: str | Path | None = None,
         activity_stream: CodexActivityStream | None = None,
         generation: int | None = None,
+        provided_assets: ProvidedAssets | None = None,
     ) -> None:
         if ready_timeout_seconds <= 0:
             raise ValueError("candidate readiness timeout must be positive")
@@ -60,6 +62,7 @@ class CandidateBootValidator:
         )
         self._activity_stream = activity_stream
         self._generation = generation
+        self._provided_assets = provided_assets
 
     def validate(self, candidate_iso: str | Path) -> CandidateBootResult:
         """Return guest failure or harness failure without leaking QEMU state."""
@@ -195,7 +198,11 @@ class CandidateBootValidator:
 
     def _validate_guest(self, serial: SerialConnection) -> CandidateBootResult:
         try:
-            wait_for_ready(serial, self._ready_timeout_seconds)
+            wait_for_ready(
+                serial,
+                self._ready_timeout_seconds,
+                self._provided_assets,
+            )
         except GuestReadyError as error:
             detail = error.reason
             if error.serial_output:
@@ -207,7 +214,12 @@ class CandidateBootValidator:
         self._publish(CodexActivityKind.BUILD_CANDIDATE_READY)
 
         try:
-            ToolClient(serial).list_tools()
+            client = (
+                ToolClient(serial)
+                if self._provided_assets is None
+                else ToolClient(serial, self._provided_assets)
+            )
+            client.list_tools()
         except (
             FramingError,
             OSError,

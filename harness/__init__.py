@@ -47,6 +47,14 @@ from .observability import (
     ExperimentObservability,
     ExperimentObservabilityError,
 )
+from .provided_assets import (
+    MAX_PROVIDED_ASSET_READ_BYTES,
+    PROVIDED_ASSETS_MANIFEST,
+    ProvidedAsset,
+    ProvidedAssets,
+    ProvidedAssetsError,
+    configure_provided_assets,
+)
 from .qmp import QmpClient, QmpError
 from .qemu import QemuProcessController
 from .serial import SerialConnection, SerialError
@@ -97,6 +105,11 @@ __all__ = [
     "QmpError",
     "QemuProcessController",
     "PendingGenerationFinish",
+    "ProvidedAsset",
+    "ProvidedAssets",
+    "ProvidedAssetsError",
+    "PROVIDED_ASSETS_MANIFEST",
+    "MAX_PROVIDED_ASSET_READ_BYTES",
     "RuntimeState",
     "SerialConnection",
     "SerialError",
@@ -109,6 +122,7 @@ __all__ = [
     "ToolResult",
     "build_source_snapshot",
     "create_host_service_response",
+    "configure_provided_assets",
     "decode_host_service_request",
     "decode_source_snapshot",
     "encode_frame",

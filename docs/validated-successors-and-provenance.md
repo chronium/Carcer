@@ -15,7 +15,10 @@ The candidate VM has the same external isolation as the running generation. It
 has no persistent writable state, is never archived as a generation, and is
 always terminated when validation ends. A compilation-successful image that
 does not boot or speak the protocol is a failed guest build and cannot replace
-the previous successful build. This validation exists because experiment-001
+the previous successful build. When a run has explicitly configured provided
+assets, candidate protocol validation uses the same frozen in-memory asset
+snapshot as the active generation; it does not reread the external directory.
+This validation exists because experiment-001
 demonstrated that a valid compilation and ISO can still select an unbootable
 successor after the generation's development turn has permanently ended. A
 healthy same-thread session may remain idle at the immutable gate solely for an

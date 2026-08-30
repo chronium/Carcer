@@ -1105,6 +1105,11 @@ def main(
     opening.add_argument("--resume-at-gate", action="store_true")
     parser.add_argument("--git-repository", type=Path)
     parser.add_argument("--git-base-ref")
+    parser.add_argument(
+        "--provided-assets",
+        type=Path,
+        help="freeze and expose assets from this explicit external directory",
+    )
     parser.add_argument("--otlp-endpoint")
     display = parser.add_mutually_exclusive_group()
     display.add_argument(
@@ -1140,6 +1145,7 @@ def main(
             arguments.run_directory,
             observability=observability,
             activity_stream=activity_stream,
+            provided_assets_directory=arguments.provided_assets,
         )
         if arguments.git_repository is not None:
             recorder = GenerationGitRecorder(
