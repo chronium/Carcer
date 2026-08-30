@@ -8,17 +8,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from textual.app import App, ComposeResult
 from textual.widgets import Input
 from textual.containers import VerticalScroll
 
 from harness.codex_activity import (
+    CodexActivityEvent,
     CodexActivityKind,
     CodexActivityRole,
     CodexActivityStream,
 )
 from harness.generation_runtime import RuntimeState
 from harness.operator_console import main
-from harness.operator_tui import OperatorTui, run_operator_tui
+from harness.operator_tui import (
+    ActivityTranscript,
+    OperatorTui,
+    run_operator_tui,
+)
+from harness.operator_tui_model import (
+    ActivityDisplayEntry,
+    OperatorActivityModel,
+)
 
 
 def _runtime(path: Path, state: RuntimeState = RuntimeState.STOPPED) -> Mock:
@@ -32,6 +42,177 @@ def _runtime(path: Path, state: RuntimeState = RuntimeState.STOPPED) -> Mock:
     runtime.feature_requests.return_value = ()
     runtime.archived_generations.return_value = ()
     return runtime
+
+
+class _TranscriptApp(App[None]):
+    CSS = """
+    #activity-scroll { height: 1fr; }
+    #activity-rows { width: 1fr; height: auto; }
+    ActivityRow { width: 1fr; height: auto; margin-bottom: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="activity-scroll"):
+            yield ActivityTranscript()
+
+
+def _entry(index: int, *, body: str | None = None) -> ActivityDisplayEntry:
+    return ActivityDisplayEntry(
+        f"entry:{index}",
+        f"Entry {index}",
+        "operator",
+        body if body is not None else f"body {index}",
+    )
+
+
+class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keyed_rows_mount_update_and_remove_incrementally(self) -> None:
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            initial = (_entry(1), _entry(2), _entry(3))
+            transcript.reconcile(initial)
+            await pilot.pause()
+
+            self.assertEqual(
+                transcript.row_keys,
+                tuple(item.key for item in initial),
+            )
+            first, second, third = transcript.rows
+            self.assertEqual(tuple(transcript.children), (first, second, third))
+
+            fourth = _entry(4)
+            transcript.reconcile((*initial, fourth))
+            await pilot.pause()
+            self.assertEqual(transcript.rows[:3], (first, second, third))
+            self.assertIs(transcript.row_for(fourth.key), transcript.rows[-1])
+
+            updated_second = _entry(2, body="updated body")
+            with (
+                patch.object(
+                    first,
+                    "update_entry",
+                    wraps=first.update_entry,
+                ) as first_update,
+                patch.object(
+                    third,
+                    "update_entry",
+                    wraps=third.update_entry,
+                ) as third_update,
+            ):
+                transcript.reconcile(
+                    (initial[0], updated_second, initial[2], fourth)
+                )
+                first_update.assert_not_called()
+                third_update.assert_not_called()
+            self.assertIs(transcript.row_for(updated_second.key), second)
+            self.assertEqual(second.entry, updated_second)
+
+            transcript.reconcile((initial[2], updated_second, initial[0], fourth))
+            self.assertEqual(
+                tuple(transcript.children),
+                (third, second, first, transcript.rows[-1]),
+            )
+            self.assertIs(transcript.row_for(initial[0].key), first)
+
+            transcript.reconcile((updated_second, initial[2], fourth))
+            await pilot.pause()
+            self.assertNotIn(initial[0].key, transcript.row_keys)
+            self.assertFalse(first.is_attached)
+            self.assertEqual(
+                tuple(transcript.children),
+                (second, third, transcript.rows[-1]),
+            )
+
+    async def test_scrollback_trimming_unmounts_discarded_rows(self) -> None:
+        app = _TranscriptApp()
+        model = OperatorActivityModel(max_entries=4, max_bytes=400)
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            for index in range(3):
+                model.append_operator_output(f"line {index}")
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            oldest_key = model.entries[0].key
+            oldest_row = transcript.row_for(oldest_key)
+
+            for index in range(3, 10):
+                model.append_operator_output(f"line {index}")
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+
+            self.assertEqual(
+                transcript.row_keys,
+                tuple(entry.key for entry in model.entries),
+            )
+            self.assertLessEqual(len(transcript.rows), 4)
+            self.assertEqual(transcript.row_keys[0], "scrollback:discarded")
+            self.assertEqual(
+                tuple(row.entry.key for row in transcript.children),
+                transcript.row_keys,
+            )
+            self.assertFalse(oldest_row.is_attached)
+
+    async def test_hundreds_of_rows_and_tail_streaming_preserve_row_identity(self) -> None:
+        app = _TranscriptApp()
+        model = OperatorActivityModel()
+        for index in range(299):
+            model.append_operator_output(f"history {index}")
+        model.consume(
+            CodexActivityEvent(
+                1,
+                6,
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.AGENT_TEXT_DELTA,
+                {"text": "streamed update 0"},
+                thread_id="thread",
+                turn_id="turn",
+                item_id="tail",
+            )
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            entries = model.entries
+            transcript.reconcile(entries)
+            await pilot.pause()
+            first = transcript.row_for(entries[0].key)
+            middle = transcript.row_for(entries[150].key)
+            tail = transcript.row_for(entries[-1].key)
+
+            with (
+                patch.object(
+                    first,
+                    "update_entry",
+                    wraps=first.update_entry,
+                ) as first_update,
+                patch.object(
+                    middle,
+                    "update_entry",
+                    wraps=middle.update_entry,
+                ) as middle_update,
+            ):
+                for update in range(1, 101):
+                    model.consume(
+                        CodexActivityEvent(
+                            update + 1,
+                            6,
+                            CodexActivityRole.IMPLEMENTOR,
+                            CodexActivityKind.AGENT_TEXT_DELTA,
+                            {"text": f"\nstreamed update {update}"},
+                            thread_id="thread",
+                            turn_id="turn",
+                            item_id="tail",
+                        )
+                    )
+                    transcript.reconcile(model.entries)
+                first_update.assert_not_called()
+                middle_update.assert_not_called()
+
+            self.assertIs(transcript.row_for(entries[0].key), first)
+            self.assertIs(transcript.row_for(entries[150].key), middle)
+            self.assertIs(transcript.row_for(entries[-1].key), tail)
+            self.assertIn("streamed update 100", tail.entry.body)
+            self.assertEqual(len(transcript.rows), len(entries))
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
@@ -174,10 +355,13 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
                     item_id=f"message-{index}",
                 )
             await pilot.pause(0.2)
+            pane = app.query_one("#activity-scroll", VerticalScroll)
+            self.assertTrue(pane.is_vertical_scroll_end)
             await pilot.press("pageup")
             await pilot.pause(0.05)
-            pane = app.query_one("#activity-scroll", VerticalScroll)
+            input_widget = app.query_one("#command-input", Input)
             reading_position = pane.scroll_y
+            self.assertIs(app.focused, input_widget)
             stream.publish(
                 6,
                 CodexActivityRole.REVIEWER,
@@ -187,15 +371,41 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
                 turn_id="review-turn",
                 item_id="review-message",
             )
-            await pilot.pause(0.15)
+            app._drain_activity()
+            await pilot.pause()
             self.assertFalse(app._follow.following)
             self.assertGreater(app._follow.new_events, 0)
             self.assertAlmostEqual(pane.scroll_y, reading_position)
+            transcript = app.query_one(ActivityTranscript)
+            reviewer_key = app.activity_model.entries[-1].key
+            reviewer_row = transcript.row_for(reviewer_key)
+
+            stream.publish(
+                6,
+                CodexActivityRole.REVIEWER,
+                CodexActivityKind.AGENT_MESSAGE,
+                {
+                    "text": "new reviewer message\n"
+                    + "streamed below the viewport\n" * 20
+                },
+                thread_id="review-thread",
+                turn_id="review-turn",
+                item_id="review-message",
+            )
+            app._drain_activity()
+            await pilot.pause()
+            self.assertIs(transcript.row_for(reviewer_key), reviewer_row)
+            self.assertAlmostEqual(pane.scroll_y, reading_position)
+            self.assertGreaterEqual(app._follow.new_events, 2)
+            self.assertIs(app.focused, input_widget)
             await pilot.press("pagedown")
             self.assertFalse(app._follow.following)
+            self.assertIs(app.focused, input_widget)
             await pilot.press("end")
             self.assertTrue(app._follow.following)
             self.assertEqual(app._follow.new_events, 0)
+            self.assertTrue(pane.is_vertical_scroll_end)
+            self.assertIs(app.focused, input_widget)
             app.exit()
 
         app._executor.join(2.0)
