@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -36,6 +37,18 @@ class ActivityDisplayState(StrEnum):
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     CANCELLED = "cancelled"
+
+
+class FeatureRequestRecordingState(StrEnum):
+    RECORDING = "recording"
+    RECORDED = "recorded"
+    FAILED = "failed"
+
+
+class FeatureRequestTrustedStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +87,12 @@ class ToolPresentation:
 @dataclass(frozen=True, slots=True)
 class FeatureRequestPresentation:
     role: CodexActivityRole
-    state: ActivityDisplayState
+    recording_state: FeatureRequestRecordingState
+    trusted_status: FeatureRequestTrustedStatus | None
     title: str
     description: str
     request_id: str = ""
+    error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,7 +384,7 @@ class OperatorActivityModel:
             CodexActivityKind.TOOL_FAILED: ActivityDisplayState.FAILED,
         }[event.kind]
         if tool == "request_feature":
-            self._consume_feature_request(key, event, arguments, state)
+            self._consume_feature_request(key, event, arguments)
             return
         summary = _tool_summary(tool, arguments)
         detail = self._tool_detail(tool, arguments, event.data, existing)
@@ -397,29 +412,33 @@ class OperatorActivityModel:
         key: str,
         event: CodexActivityEvent,
         arguments: dict[str, object],
-        state: ActivityDisplayState,
     ) -> None:
         title = arguments.get("title")
         description = arguments.get("description")
-        result = event.data.get("result")
-        request_id = ""
-        if not _empty_payload(result):
-            request_id = _one_line(
-                _payload_presentation(result, SUMMARY_DISPLAY_BYTES).text
-            )
-        elif not _empty_payload(event.data.get("error")):
-            request_id = _one_line(
-                _payload_presentation(
-                    event.data["error"], SUMMARY_DISPLAY_BYTES
-                ).text
-            )
+        recording_state = {
+            CodexActivityKind.TOOL_STARTED: FeatureRequestRecordingState.RECORDING,
+            CodexActivityKind.TOOL_COMPLETED: FeatureRequestRecordingState.RECORDED,
+            CodexActivityKind.TOOL_FAILED: FeatureRequestRecordingState.FAILED,
+        }[event.kind]
+        trusted_status = (
+            FeatureRequestTrustedStatus.PENDING
+            if recording_state is FeatureRequestRecordingState.RECORDED
+            else None
+        )
+        request_id = _feature_request_id(event.data.get("result"))
+        error = (
+            _feature_request_error(event.data)
+            if recording_state is FeatureRequestRecordingState.FAILED
+            else ""
+        )
         self._upsert_entry(
             ActivityDisplayEntry(
                 key,
                 ActivityDisplayKind.FEATURE_REQUEST,
                 FeatureRequestPresentation(
                     event.role,
-                    state,
+                    recording_state,
+                    trusted_status,
                     safe_display_text(
                         title
                         if isinstance(title, str)
@@ -431,6 +450,7 @@ class OperatorActivityModel:
                         self._display_bytes,
                     ),
                     request_id,
+                    error,
                 ),
             )
         )
@@ -761,6 +781,38 @@ def _payload_presentation(
     )
 
 
+def _feature_request_id(result: object) -> str:
+    if not isinstance(result, Mapping) or result.get("status") != 0:
+        return ""
+    output = result.get("output")
+    if isinstance(output, bytes):
+        try:
+            value = output.decode("ascii")
+        except UnicodeDecodeError:
+            return ""
+    elif isinstance(output, str):
+        value = output
+    else:
+        return ""
+    if not value.isascii() or not value.isdecimal() or value.startswith("0"):
+        return ""
+    return value
+
+
+def _feature_request_error(data: Mapping[str, object]) -> str:
+    error = data.get("error")
+    if not _empty_payload(error):
+        return _one_line(_payload_presentation(error, SUMMARY_DISPLAY_BYTES).text)
+    result = data.get("result")
+    if isinstance(result, Mapping):
+        output = result.get("output")
+        if not _empty_payload(output):
+            return _one_line(
+                _payload_presentation(output, SUMMARY_DISPLAY_BYTES).text
+            )
+    return "request recording failed"
+
+
 def _tool_summary(tool: str, arguments: dict[str, object]) -> str:
     def value(name: str) -> str | None:
         candidate = arguments.get(name)
@@ -831,7 +883,21 @@ def _entry_text(entry: ActivityDisplayEntry) -> str:
             text += "\n" + presentation.detail.text
         return text
     if isinstance(presentation, FeatureRequestPresentation):
-        return "Feature request\n" + presentation.title + "\n" + presentation.description
+        lines = [
+            "Feature request",
+            presentation.title,
+            presentation.description,
+            presentation.recording_state.value,
+        ]
+        if presentation.request_id:
+            lines.append(f"request {presentation.request_id}")
+        if presentation.trusted_status is not None:
+            lines.append(
+                f"trusted status: {presentation.trusted_status.value} · not provisioned"
+            )
+        if presentation.error:
+            lines.append(presentation.error)
+        return "\n".join(line for line in lines if line)
     if isinstance(presentation, BuildPresentation):
         return "Trusted build\n" + "\n".join(
             f"{phase.name} {phase.state.value}" for phase in presentation.phases
@@ -865,7 +931,16 @@ def _presentation_text(presentation: ActivityPresentation) -> str:
         )
     if isinstance(presentation, FeatureRequestPresentation):
         return "\n".join(
-            (presentation.title, presentation.description, presentation.request_id)
+            (
+                presentation.recording_state.value,
+                presentation.trusted_status.value
+                if presentation.trusted_status is not None
+                else "",
+                presentation.title,
+                presentation.description,
+                presentation.request_id,
+                presentation.error,
+            )
         )
     if isinstance(presentation, BuildPresentation):
         return "\n".join(

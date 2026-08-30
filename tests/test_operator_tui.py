@@ -349,6 +349,75 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
                         0,
                     )
 
+    async def test_feature_request_renders_recording_and_pending_as_distinct_states(self) -> None:
+        model = OperatorActivityModel()
+        request = {
+            "tool": "request_feature",
+            "arguments": {
+                "title": "External capacity",
+                "description": "A trusted-environment capability is justified.",
+            },
+        }
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.TOOL_STARTED,
+                request,
+                item_id="feature",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            row = transcript.rows[0]
+            self.assertIsInstance(row, FeatureRequestRow)
+            started = str(row.render())
+            self.assertIn("recording", started)
+            self.assertNotIn("pending", started)
+            self.assertNotIn("completed", started)
+
+            model.consume(
+                _activity_event(
+                    2,
+                    CodexActivityKind.TOOL_COMPLETED,
+                    {**request, "result": {"status": 0, "output": b"4"}},
+                    item_id="feature",
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            self.assertIs(transcript.rows[0], row)
+            recorded = str(row.render())
+            self.assertIn("recorded · request 4", recorded)
+            self.assertIn("trusted status: pending · not provisioned", recorded)
+            self.assertNotIn("completed", recorded)
+
+            failed_request = {
+                "tool": "request_feature",
+                "arguments": {
+                    "title": "Rejected request",
+                    "description": "Cannot be recorded.",
+                },
+            }
+            model.consume(
+                _activity_event(
+                    3,
+                    CodexActivityKind.TOOL_FAILED,
+                    {**failed_request, "error": "request rejected"},
+                    item_id="failed-feature",
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            failed_row = transcript.rows[1]
+            self.assertIsInstance(failed_row, FeatureRequestRow)
+            failed = str(failed_row.render())
+            self.assertIn("failed", failed)
+            self.assertIn("request rejected", failed)
+            self.assertNotIn("pending", failed)
+
     async def test_streaming_message_finalizes_as_markdown_in_same_row(self) -> None:
         model = OperatorActivityModel()
         model.begin_operator_block()

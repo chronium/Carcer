@@ -33,6 +33,7 @@ from .operator_tui_model import (
     AgentMessagePresentation,
     BuildPresentation,
     FeatureRequestPresentation,
+    FeatureRequestRecordingState,
     LifecyclePresentation,
     NoticePresentation,
     OperatorPresentation,
@@ -443,24 +444,51 @@ def _human_size(size: int) -> str:
 
 
 def _feature_content(presentation: FeatureRequestPresentation) -> Content:
-    marker = _STATE_MARKERS[presentation.state]
-    status = presentation.state.value
-    if presentation.request_id:
-        status += f" · {presentation.request_id}"
+    marker = {
+        FeatureRequestRecordingState.RECORDING: "…",
+        FeatureRequestRecordingState.RECORDED: "✓",
+        FeatureRequestRecordingState.FAILED: "✗",
+    }[presentation.recording_state]
+    if presentation.recording_state is FeatureRequestRecordingState.RECORDING:
+        recording = "recording…"
+    elif presentation.recording_state is FeatureRequestRecordingState.RECORDED:
+        request = (
+            f"request {presentation.request_id}"
+            if presentation.request_id
+            else "request"
+        )
+        recording = f"recorded · {request}  {marker}"
+    else:
+        recording = f"failed  {marker}"
     lines = [
         "Feature request",
         presentation.title,
         presentation.description,
-        f"status: {status}  {marker}",
+        recording,
     ]
+    if presentation.trusted_status is not None:
+        lines.append(
+            f"trusted status: {presentation.trusted_status.value} · not provisioned"
+        )
+    if presentation.error:
+        lines.append(presentation.error)
     text = "\n".join(line for line in lines if line)
     title_start = text.find(presentation.title)
-    status_start = text.rfind("status:")
+    recording_start = text.find(recording)
     spans = [Span(0, len("Feature request"), "bold yellow")]
     if title_start >= 0:
         spans.append(Span(title_start, title_start + len(presentation.title), "bold"))
-    if status_start >= 0:
-        spans.append(Span(status_start, len(text), "yellow"))
+    if recording_start >= 0:
+        spans.append(
+            Span(
+                recording_start,
+                recording_start + len(recording),
+                "bold red"
+                if presentation.recording_state
+                is FeatureRequestRecordingState.FAILED
+                else "yellow",
+            )
+        )
     return Content(text, spans)
 
 

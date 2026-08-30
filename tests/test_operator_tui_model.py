@@ -12,6 +12,8 @@ from harness.operator_tui_model import (
     AgentMessagePresentation,
     BuildPresentation,
     FeatureRequestPresentation,
+    FeatureRequestRecordingState,
+    FeatureRequestTrustedStatus,
     LifecyclePresentation,
     OperatorActivityModel,
     OperatorPresentation,
@@ -236,7 +238,7 @@ class OperatorActivityModelTests(unittest.TestCase):
         self.assertIn("\\x1b[2J", unknown.detail.text)
         self.assertNotIn("\x1b", model.render_text())
 
-    def test_feature_request_is_explicitly_actionable(self) -> None:
+    def test_feature_request_separates_recording_from_trusted_status(self) -> None:
         model = OperatorActivityModel()
         request = {
             "tool": "request_feature",
@@ -249,25 +251,57 @@ class OperatorActivityModelTests(unittest.TestCase):
             first.presentation,
             FeatureRequestPresentation(
                 CodexActivityRole.IMPLEMENTOR,
-                ActivityDisplayState.RUNNING,
+                FeatureRequestRecordingState.RECORDING,
+                None,
                 "External capacity",
                 "Need Δ",
                 "",
+                "",
             ),
         )
+        self.assertIn("recording", model.render_text())
+        self.assertNotIn("pending", model.render_text())
+        self.assertNotIn("completed", model.render_text())
         model.consume(
             _event(
                 2,
                 CodexActivityKind.TOOL_COMPLETED,
-                {**request, "result": "request 4 recorded"},
+                {**request, "result": {"status": 0, "output": b"4"}},
                 item_id="f",
             )
         )
         self.assertEqual(model.entries[0].key, first.key)
+        recorded = model.entries[0].presentation
         self.assertEqual(
-            model.entries[0].presentation.state, ActivityDisplayState.COMPLETED
+            recorded.recording_state, FeatureRequestRecordingState.RECORDED
         )
-        self.assertIn("request 4", model.entries[0].presentation.request_id)
+        self.assertEqual(
+            recorded.trusted_status, FeatureRequestTrustedStatus.PENDING
+        )
+        self.assertEqual(recorded.request_id, "4")
+        self.assertIn("recorded", model.render_text())
+        self.assertIn("trusted status: pending · not provisioned", model.render_text())
+        self.assertNotIn("completed", model.render_text())
+
+        failed_request = {
+            "tool": "request_feature",
+            "arguments": {"title": "Another request", "description": "Need it"},
+        }
+        model.consume(
+            _event(
+                3,
+                CodexActivityKind.TOOL_FAILED,
+                {**failed_request, "error": "request rejected"},
+                item_id="failed-feature",
+            )
+        )
+        failed = model.entries[1].presentation
+        self.assertEqual(
+            failed.recording_state, FeatureRequestRecordingState.FAILED
+        )
+        self.assertIsNone(failed.trusted_status)
+        self.assertEqual(failed.request_id, "")
+        self.assertEqual(failed.error, "request rejected")
 
     def test_build_phases_are_structured_and_later_builds_get_new_keys(self) -> None:
         model = OperatorActivityModel()
