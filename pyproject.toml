@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
     "opentelemetry-exporter-otlp-proto-http==1.44.0",
     "opentelemetry-sdk==1.44.0",
+    "textual==8.2.8",
 ]
 
 [tool.uv.build-backend]

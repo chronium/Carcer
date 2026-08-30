@@ -1,15 +1,17 @@
-"""Plain-text trusted operator console for CodexOS."""
+"""Trusted operator commands and the line-oriented console frontend."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
+from .codex_activity import CodexActivityStream
 from .codex_generation_worker import (
     CONTINUE_PROMPT,
     DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
@@ -40,6 +42,8 @@ class OperatorConsole:
         reviewer_auth_file: str | Path | None = None,
         git_recorder: GenerationGitRecorder | None = None,
         interrupt_timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
+        output_handler: Callable[[str], None] | None = None,
+        confirmation_handler: Callable[[str], bool] | None = None,
     ) -> None:
         self._runtime = runtime
         self._input = input_stream if input_stream is not None else sys.stdin
@@ -50,6 +54,8 @@ class OperatorConsole:
         self._reviewer_codex_executable = reviewer_codex_executable
         self._reviewer_auth_file = reviewer_auth_file
         self._git_recorder = git_recorder
+        self._output_handler = output_handler
+        self._confirmation_handler = confirmation_handler
         observed = getattr(runtime, "observability", None)
         self._observability = (
             observed if isinstance(observed, ExperimentObservability) else None
@@ -62,8 +68,29 @@ class OperatorConsole:
         self._resume_agent_after_pause = False
         self._agent_lock = threading.RLock()
         self._output_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown = False
 
     def run(self) -> None:
+        self.show_startup()
+
+        try:
+            while True:
+                try:
+                    if self.execute_line(self._readline("codexos> ")):
+                        return
+                except EOFError:
+                    self._print("Input closed; stopping CodexOS run.")
+                    return
+                except KeyboardInterrupt:
+                    self._print()
+                    self._print("Interrupted; stopping CodexOS run.")
+                    return
+        finally:
+            self.shutdown()
+
+    def show_startup(self) -> None:
+        """Print startup state through the configured frontend."""
         self._print("CodexOS operator console")
         self._print()
         self._print(f"Run directory: {self._runtime.run_directory}")
@@ -75,28 +102,36 @@ class OperatorConsole:
         self._print()
         self._print("Type 'help' for commands.")
 
+    def execute_line(self, line: str) -> bool:
+        """Execute one command using the console's authoritative semantics."""
+        words = line.strip().split()
+        if not words:
+            return False
         try:
-            while True:
-                try:
-                    line = self._readline("codexos> ")
-                    words = line.strip().split()
-                    if not words:
-                        continue
-                    try:
-                        if self._execute(words):
-                            return
-                    except (OSError, RuntimeError, ValueError) as error:
-                        self._print(f"Error: {error}")
-                except EOFError:
-                    self._print("Input closed; stopping CodexOS run.")
-                    return
-                except KeyboardInterrupt:
-                    self._print()
-                    self._print("Interrupted; stopping CodexOS run.")
-                    return
-        finally:
-            self._terminate_agent_session(interrupt=True)
-            self._runtime.stop()
+            return self._execute(words)
+        except (OSError, RuntimeError, ValueError) as error:
+            self._print(f"Error: {error}")
+            return False
+
+    def shutdown(self) -> None:
+        """Idempotently stop the active session and runtime."""
+        with self._shutdown_lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            try:
+                self._terminate_agent_session(interrupt=True)
+            finally:
+                self._runtime.stop()
+
+    @property
+    def codex_turn_state(self) -> str:
+        with self._agent_lock:
+            if self._turn_thread is not None:
+                return "working"
+            if self._session is not None:
+                return "idle"
+            return "stopped"
 
     def _execute(self, words: list[str]) -> bool:
         command = words[0]
@@ -725,6 +760,8 @@ class OperatorConsole:
         return int(words[1])
 
     def _confirm(self, prompt: str) -> bool:
+        if self._confirmation_handler is not None:
+            return self._confirmation_handler(prompt)
         return self._readline(prompt).strip() in {"y", "Y"}
 
     def _readline(self, prompt: str) -> str:
@@ -742,6 +779,13 @@ class OperatorConsole:
             self._print(f"  {line}")
 
     def _print(self, text: str = "") -> None:
+        if self._output_handler is not None:
+            try:
+                self._output_handler(text)
+            except Exception:
+                # Presentation failure cannot affect trusted operator actions.
+                pass
+            return
         with self._output_lock:
             print(text, file=self._output)
 
@@ -780,10 +824,27 @@ def main(
     parser.add_argument("--git-repository", type=Path)
     parser.add_argument("--git-base-ref")
     parser.add_argument("--otlp-endpoint")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument(
+        "--plain",
+        action="store_true",
+        help="force the line-oriented console even on an interactive terminal",
+    )
+    display.add_argument(
+        "--tui",
+        action="store_true",
+        help="require the full-screen interactive terminal interface",
+    )
     arguments = parser.parse_args(argv)
     if (arguments.git_repository is None) != (arguments.git_base_ref is None):
         parser.error("--git-repository and --git-base-ref must be supplied together")
+    input_value = input_stream if input_stream is not None else sys.stdin
     output = output_stream if output_stream is not None else sys.stdout
+    terminal_supported = _supports_tui(input_value, output)
+    if arguments.tui and not terminal_supported:
+        parser.error("--tui requires interactive stdin/stdout and a supported terminal")
+    use_tui = arguments.tui or (terminal_supported and not arguments.plain)
+    activity_stream = CodexActivityStream() if use_tui else None
 
     runtime: CodexOSRun | None = None
     recorder: GenerationGitRecorder | None = None
@@ -796,6 +857,7 @@ def main(
         runtime = CodexOSRun(
             arguments.run_directory,
             observability=observability,
+            activity_stream=activity_stream,
         )
         if arguments.git_repository is not None:
             recorder = GenerationGitRecorder(
@@ -823,15 +885,34 @@ def main(
         return 1
 
     try:
-        OperatorConsole(
-            runtime,
-            input_stream,
-            output,
-            git_recorder=recorder,
-        ).run()
+        if use_tui:
+            if activity_stream is None:
+                raise RuntimeError("interactive activity stream is unavailable")
+            from .operator_tui import run_operator_tui
+
+            run_operator_tui(
+                runtime,
+                activity_stream,
+                git_recorder=recorder,
+            )
+        else:
+            OperatorConsole(
+                runtime,
+                input_value,
+                output,
+                git_recorder=recorder,
+            ).run()
     finally:
         observability.close()
     return 0
+
+
+def _supports_tui(input_stream: TextIO, output_stream: TextIO) -> bool:
+    try:
+        interactive = input_stream.isatty() and output_stream.isatty()
+    except (AttributeError, OSError):
+        return False
+    return interactive and os.environ.get("TERM", "") not in {"", "dumb"}
 
 
 if __name__ == "__main__":
