@@ -20,6 +20,12 @@ SECTIONS
         *(.rodata .rodata.*)
     } :rodata
 
+    .limine_requests : ALIGN(16) {
+        KEEP(*(.limine_requests_start))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end))
+    } :data
+
     .data : ALIGN(4096) {
         *(.data .data.*)
     } :data
