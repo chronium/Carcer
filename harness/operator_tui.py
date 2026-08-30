@@ -80,6 +80,11 @@ class ActivityTranscript(Vertical):
     def row_for(self, key: str) -> ActivityRow:
         return self._rows[key]
 
+    def on_resize(self, event: events.Resize) -> None:
+        app = self.app
+        if isinstance(app, OperatorTui):
+            app._sync_activity_anchor()
+
     def reconcile(self, entries: tuple[ActivityDisplayEntry, ...]) -> None:
         desired_order = tuple(entry.key for entry in entries)
         desired_keys = set(desired_order)
@@ -359,7 +364,7 @@ class OperatorTui(App[None]):
 
     def on_mount(self) -> None:
         self._refresh_header()
-        self.query_one("#activity-scroll", VerticalScroll).anchor()
+        self.call_after_refresh(self._sync_activity_anchor)
         self.set_interval(0.05, self._drain_activity)
         self.set_interval(0.25, self._refresh_header)
         self._executor.start()
@@ -487,13 +492,26 @@ class OperatorTui(App[None]):
 
     def _activity_changed(self, count: int) -> None:
         pane = self.query_one("#activity-scroll", VerticalScroll)
+        pane.anchor(False)
         self._follow.arrived(count)
         self.query_one(ActivityTranscript).reconcile(self._model.entries)
-        if self._follow.following:
-            pane.anchor()
-        else:
-            pane.anchor(False)
+        self.call_after_refresh(self._sync_activity_anchor)
         self._refresh_follow_indicator()
+
+    def _sync_activity_anchor(self) -> None:
+        pane = self.query_one("#activity-scroll", VerticalScroll)
+        if self._follow.following and pane.max_scroll_y > 0:
+            pane.anchor()
+            return
+        was_anchored = pane.is_anchored
+        pane.anchor(False)
+        if self._follow.following:
+            # Textual 8.2.8 may leave a negative scroll position when anchored
+            # content shrinks to fit; scroll_to() is a no-op without overflow.
+            pane.scroll_target_y = 0
+            pane.set_scroll(None, 0)
+            if was_anchored:
+                pane.refresh(layout=True)
 
     def _refresh_header(self) -> None:
         try:
@@ -613,9 +631,8 @@ class OperatorTui(App[None]):
         self._refresh_follow_indicator()
 
     def action_activity_end(self) -> None:
-        pane = self.query_one("#activity-scroll", VerticalScroll)
         self._follow.return_to_live()
-        pane.anchor()
+        self._sync_activity_anchor()
         self._refresh_follow_indicator()
 
     def action_pause_shortcut(self) -> None:

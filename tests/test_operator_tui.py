@@ -216,6 +216,62 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_follow_anchors_only_after_content_overflows(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-short-content"))
+        app = OperatorTui(runtime, CodexActivityStream())
+        app._executor.start = Mock()
+        async with app.run_test(size=(90, 24)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            pane = app.query_one("#activity-scroll", VerticalScroll)
+            transcript = app.query_one(ActivityTranscript)
+
+            self.assertEqual(pane.max_scroll_y, 0)
+            self.assertEqual(pane.scroll_y, 0)
+            self.assertFalse(pane.is_anchored)
+
+            for index in range(3):
+                app._model.append_operator_output(f"short row {index}")
+            app._activity_changed(3)
+            await pilot.pause()
+            await pilot.pause()
+
+            self.assertEqual(pane.max_scroll_y, 0)
+            self.assertEqual(pane.scroll_y, 0)
+            self.assertFalse(pane.is_anchored)
+            self.assertEqual(
+                transcript.region.y,
+                pane.scrollable_content_region.y,
+            )
+            app._follow.scrolled(0)
+            app.action_activity_end()
+            self.assertEqual(pane.scroll_y, 0)
+            self.assertFalse(pane.is_anchored)
+
+            for index in range(3, 24):
+                app._model.append_operator_output(f"overflow row {index}")
+            app._activity_changed(21)
+            await pilot.pause()
+            await pilot.pause()
+
+            self.assertGreater(pane.max_scroll_y, 0)
+            self.assertEqual(pane.scroll_y, pane.max_scroll_y)
+            self.assertTrue(pane.is_anchored)
+
+            await pilot.resize_terminal(90, 100)
+            await pilot.pause()
+            await pilot.pause()
+            self.assertEqual(pane.max_scroll_y, 0)
+            self.assertEqual(pane.scroll_y, 0)
+            self.assertFalse(pane.is_anchored)
+            self.assertEqual(
+                transcript.region.y,
+                pane.scrollable_content_region.y,
+            )
+            app.exit()
+
+        app._executor.join(2.0)
+
     async def test_two_escape_presses_submit_authoritative_pause(self) -> None:
         runtime = _runtime(Path("/tmp/tui-escape-pause"), RuntimeState.RUNNING)
         app = OperatorTui(runtime, CodexActivityStream())
