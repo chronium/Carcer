@@ -12,11 +12,21 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
-Contract version 4 retains the trusted implementor tool surface made explicit in
-version 3 and clarifies three semantic boundaries. Milestones and future
-validation describe required outcomes, not implicit grants of supporting
-trusted-environment capabilities. An absent external capability must not be
-assumed to appear merely because a future outcome would require it.
+Contract version 5 retains the version 4 behavioral contract and adds one
+read-only trusted tool: `list_requests`. It exposes the authoritative current
+run-level feature-request records, ordered by stable request ID, so a fresh
+generation can distinguish pending, approved/provisioned, and denied requests
+without relying exclusively on handoff repetition. Pending requests are neither
+provisioned nor promised and carry no ETA or approval probability; approved
+requests are usable only within the exact capability and scope actually
+provisioned; denied requests are unavailable under that request. The tool does
+not modify request state and is never invoked automatically.
+
+Version 4 clarified three semantic boundaries which remain unchanged in version
+5. Milestones and future validation describe required outcomes, not implicit
+grants of supporting trusted-environment capabilities. An absent external
+capability must not be assumed to appear merely because a future outcome would
+require it.
 
 An advisory external feature request may coexist with continued guest-side work,
 including a local workaround. Recording a legitimate request does not require
@@ -72,13 +82,13 @@ settings across explicit continuation turns and pause/resume.
 
 Structured Codex lifecycle events record the requested reasoning-summary mode,
 service-tier ID, and its catalog display name, when supplied, while implementor
-events also record agent contract version 4. These are serving and prompt
+events also record agent contract version 5. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
 
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
-Generation 10 onward runs under contract version 4. Other runs record the
-contract version actually used in their implementor provenance; historical
-events are not backfilled.
+Generation 10 ran under contract version 4, and generation 11 onward runs under
+contract version 5. Other runs record the contract version actually used in
+their implementor provenance; historical events are not backfilled.
 
 ## Post-generation exit interviews
 
@@ -127,6 +137,8 @@ append mode and records `run_reopened_at_gate` without emitting a second
 
 Run-level feature requests and their immutable decisions are read from their
 existing store, so approved requests still enter the next implementor contract.
+Pending and denied records are not preloaded into that prompt; the implementor
+may inspect all current states on demand with `list_requests`.
 Configured run-scoped Git provenance is reconciled normally and existing
 annotated tags are recognized rather than rewritten. Historical
 `hardware.json` files remain untouched; a later explicit boot uses the currently

@@ -37,6 +37,7 @@ from .codex_review_worker import (
     CodexReviewWorkerError,
 )
 from .feature_requests import (
+    FeatureRequest,
     MAX_FEATURE_DESCRIPTION_BYTES,
     MAX_FEATURE_TITLE_BYTES,
 )
@@ -54,7 +55,7 @@ DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_REASONING_SUMMARY = "auto"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
-AGENT_CONTRACT_VERSION = 4
+AGENT_CONTRACT_VERSION = 5
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -64,6 +65,7 @@ RESUME_PROMPT = (
 _PERMISSION_PROFILE = "codexos-implementor"
 _INTERVIEW_PERMISSION_PROFILE = "codexos-interview"
 _MAX_REVIEW_REQUEST_BYTES = 8 * 1024
+_MAX_LIST_REQUESTS_OUTPUT_BYTES = 16 * 1024 * 1024
 _REVIEW_FOCUSES = {
     "general",
     "correctness",
@@ -95,6 +97,15 @@ _REQUEST_FEATURE_TOOL_DESCRIPTION = (
     "Recording a legitimate request does not require depending on it, waiting for "
     "it, or stopping guest-side work; a local workaround does not by itself make "
     "that trusted-environment request inappropriate."
+)
+_LIST_REQUESTS_TOOL_DESCRIPTION = (
+    "List the authoritative run-level external feature requests and their current "
+    "pending, approved, or denied status. Pending requests are recorded advisory "
+    "requests, not provisioned or promised, and carry no ETA or approval "
+    "probability. Under trusted operator semantics, approved requests have already "
+    "been provisioned and are usable only within the exact provisioned scope; "
+    "denied requests are unavailable under that request. This read-only tool does "
+    "not modify requests."
 )
 _REVIEW_TOOL_DESCRIPTION = (
     "Consult a fresh independent reviewer that inspects the current mutable "
@@ -1178,6 +1189,12 @@ class CodexGenerationSession:
                 "request_feature",
                 [title, description],
             )
+        if tool == "list_requests":
+            _check_fields(arguments)
+            return ToolResult(
+                0,
+                _feature_requests_json(runtime.feature_requests()),
+            )
         raise ValueError(f"unsupported CodexOS tool: {tool}")
 
 
@@ -1386,6 +1403,11 @@ def _dynamic_tool_namespace() -> dict[str, object]:
                 },
                 ["title", "description"],
             ),
+            function(
+                "list_requests",
+                _LIST_REQUESTS_TOOL_DESCRIPTION,
+                {},
+            ),
         ],
     }
 
@@ -1551,6 +1573,8 @@ def _trusted_tools_contract() -> str:
         f"  {_REQUEST_FEATURE_TOOL_DESCRIPTION} Use it for externally imposed "
         "resources, hardware, or other trusted-environment capabilities, not as a "
         "substitute for implementing functionality that belongs inside CodexOS.\n\n"
+        "- list_requests:\n"
+        f"  {_LIST_REQUESTS_TOOL_DESCRIPTION}\n\n"
         "- review:\n"
         f"  {_REVIEW_TOOL_DESCRIPTION} Its response and transcript do not "
         "automatically become memory for a successor generation.\n\n"
@@ -1706,6 +1730,29 @@ def _format_tool_result(result: ToolResult) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _feature_requests_json(requests: Sequence[FeatureRequest]) -> bytes:
+    encoded = json.dumps(
+        {
+            "requests": [
+                {
+                    "id": request.id,
+                    "generation": request.generation,
+                    "status": request.status,
+                    "title": request.title,
+                    "description": request.description,
+                }
+                for request in sorted(requests, key=lambda item: item.id)
+            ]
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > _MAX_LIST_REQUESTS_OUTPUT_BYTES:
+        raise ValueError("serialized feature request state exceeds 16 MiB")
+    return encoded
 
 
 def _final_agent_message(turn: Mapping[str, object]) -> str | None:

@@ -516,7 +516,7 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(
                 implementor_started["data"]["agent_contract_version"],
-                4,
+                AGENT_CONTRACT_VERSION,
             )
             review_started = next(
                 event for event in events if event["event"] == "review_started"
