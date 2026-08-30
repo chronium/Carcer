@@ -26,6 +26,7 @@ class ActivityDisplayKind(StrEnum):
     FEATURE_REQUEST = "feature-request"
     BUILD = "build"
     OPERATOR = "operator"
+    INTERVIEW_QUESTION = "interview-question"
     LIFECYCLE = "lifecycle"
     NOTICE = "notice"
 
@@ -114,6 +115,11 @@ class OperatorPresentation:
 
 
 @dataclass(frozen=True, slots=True)
+class InterviewQuestionPresentation:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class LifecyclePresentation:
     role: CodexActivityRole
     title: str
@@ -134,6 +140,7 @@ ActivityPresentation = (
     | FeatureRequestPresentation
     | BuildPresentation
     | OperatorPresentation
+    | InterviewQuestionPresentation
     | LifecyclePresentation
     | NoticePresentation
 )
@@ -297,6 +304,18 @@ class OperatorActivityModel:
             CodexActivityKind.BUILD_COMPLETED,
         }:
             self._consume_build(event)
+        elif kind is CodexActivityKind.EXIT_INTERVIEW_QUESTION:
+            text = event.data.get("text")
+            if isinstance(text, str) and text.strip():
+                self._upsert_entry(
+                    ActivityDisplayEntry(
+                        f"interview-question:{event.sequence}",
+                        ActivityDisplayKind.INTERVIEW_QUESTION,
+                        InterviewQuestionPresentation(
+                            safe_display_text(text, self._display_bytes)
+                        ),
+                    )
+                )
         else:
             self._consume_lifecycle(event)
         return self._revision != before
@@ -575,6 +594,8 @@ class OperatorActivityModel:
             CodexActivityKind.TURN_COMPLETED,
             CodexActivityKind.REVIEW_STARTED,
             CodexActivityKind.REVIEW_COMPLETED,
+            CodexActivityKind.EXIT_INTERVIEW_STARTED,
+            CodexActivityKind.EXIT_INTERVIEW_ENDED,
         }:
             return
         state = {
@@ -910,6 +931,8 @@ def _entry_text(entry: ActivityDisplayEntry) -> str:
             "" if presentation.command is None else f"codexos> {presentation.command}\n"
         )
         return "Operator\n" + command + presentation.output
+    if isinstance(presentation, InterviewQuestionPresentation):
+        return "You\n" + presentation.text
     if isinstance(presentation, LifecyclePresentation):
         return (
             f"{_role_name(presentation.role)} · {presentation.title}\n"
@@ -954,6 +977,8 @@ def _presentation_text(presentation: ActivityPresentation) -> str:
         )
     if isinstance(presentation, OperatorPresentation):
         return "\n".join((presentation.command or "", presentation.output))
+    if isinstance(presentation, InterviewQuestionPresentation):
+        return presentation.text
     if isinstance(presentation, LifecyclePresentation):
         return "\n".join((presentation.title, presentation.detail))
     return "\n".join((presentation.title, presentation.text))

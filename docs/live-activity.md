@@ -107,3 +107,10 @@ bounded to 800 logical entries and 2 MiB, with each individual payload rendered
 up to 64 KiB and an explicit marker when older displayed activity is discarded.
 These are UI bounds only: they neither truncate nor apply backpressure to the
 semantic `CodexActivityStream`.
+
+At an eligible completed-generation gate, the header advertises the optional
+same-thread exit interview and switches to an `interview>` prompt while it is
+open. Human retrospective questions appear as distinct `You` transcript rows;
+Sol answers and explicitly exposed reasoning summaries use their existing
+presentation. This conversation remains ephemeral live activity: it is not
+written to operational telemetry, an archive, a handoff, or successor context.

@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -25,6 +26,7 @@ from harness.operator_tui import (
     AgentMessageRow,
     ActivityTranscript,
     FeatureRequestRow,
+    InterviewQuestionRow,
     LifecycleRow,
     OperatorTui,
     OperatorRow,
@@ -40,6 +42,7 @@ from harness.operator_tui_model import (
     OperatorPresentation,
     OperatorActivityModel,
 )
+from harness.codex_generation_worker import CodexGenerationSessionMode
 
 
 def _runtime(path: Path, state: RuntimeState = RuntimeState.STOPPED) -> Mock:
@@ -503,6 +506,13 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
             ),
             _activity_event(
                 6,
+                CodexActivityKind.EXIT_INTERVIEW_QUESTION,
+                {"text": "Why did you choose this design?"},
+                role=CodexActivityRole.HARNESS,
+                item_id=None,
+            ),
+            _activity_event(
+                7,
                 CodexActivityKind.TURN_FAILED,
                 {"status": "failed"},
                 item_id=None,
@@ -524,9 +534,13 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
                     ToolRow,
                     TrustedBuildRow,
                     FeatureRequestRow,
+                    InterviewQuestionRow,
                     LifecycleRow,
                 ),
             )
+            question = transcript.rows[-2]
+            self.assertIsInstance(question, InterviewQuestionRow)
+            self.assertIn("Why did you choose", question.entry.presentation.text)
 
     async def test_tool_completion_and_build_phases_preserve_outer_rows(self) -> None:
         model = OperatorActivityModel()
@@ -622,6 +636,43 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exit_interview_gate_status_and_prompt_are_visible(self) -> None:
+        runtime = _runtime(
+            Path("/tmp/tui-exit-interview"),
+            RuntimeState.AWAITING_NEXT_GENERATION,
+        )
+        runtime.generation_number = 9
+        runtime.pending_generation_finish = object()
+        app = OperatorTui(runtime, CodexActivityStream())
+        app._executor.start = Mock()
+        session = Mock()
+        session.mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+        session.healthy = True
+        app._console._session = session
+        app._console._session_generation = 9
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._refresh_header()
+            header = str(app.query_one("#status-header").render())
+            self.assertIn("exit interview available", header)
+            self.assertNotIn("Esc: pause", str(app.query_one("#follow-indicator").render()))
+
+            app._console._interview_open = True
+            app.command_finished(False)
+            await pilot.pause()
+            self.assertEqual(
+                str(app.query_one("#command-prompt").render()), "interview>"
+            )
+            app._refresh_header()
+            self.assertIn(
+                "EXIT INTERVIEW · Sol idle",
+                str(app.query_one("#status-header").render()),
+            )
+            app.exit()
+
+        app._executor.join(2.0)
+
     async def test_tool_detail_toggle_preserves_input_and_historical_scroll(self) -> None:
         runtime = _runtime(Path("/tmp/tui-tool-detail"))
         stream = CodexActivityStream()
@@ -1017,6 +1068,65 @@ class OperatorTuiSelectionTests(unittest.TestCase):
 
     def test_pending_confirmation_is_cancelled_during_shutdown(self) -> None:
         self._run_shutdown_scenario("pending-confirmation")
+
+    def test_quit_with_idle_exit_interview_does_not_deadlock(self) -> None:
+        self._run_shutdown_scenario("interview-idle")
+
+    def test_quit_with_active_exit_interview_does_not_deadlock(self) -> None:
+        self._run_shutdown_scenario("interview-active")
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and hasattr(os, "openpty"),
+        "PTY terminal restoration is Linux-specific",
+    )
+    def test_real_terminal_quit_restores_pty_modes(self) -> None:
+        import termios
+
+        master, slave = os.openpty()
+        before = termios.tcgetattr(slave)
+        environment = os.environ.copy()
+        environment["TERM"] = "xterm-256color"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tests.operator_tui_shutdown_scenario",
+                "quit",
+                "--terminal",
+            ],
+            cwd=Path(__file__).parent.parent,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            env=environment,
+        )
+        output = bytearray()
+
+        def drain() -> None:
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                output.extend(chunk)
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        try:
+            return_code = process.wait(timeout=5.0)
+            after = termios.tcgetattr(slave)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=2.0)
+            os.close(slave)
+            os.close(master)
+            reader.join(1.0)
+        self.assertEqual(return_code, 0, output.decode("utf-8", "replace"))
+        self.assertEqual(after, before)
 
     def test_executor_cleanup_is_idempotent_before_start(self) -> None:
         runtime = _runtime(Path("/tmp/tui-idempotent-cleanup"))

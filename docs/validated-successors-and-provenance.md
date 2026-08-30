@@ -17,7 +17,10 @@ always terminated when validation ends. A compilation-successful image that
 does not boot or speak the protocol is a failed guest build and cannot replace
 the previous successful build. This validation exists because experiment-001
 demonstrated that a valid compilation and ISO can still select an unbootable
-successor after the active Codex session has permanently ended.
+successor after the generation's development turn has permanently ended. A
+healthy same-thread session may remain idle at the immutable gate solely for an
+optional read-only exit interview, but it is closed before the successor boots
+and cannot change archive or Git provenance.
 
 Local Git provenance is a derived human-readable projection of completed
 archives. Each run uses the run-directory basename as its tag namespace:

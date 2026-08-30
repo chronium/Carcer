@@ -18,6 +18,7 @@ from .codex_generation_worker import (
     RESUME_PROMPT,
     CodexGenerationResult,
     CodexGenerationSession,
+    CodexGenerationSessionMode,
     CodexGenerationWorkerError,
 )
 from .generation_git import GenerationGitRecorder, GenerationGitRecorderError
@@ -65,6 +66,7 @@ class OperatorConsole:
         self._turn_thread: threading.Thread | None = None
         self._session_generation: int | None = None
         self._agent_unavailable_generation: int | None = None
+        self._interview_open = False
         self._resume_agent_after_pause = False
         self._agent_lock = threading.RLock()
         self._output_lock = threading.Lock()
@@ -77,7 +79,7 @@ class OperatorConsole:
         try:
             while True:
                 try:
-                    if self.execute_line(self._readline("codexos> ")):
+                    if self.execute_line(self._readline(self.input_prompt)):
                         return
                 except EOFError:
                     self._print("Input closed; stopping CodexOS run.")
@@ -104,11 +106,23 @@ class OperatorConsole:
 
     def execute_line(self, line: str) -> bool:
         """Execute one command using the console's authoritative semantics."""
-        words = line.strip().split()
+        command_line = line.rstrip("\r\n")
+        words = command_line.strip().split()
         if not words:
             return False
         try:
-            return self._execute(words)
+            with self._agent_lock:
+                interview_open = self._interview_open
+            if interview_open:
+                if words == ["end"] or words == ["end-interview"]:
+                    self._end_exit_interview()
+                elif words == ["quit"]:
+                    return self._quit()
+                else:
+                    question = _question_from_command(command_line, words)
+                    self._ask_exit_interview(question or command_line)
+                return False
+            return self._execute(words, command_line)
         except (OSError, RuntimeError, ValueError) as error:
             self._print(f"Error: {error}")
             return False
@@ -133,7 +147,30 @@ class OperatorConsole:
                 return "idle"
             return "stopped"
 
-    def _execute(self, words: list[str]) -> bool:
+    @property
+    def input_prompt(self) -> str:
+        with self._agent_lock:
+            return "interview> " if self._interview_open else "codexos> "
+
+    @property
+    def exit_interview_state(self) -> str:
+        with self._agent_lock:
+            session = self._session
+            turn_active = self._turn_thread is not None
+            interview_open = self._interview_open
+            generation = self._session_generation
+        if session is None or generation != self._runtime.generation_number:
+            return "unavailable"
+        if interview_open and turn_active:
+            return "answering"
+        if (
+            session.mode is CodexGenerationSessionMode.RETAINED_AT_GATE
+            and session.healthy
+        ):
+            return "idle" if interview_open else "available"
+        return "unavailable"
+
+    def _execute(self, words: list[str], command_line: str | None = None) -> bool:
         command = words[0]
         if command == "help":
             if len(words) != 1:
@@ -183,6 +220,22 @@ class OperatorConsole:
                     self._record_operator("agent", "failed")
                     raise
                 self._record_operator("agent", "success")
+        elif command == "interview":
+            if len(words) != 1:
+                self._print("Usage: interview")
+            else:
+                self._begin_exit_interview()
+        elif command == "ask":
+            question = _question_from_command(command_line, words)
+            if question is None:
+                self._print("Usage: ask <text>")
+            else:
+                self._ask_exit_interview(question)
+        elif command == "end-interview":
+            if len(words) != 1:
+                self._print("Usage: end-interview")
+            else:
+                self._end_exit_interview()
         elif command == "git-record":
             if len(words) != 1:
                 self._print("Usage: git-record")
@@ -231,6 +284,9 @@ class OperatorConsole:
         self._print("feature-approve N  approve a pending request at the gate")
         self._print("feature-deny N     deny a pending request at the gate")
         self._print("agent       start or continue the generation's Codex session")
+        self._print("interview   enter a retained post-generation exit interview")
+        self._print("ask TEXT    ask one retrospective exit-interview question")
+        self._print("end-interview  end the interview and close retained Sol")
         self._print("git-record  reconcile local generation Git provenance")
         self._print("pause       pause the running generation")
         self._print("resume      resume the paused generation")
@@ -280,6 +336,7 @@ class OperatorConsole:
         else:
             turn_state = "none"
         self._print(f"Codex turn: {turn_state}")
+        self._print(f"Exit interview: {self.exit_interview_state}")
         handoff = self._runtime.previous_handoff
         if handoff is None:
             self._print("Previous handoff: none")
@@ -411,7 +468,7 @@ class OperatorConsole:
 
     def _continue_generation(self) -> None:
         try:
-            self._require_agent_stopped_at_gate()
+            self._dispose_agent_at_gate()
             if self._runtime.pending_generation_finish is None:
                 self._runtime.continue_generation()
             else:
@@ -428,7 +485,7 @@ class OperatorConsole:
         self._record_operator("continue", "success")
 
     def _rollback(self, parent: int) -> None:
-        self._require_agent_stopped_at_gate()
+        self._require_no_active_agent_turn_at_gate()
         generation = (self._runtime.generation_number or 0) + 1
         if not self._confirm(
             f"Fork generation {generation} from generation {parent}'s "
@@ -441,6 +498,7 @@ class OperatorConsole:
             )
             return
         try:
+            self._dispose_agent_at_gate()
             self._runtime.fork_from_generation(parent)
             self._clear_agent_generation()
             self._print(
@@ -537,7 +595,10 @@ class OperatorConsole:
                 self._turn_thread = None
 
         if error is not None:
-            if session.healthy:
+            if (
+                session.healthy
+                and self._runtime.state is not RuntimeState.AWAITING_NEXT_GENERATION
+            ):
                 self._print(f"Codex turn failed: {error}")
             else:
                 generation = self._runtime.generation_number
@@ -545,29 +606,152 @@ class OperatorConsole:
                 with self._agent_lock:
                     if self._session is session:
                         self._session = None
+                        self._session_generation = None
                         self._agent_unavailable_generation = generation
                 self._print(f"Codex session failed: {error}")
             return
 
         if result is None:
             return
-        if result.turn_status == "interrupted":
-            self._print("Codex turn interrupted.")
-        elif self._runtime.state is RuntimeState.AWAITING_NEXT_GENERATION:
-            session.close()
-            with self._agent_lock:
-                if self._session is session:
-                    self._session = None
+        if self._runtime.state is RuntimeState.AWAITING_NEXT_GENERATION:
+            if result.turn_status == "completed":
+                try:
+                    session.retain_for_exit_interview()
+                except (RuntimeError, CodexGenerationWorkerError):
+                    session.close()
+                    with self._agent_lock:
+                        if self._session is session:
+                            self._session = None
+                            self._session_generation = None
+            else:
+                session.close()
+                with self._agent_lock:
+                    if self._session is session:
+                        self._session = None
+                        self._session_generation = None
             self._reconcile_git()
             self._print(
                 f"Generation {self._runtime.generation_number} completed cooperatively."
             )
             self._print_gate()
+        elif result.turn_status == "interrupted":
+            self._print("Codex turn interrupted.")
         else:
             self._print(result.summary)
         if result.final_message:
             self._print("Codex:")
             self._print_indented(result.final_message)
+
+    def _begin_exit_interview(self) -> None:
+        if (
+            self._runtime.state is not RuntimeState.AWAITING_NEXT_GENERATION
+            or self._runtime.pending_generation_finish is None
+        ):
+            raise RuntimeError(
+                "exit interview is available only after cooperative completion"
+            )
+        with self._agent_lock:
+            session = self._session
+            generation = self._session_generation
+            turn = self._turn_thread
+            if self._interview_open:
+                raise RuntimeError("exit interview is already active")
+        if (
+            session is None
+            or generation != self._runtime.generation_number
+            or not session.exit_interview_available
+        ):
+            self._print(
+                "No live generation session is available for an exit interview."
+            )
+            self._print(
+                "Only generations completed after exit-interview support was active "
+                "can retain their original Sol thread."
+            )
+            return
+        if turn is not None:
+            raise RuntimeError("Codex turn is already active")
+        session.begin_exit_interview()
+        with self._agent_lock:
+            if self._session is not session:
+                session.close()
+                raise RuntimeError("retained Codex session changed unexpectedly")
+            self._interview_open = True
+        self._print(
+            f"Exit interview started for generation {self._runtime.generation_number}."
+        )
+        self._print(
+            "The generation, selected successor, and handoff are frozen. "
+            "Interview turns are read-only."
+        )
+
+    def _ask_exit_interview(self, question: str) -> None:
+        with self._agent_lock:
+            session = self._session
+            if not self._interview_open:
+                raise RuntimeError("exit interview is not active")
+            if self._turn_thread is not None:
+                raise RuntimeError("exit interview turn is already active")
+            if session is None or not session.exit_interview_available:
+                raise RuntimeError("exit interview session is unavailable")
+            turn = threading.Thread(
+                target=self._run_exit_interview_turn,
+                args=(session, question),
+                name="codexos-exit-interview-turn",
+                daemon=True,
+            )
+            self._turn_thread = turn
+            turn.start()
+        self._print("Exit interview question sent.")
+
+    def _run_exit_interview_turn(
+        self,
+        session: CodexGenerationSession,
+        question: str,
+    ) -> None:
+        result: CodexGenerationResult | None = None
+        error: Exception | None = None
+        try:
+            result = session.run_exit_interview_turn(question)
+        except (OSError, RuntimeError, ValueError, CodexGenerationWorkerError) as caught:
+            error = caught
+        finally:
+            with self._agent_lock:
+                self._turn_thread = None
+
+        if error is not None:
+            with self._agent_lock:
+                retained = self._session is session
+            if not retained:
+                return
+            if session.healthy:
+                self._print(f"Exit interview turn failed: {error}")
+            else:
+                generation = self._runtime.generation_number
+                session.close()
+                with self._agent_lock:
+                    if self._session is session:
+                        self._session = None
+                        self._session_generation = None
+                        self._interview_open = False
+                        self._agent_unavailable_generation = generation
+                self._print(f"Exit interview session failed: {error}")
+            return
+
+        if result is None:
+            return
+        if result.turn_status == "interrupted":
+            self._print("Exit interview turn interrupted.")
+        elif self._output_handler is None and result.final_message:
+            self._print("Sol:")
+            self._print_indented(result.final_message)
+
+    def _end_exit_interview(self) -> None:
+        with self._agent_lock:
+            if not self._interview_open:
+                raise RuntimeError("exit interview is not active")
+        self._terminate_agent_session(interrupt=True, end_interview=True)
+        self._print("Exit interview ended.")
 
     def _pause(self) -> None:
         try:
@@ -613,7 +797,12 @@ class OperatorConsole:
             raise
         self._record_operator("resume", "success")
 
-    def _terminate_agent_session(self, *, interrupt: bool) -> None:
+    def _terminate_agent_session(
+        self,
+        *,
+        interrupt: bool,
+        end_interview: bool = False,
+    ) -> None:
         with self._agent_lock:
             session = self._session
             turn = self._turn_thread
@@ -624,20 +813,41 @@ class OperatorConsole:
                 session.interrupt_turn(self._interrupt_timeout_seconds)
             except (OSError, RuntimeError, CodexGenerationWorkerError):
                 pass
-        session.close()
+        if end_interview:
+            try:
+                session.end_exit_interview()
+            except RuntimeError:
+                session.close()
+        else:
+            session.close()
         if turn is not None and turn is not threading.current_thread():
             turn.join(timeout=self._interrupt_timeout_seconds)
         with self._agent_lock:
             if self._session is session:
                 self._session = None
             self._turn_thread = None
+            self._session_generation = None
+            self._interview_open = False
 
-    def _require_agent_stopped_at_gate(self) -> None:
+    def _require_no_active_agent_turn_at_gate(self) -> None:
         with self._agent_lock:
-            if self._turn_thread is not None or self._session is not None:
+            if self._turn_thread is not None:
                 raise RuntimeError(
-                    "previous generation Codex session is still active"
+                    "previous generation Codex turn is still active"
                 )
+
+    def _dispose_agent_at_gate(self) -> None:
+        self._require_no_active_agent_turn_at_gate()
+        with self._agent_lock:
+            session = self._session
+        if session is not None and session.mode not in {
+            CodexGenerationSessionMode.RETAINED_AT_GATE,
+            CodexGenerationSessionMode.CLOSED,
+        }:
+            raise RuntimeError(
+                "previous generation Codex session is not idle at the gate"
+            )
+        self._terminate_agent_session(interrupt=False)
 
     def _clear_agent_generation(self) -> None:
         with self._agent_lock:
@@ -645,6 +855,7 @@ class OperatorConsole:
             self._turn_thread = None
             self._session_generation = None
             self._agent_unavailable_generation = None
+            self._interview_open = False
         self._resume_agent_after_pause = False
 
     def _record_git(self) -> None:
@@ -710,6 +921,8 @@ class OperatorConsole:
             self._print()
             self._print("Use:")
             self._print("  continue")
+            if self.exit_interview_state == "available":
+                self._print("  interview")
         else:
             self._print(f"Generation {generation} aborted.")
             self._print()
@@ -809,6 +1022,19 @@ def _escape_terminal_text(
         else:
             escaped.append(character)
     return "".join(escaped)
+
+
+def _question_from_command(
+    command_line: str | None,
+    words: list[str],
+) -> str | None:
+    if command_line is None or not words or words[0] != "ask":
+        return None
+    stripped = command_line.lstrip()
+    if len(stripped) == 3 or not stripped[3].isspace():
+        return None
+    question = stripped[3:].lstrip()
+    return question if question else None
 
 
 def main(

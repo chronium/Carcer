@@ -14,6 +14,7 @@ from harness.operator_tui_model import (
     FeatureRequestPresentation,
     FeatureRequestRecordingState,
     FeatureRequestInitialStatus,
+    InterviewQuestionPresentation,
     LifecyclePresentation,
     OperatorActivityModel,
     OperatorPresentation,
@@ -43,6 +44,26 @@ def _event(
 
 
 class OperatorActivityModelTests(unittest.TestCase):
+    def test_exit_interview_question_is_distinct_and_bounded(self) -> None:
+        model = OperatorActivityModel(display_bytes=32)
+
+        model.consume(
+            _event(
+                1,
+                CodexActivityKind.EXIT_INTERVIEW_QUESTION,
+                {"text": "Why this choice?\x1b[2J"},
+                role=CodexActivityRole.HARNESS,
+            )
+        )
+
+        self.assertEqual(len(model.entries), 1)
+        entry = model.entries[0]
+        self.assertEqual(entry.kind, ActivityDisplayKind.INTERVIEW_QUESTION)
+        self.assertEqual(
+            entry.presentation,
+            InterviewQuestionPresentation("Why this choice?\\x1b[2J"),
+        )
+
     def test_messages_keep_role_finality_and_stable_key(self) -> None:
         model = OperatorActivityModel()
         model.consume(_event(1, CodexActivityKind.AGENT_TEXT_DELTA, {"text": "Inspect "}))
