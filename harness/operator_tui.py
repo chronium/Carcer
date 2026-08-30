@@ -44,22 +44,45 @@ class _CommandExecutor:
             name="codexos-operator-command",
             daemon=True,
         )
+        self._lifecycle_lock = threading.Lock()
         self._started = False
+        self._stop_requested = False
 
     def start(self) -> None:
-        self._started = True
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._started:
+                return
+            if self._stop_requested:
+                raise RuntimeError("operator command executor is stopping")
+            self._thread.start()
+            self._started = True
 
     def submit(self, command: str) -> None:
         self._commands.put_nowait(command)
 
     def stop(self) -> None:
-        self._commands.put_nowait(None)
         self._app.cancel_confirmation()
+        with self._lifecycle_lock:
+            if self._stop_requested:
+                return
+            self._stop_requested = True
+            self._commands.put_nowait(None)
 
     def join(self, timeout: float = 10.0) -> None:
-        if self._started:
-            self._thread.join(timeout)
+        with self._lifecycle_lock:
+            started = self._started
+        if not started:
+            return
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise RuntimeError(
+                "operator command executor did not stop within "
+                f"{timeout:.1f} seconds"
+            )
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
 
     def _run(self) -> None:
         try:
@@ -166,7 +189,7 @@ class OperatorTui(App[None]):
         self._model = OperatorActivityModel()
         self._follow = ActivityFollowState()
         self._busy = True
-        self._closing = False
+        self._frontend_closing = False
         self._confirmation: _Confirmation | None = None
         self._confirmation_lock = threading.Lock()
         self._console = OperatorConsole(
@@ -192,7 +215,7 @@ class OperatorTui(App[None]):
 
     @property
     def closing(self) -> bool:
-        return self._closing
+        return self._frontend_closing
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-header")
@@ -210,13 +233,11 @@ class OperatorTui(App[None]):
         self._executor.start()
 
     def on_unmount(self) -> None:
-        self._closing = True
-        self.cancel_confirmation()
+        self._frontend_closing = True
         self._executor.stop()
-        self._executor.join()
 
     def _receive_operator_output(self, text: str) -> None:
-        if self._closing:
+        if self._frontend_closing:
             return
         self._operator_output.put(text)
 
@@ -227,7 +248,7 @@ class OperatorTui(App[None]):
     def _request_confirmation(self, prompt: str) -> bool:
         confirmation = _Confirmation(prompt, threading.Event())
         with self._confirmation_lock:
-            if self._closing:
+            if self._frontend_closing:
                 return False
             if self._confirmation is not None:
                 return False
@@ -259,7 +280,7 @@ class OperatorTui(App[None]):
 
     def command_finished(self, should_exit: bool) -> None:
         if should_exit:
-            self._closing = True
+            self._frontend_closing = True
             self.exit()
             return
         self._busy = False
@@ -275,7 +296,7 @@ class OperatorTui(App[None]):
             "Operator console failed: " + safe_display_text(error)
         )
         self._activity_changed(1)
-        self._closing = True
+        self._frontend_closing = True
         self.exit()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -452,7 +473,8 @@ def run_operator_tui(
         if app is None:
             runtime.stop()
         else:
-            app.cancel_confirmation()
-            app._executor.stop()
-            app._executor.join()
-            app.operator_console.shutdown()
+            try:
+                app._executor.stop()
+                app._executor.join()
+            finally:
+                app.operator_console.shutdown()
