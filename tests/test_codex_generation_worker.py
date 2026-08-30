@@ -115,8 +115,9 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             session.close()
             observability.close()
 
-    def test_authoritative_turn_usage_updates_token_metrics(self) -> None:
+    def test_authoritative_breakdown_ignores_unused_total_tokens(self) -> None:
         usage = _token_usage(123, 10, 45, 20)
+        usage["totalTokens"] = "irrelevant upstream aggregate"
         with tempfile.TemporaryDirectory() as temporary, _fake_codex(
             {"token_usage": usage}
         ) as fake:

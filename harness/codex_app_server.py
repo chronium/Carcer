@@ -708,7 +708,6 @@ def token_usage_delta_from_notification(
         "cachedInputTokens": total.get("cachedInputTokens"),
         "outputTokens": total.get("outputTokens"),
         "reasoningOutputTokens": total.get("reasoningOutputTokens"),
-        "totalTokens": total.get("totalTokens"),
     }
     if any(
         type(value) is not int or value < 0
