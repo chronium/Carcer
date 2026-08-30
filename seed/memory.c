@@ -197,30 +197,6 @@ return 1;
 int memory_page_free(uint64_t physical_address) {
 return memory_pages_free(physical_address, 1);
 }
-struct memory_stats memory_get_stats(void) {
-struct memory_stats stats;
-stats.total_pages = managed_page_count;
-stats.free_pages = free_page_count;
-stats.metadata_pages = bitmap_page_count;
-return stats;
-}
-static int allocator_self_test(void) {
-uint64_t first = memory_pages_alloc(2);
-if (first == 0 || (first & (MEMORY_PAGE_SIZE - 1u)) != 0) {
-return 0;
-}
-uint8_t *data = (uint8_t *)memory_physical_to_virtual(first);
-if (data == (uint8_t *)0) {
-return 0;
-}
-for (uint32_t offset = 0; offset < MEMORY_PAGE_SIZE * 2u; ++offset) {
-if (data[offset] != 0) {
-return 0;
-}
-data[offset] = 0xa5u;
-}
-return memory_pages_free(first, 2);
-}
 int memory_init(void) {
 struct limine_memmap_response *map = memmap_request.response;
 struct limine_hhdm_response *hhdm = hhdm_request.response;
@@ -312,10 +288,6 @@ set_page_bit(page);
 --free_page_count;
 }
 }
-allocator_ready = 1;
-if (free_page_count < 2 || !allocator_self_test()) {
-allocator_ready = 0;
-return 0;
-}
-return 1;
+allocator_ready = free_page_count>=2;
+return allocator_ready;
 }

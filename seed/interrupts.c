@@ -42,7 +42,7 @@ uint16_t reserved3;
 uint16_t io_map_base;
 } __attribute__((packed));
 static struct idt_entry idt[IDT_ENTRY_COUNT];
-static uint64_t gdt[5];
+static uint64_t gdt[7];
 static struct task_state_segment tss;
 static uint8_t interrupt_stack[INTERRUPT_STACK_SIZE] __attribute__((aligned(16)));
 volatile uint64_t kernel_timer_ticks;
@@ -116,12 +116,14 @@ tss.io_map_base = sizeof(tss);
 gdt[0] = 0;
 gdt[1] = 0x00af9a000000ffffull;
 gdt[2] = 0x00cf92000000ffffull;
-gdt[3] = (tss_limit & 0xffffu) |
+gdt[3] = 0x00cff2000000ffffull;
+gdt[4] = 0x00affa000000ffffull;
+gdt[5] = (tss_limit & 0xffffu) |
 ((tss_base & 0xffffffu) << 16) |
 (0x89ull << 40) |
 (((tss_limit >> 16) & 0x0fu) << 48) |
 (((tss_base >> 24) & 0xffu) << 56);
-gdt[4] = tss_base >> 32;
+gdt[6] = tss_base >> 32;
 struct descriptor_table_pointer descriptor = {
 (uint16_t)(sizeof(gdt) - 1u),
 (uint64_t)(uintptr_t)gdt
@@ -137,7 +139,7 @@ __asm__ volatile(
 "movw %%ax, %%ds\n"
 "movw %%ax, %%es\n"
 "movw %%ax, %%ss\n"
-"movw $0x18, %%ax\n"
+"movw $0x28, %%ax\n"
 "ltr %%ax\n"
 : : "m"(descriptor) : "rax", "memory"
 );

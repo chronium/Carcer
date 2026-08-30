@@ -8,6 +8,7 @@ uint64_t rip,cs,rflags,rsp,ss;
 };
 int tasks_init(void);
 int task_create(void (*entry)(void));
+int task_create_user(const uint8_t *image,uint32_t size,uint32_t entry_offset);
 int task_destroy(uint32_t identifier);
 struct task_context *tasks_schedule(struct task_context *frame);
 #endif
