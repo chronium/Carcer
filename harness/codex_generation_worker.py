@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from .codex_activity import (
@@ -56,6 +57,7 @@ RESUME_PROMPT = (
 )
 
 _PERMISSION_PROFILE = "codexos-implementor"
+_INTERVIEW_PERMISSION_PROFILE = "codexos-interview"
 _MAX_REVIEW_REQUEST_BYTES = 8 * 1024
 _REVIEW_FOCUSES = {
     "general",
@@ -91,6 +93,13 @@ _REVIEW_TOOL_DESCRIPTION = (
 
 class CodexGenerationWorkerError(RuntimeError):
     """The concrete Codex app-server generation worker failed."""
+
+
+class CodexGenerationSessionMode(StrEnum):
+    GENERATION = "generation"
+    RETAINED_AT_GATE = "retained_at_gate"
+    INTERVIEW_TURN = "interview_turn"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +180,9 @@ class CodexGenerationSession:
         self._token_usage_total = CumulativeTokenUsage()
         self._last_agent_message: str | None = None
         self._active_reviewer: CodexReviewWorker | None = None
+        self._mode = CodexGenerationSessionMode.GENERATION
+        self._exit_interview_started = False
+        self._interview_turn_number = 0
 
     @property
     def active_turn(self) -> bool:
@@ -180,6 +192,19 @@ class CodexGenerationSession:
     @property
     def healthy(self) -> bool:
         return self._healthy
+
+    @property
+    def mode(self) -> CodexGenerationSessionMode:
+        with self._lock:
+            return self._mode
+
+    @property
+    def exit_interview_available(self) -> bool:
+        with self._lock:
+            return (
+                self._healthy
+                and self._mode is CodexGenerationSessionMode.RETAINED_AT_GATE
+            )
 
     @property
     def process_pid(self) -> int | None:
@@ -267,7 +292,83 @@ class CodexGenerationSession:
             raise RuntimeError("initial Codex turn has not started")
         return self._run_turn(prompt)
 
-    def _run_turn(self, prompt: str) -> CodexGenerationResult:
+    def retain_for_exit_interview(self) -> None:
+        with self._lock:
+            if not self._healthy or not self._started:
+                raise RuntimeError("Codex generation session is unusable")
+            if self._mode is not CodexGenerationSessionMode.GENERATION:
+                raise RuntimeError("Codex session is not completing a generation")
+            if self._turn_id is not None or self._active_tool_calls:
+                raise RuntimeError("Codex generation turn is still active")
+            if (
+                self._runtime.state is not RuntimeState.AWAITING_NEXT_GENERATION
+                or self._runtime.pending_generation_finish is None
+                or self._runtime.generation_number != self._generation_number
+            ):
+                raise RuntimeError("completed generation is not frozen at its gate")
+            self._mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+
+    def begin_exit_interview(self) -> None:
+        with self._lock:
+            if not self.exit_interview_available:
+                raise RuntimeError("no retained Codex session is available")
+            if self._exit_interview_started:
+                raise RuntimeError("exit interview is already active")
+            self._exit_interview_started = True
+        self._record(
+            "exit_interview_started",
+            self._serving_provenance(),
+        )
+        self._publish_activity(
+            CodexActivityRole.HARNESS,
+            CodexActivityKind.EXIT_INTERVIEW_STARTED,
+            {},
+            thread_id=self._thread_id,
+        )
+
+    def run_exit_interview_turn(self, question: str) -> CodexGenerationResult:
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("exit interview question must not be empty")
+        with self._lock:
+            if not self._exit_interview_started:
+                raise RuntimeError("exit interview has not been started")
+            if not self.exit_interview_available:
+                raise RuntimeError("exit interview session is unavailable")
+            self._mode = CodexGenerationSessionMode.INTERVIEW_TURN
+            self._interview_turn_number += 1
+            interview_turn_number = self._interview_turn_number
+        try:
+            return self._run_turn(
+                _exit_interview_prompt(question),
+                interview=True,
+                interview_question=question,
+                interview_turn_number=interview_turn_number,
+            )
+        finally:
+            with self._lock:
+                if (
+                    self._mode is CodexGenerationSessionMode.INTERVIEW_TURN
+                    and self._healthy
+                ):
+                    self._mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+
+    def end_exit_interview(self) -> None:
+        with self._lock:
+            if not self._exit_interview_started:
+                raise RuntimeError("exit interview is not active")
+            if self._turn_id is not None:
+                raise RuntimeError("exit interview turn is still active")
+        self._record_exit_interview_ended("ended")
+        self.close()
+
+    def _run_turn(
+        self,
+        prompt: str,
+        *,
+        interview: bool = False,
+        interview_question: str | None = None,
+        interview_turn_number: int | None = None,
+    ) -> CodexGenerationResult:
         self.start()
         server = self._server
         thread_id = self._thread_id
@@ -277,9 +378,28 @@ class CodexGenerationSession:
             raise CodexGenerationWorkerError(
                 "Codex generation session is unusable"
             )
-        if self._runtime.state is not RuntimeState.RUNNING:
-            raise RuntimeError("CodexOS generation is not running")
         with self._lock:
+            expected_mode = (
+                CodexGenerationSessionMode.INTERVIEW_TURN
+                if interview
+                else CodexGenerationSessionMode.GENERATION
+            )
+            if self._mode is not expected_mode:
+                raise RuntimeError(
+                    "ordinary Codex generation turns are unavailable after finish"
+                    if not interview
+                    else "Codex session is not in an interview turn"
+                )
+            if interview:
+                if (
+                    self._runtime.state
+                    is not RuntimeState.AWAITING_NEXT_GENERATION
+                    or self._runtime.pending_generation_finish is None
+                    or self._runtime.generation_number != self._generation_number
+                ):
+                    raise RuntimeError("completed generation is not frozen at its gate")
+            elif self._runtime.state is not RuntimeState.RUNNING:
+                raise RuntimeError("CodexOS generation is not running")
             if self._turn_id is not None:
                 raise RuntimeError("Codex implementor turn is already active")
             if self._active_tool_calls:
@@ -297,7 +417,12 @@ class CodexGenerationSession:
                     effort=self._reasoning_effort,
                     reasoning_summary=self._reasoning_summary,
                     service_tier=self._service_tier,
-                    permission_profile=_PERMISSION_PROFILE,
+                    permission_profile=(
+                        _INTERVIEW_PERMISSION_PROFILE
+                        if interview
+                        else _PERMISSION_PROFILE
+                    ),
+                    runtime_workspace_roots=[] if interview else None,
                 )
             except CodexAppServerError as error:
                 self._healthy = False
@@ -306,17 +431,30 @@ class CodexGenerationSession:
             self._turn_number += 1
             turn_number = self._turn_number
         started_at = time.monotonic()
+        provenance = self._serving_provenance()
+        if interview:
+            if interview_turn_number is None or interview_question is None:
+                raise RuntimeError("exit interview turn metadata is unavailable")
+            provenance["interview_turn_number"] = interview_turn_number
+            event_prefix = "exit_interview_turn"
+            self._publish_activity(
+                CodexActivityRole.HARNESS,
+                CodexActivityKind.EXIT_INTERVIEW_QUESTION,
+                {"text": interview_question},
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+        else:
+            provenance.update(
+                {
+                    "turn_number": turn_number,
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
+                }
+            )
+            event_prefix = "codex_turn"
         self._record(
-            "codex_turn_started",
-            {
-                "model": self._model,
-                "reasoning_effort": self._reasoning_effort,
-                "reasoning_summary": self._reasoning_summary,
-                "service_tier": self._service_tier,
-                **self._service_tier_name_data(),
-                "turn_number": turn_number,
-                "agent_contract_version": AGENT_CONTRACT_VERSION,
-            },
+            f"{event_prefix}_started",
+            provenance,
         )
         self._publish_activity(
             CodexActivityRole.IMPLEMENTOR,
@@ -329,15 +467,9 @@ class CodexGenerationSession:
             status, final_message = self._wait_for_turn(thread_id, turn_id)
             self._last_turn_status = status
             self._record(
-                f"codex_turn_{status}",
+                f"{event_prefix}_{status}",
                 {
-                    "model": self._model,
-                    "reasoning_effort": self._reasoning_effort,
-                    "reasoning_summary": self._reasoning_summary,
-                    "service_tier": self._service_tier,
-                    **self._service_tier_name_data(),
-                    "turn_number": turn_number,
-                    "agent_contract_version": AGENT_CONTRACT_VERSION,
+                    **provenance,
                     "duration_seconds": max(
                         0.0, time.monotonic() - started_at
                     ),
@@ -360,16 +492,28 @@ class CodexGenerationSession:
                 turn_status=status,
                 final_message=final_message,
                 runtime_state=self._runtime.state,
-                summary=_result_summary(status, self._runtime.state),
+                summary=(
+                    f"Exit interview turn {status}."
+                    if interview
+                    else _result_summary(status, self._runtime.state)
+                ),
             )
         except CodexAppServerError as error:
             self._healthy = False
-            self._record_turn_failure(turn_number, started_at)
+            self._record_turn_failure(
+                turn_number,
+                started_at,
+                interview_turn_number=interview_turn_number if interview else None,
+            )
             raise CodexGenerationWorkerError(str(error)) from error
         except CodexGenerationWorkerError:
             if self._last_turn_status != "failed":
                 self._healthy = False
-            self._record_turn_failure(turn_number, started_at)
+            self._record_turn_failure(
+                turn_number,
+                started_at,
+                interview_turn_number=interview_turn_number if interview else None,
+            )
             raise
         finally:
             with self._lock:
@@ -416,11 +560,15 @@ class CodexGenerationSession:
 
     def close(self) -> None:
         self.cancel_review()
-        server = self._server
-        thread_id = self._thread_id
-        self._server = None
-        self._thread_id = None
-        self._healthy = False
+        if self._exit_interview_started:
+            self._record_exit_interview_ended("closed")
+        with self._lock:
+            server = self._server
+            thread_id = self._thread_id
+            self._server = None
+            self._thread_id = None
+            self._healthy = False
+            self._mode = CodexGenerationSessionMode.CLOSED
         if server is not None:
             server.close()
         if self._started:
@@ -499,17 +647,30 @@ class CodexGenerationSession:
             final_message = _final_agent_message(turn)
             return status, final_message or self._last_agent_message
 
-    def _record_turn_failure(self, turn_number: int, started_at: float) -> None:
-        self._record(
-            "codex_turn_failed",
-            {
-                "model": self._model,
-                "reasoning_effort": self._reasoning_effort,
-                "reasoning_summary": self._reasoning_summary,
-                "service_tier": self._service_tier,
-                **self._service_tier_name_data(),
+    def _record_turn_failure(
+        self,
+        turn_number: int,
+        started_at: float,
+        *,
+        interview_turn_number: int | None = None,
+    ) -> None:
+        if interview_turn_number is None:
+            event = "codex_turn_failed"
+            provenance = {
+                **self._serving_provenance(),
                 "turn_number": turn_number,
                 "agent_contract_version": AGENT_CONTRACT_VERSION,
+            }
+        else:
+            event = "exit_interview_turn_failed"
+            provenance = {
+                **self._serving_provenance(),
+                "interview_turn_number": interview_turn_number,
+            }
+        self._record(
+            event,
+            {
+                **provenance,
                 "duration_seconds": max(0.0, time.monotonic() - started_at),
                 "result": "failed",
             },
@@ -520,6 +681,32 @@ class CodexGenerationSession:
             {"turn_number": turn_number, "status": "failed"},
             thread_id=self._thread_id,
             turn_id=self._turn_id,
+        )
+
+    def _serving_provenance(self) -> dict[str, object]:
+        return {
+            "model": self._model,
+            "reasoning_effort": self._reasoning_effort,
+            "reasoning_summary": self._reasoning_summary,
+            "service_tier": self._service_tier,
+            **self._service_tier_name_data(),
+        }
+
+    def _record_exit_interview_ended(self, result: str) -> None:
+        with self._lock:
+            if not self._exit_interview_started:
+                return
+            self._exit_interview_started = False
+            thread_id = self._thread_id
+        self._record(
+            "exit_interview_ended",
+            {**self._serving_provenance(), "result": result},
+        )
+        self._publish_activity(
+            CodexActivityRole.HARNESS,
+            CodexActivityKind.EXIT_INTERVIEW_ENDED,
+            {"result": result},
+            thread_id=thread_id,
         )
 
     def _service_tier_name_data(self) -> dict[str, object]:
@@ -598,6 +785,9 @@ class CodexGenerationSession:
             with self._lock:
                 thread_id = self._thread_id
                 turn_id = self._turn_id
+                interview_turn = (
+                    self._mode is CodexGenerationSessionMode.INTERVIEW_TURN
+                )
             if thread_id is None or turn_id is None:
                 server.reject_server_request(message)
                 return
@@ -605,10 +795,18 @@ class CodexGenerationSession:
                 self._active_tool_calls += 1
                 self._tool_calls_idle.clear()
             try:
-                response = self._dynamic_tool_response(
-                    message.get("params"),
-                    thread_id,
-                    turn_id,
+                response = (
+                    self._interview_tool_denial(
+                        message.get("params"),
+                        thread_id,
+                        turn_id,
+                    )
+                    if interview_turn
+                    else self._dynamic_tool_response(
+                        message.get("params"),
+                        thread_id,
+                        turn_id,
+                    )
                 )
                 server.write_result(message.get("id"), response)
             finally:
@@ -618,6 +816,36 @@ class CodexGenerationSession:
                         self._tool_calls_idle.set()
         else:
             server.reject_server_request(message)
+
+    def _interview_tool_denial(
+        self,
+        params: object,
+        thread_id: str,
+        turn_id: str,
+    ) -> dict[str, object]:
+        activity_data = _dynamic_tool_activity_data(params)
+        call_id = _activity_call_id(params)
+        self._publish_activity(
+            CodexActivityRole.IMPLEMENTOR,
+            CodexActivityKind.TOOL_STARTED,
+            activity_data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=call_id,
+        )
+        error = "dynamic tools are unavailable during a read-only exit interview"
+        self._publish_activity(
+            CodexActivityRole.IMPLEMENTOR,
+            CodexActivityKind.TOOL_FAILED,
+            {**activity_data, "success": False, "error": error},
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=call_id,
+        )
+        return {
+            "contentItems": [{"type": "inputText", "text": error}],
+            "success": False,
+        }
 
     def _dynamic_tool_response(
         self,
@@ -1005,6 +1233,18 @@ web_search = false
 
 [permissions.codexos-implementor.network]
 enabled = false
+
+[permissions.codexos-interview.filesystem]
+":root" = "deny"
+":minimal" = "read"
+":tmpdir" = "deny"
+":slash_tmp" = "deny"
+
+[permissions.codexos-interview.filesystem.":workspace_roots"]
+"." = "read"
+
+[permissions.codexos-interview.network]
+enabled = false
 """
 
 
@@ -1105,6 +1345,19 @@ def _review_dynamic_function() -> dict[str, object]:
                 "default": "general",
             },
         },
+    )
+
+
+def _exit_interview_prompt(question: str) -> str:
+    return (
+        "The CodexOS generation has already completed and its exact successor "
+        "and handoff are frozen.\n\n"
+        "You are now in a read-only exit interview. Answer the human operator's "
+        "retrospective question about the generation you just performed.\n\n"
+        "You cannot modify the generation, successor, handoff, feature requests, "
+        "or future generations. Do not attempt development work.\n\n"
+        "Operator question:\n"
+        + question
     )
 
 

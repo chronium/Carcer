@@ -348,22 +348,26 @@ class CodexAppServer:
         reasoning_summary: str,
         service_tier: str,
         permission_profile: str,
+        runtime_workspace_roots: list[str] | None = None,
     ) -> str:
+        params: dict[str, object] = {
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "effort": effort,
+            "environments": [],
+            "input": [{"type": "text", "text": prompt}],
+            "model": model,
+            "permissions": permission_profile,
+            "serviceTier": service_tier,
+            "summary": reasoning_summary,
+            "threadId": thread_id,
+        }
+        if runtime_workspace_roots is not None:
+            params["runtimeWorkspaceRoots"] = runtime_workspace_roots
         response = object_value(
             self.request(
                 "turn/start",
-                {
-                    "approvalPolicy": "never",
-                    "approvalsReviewer": "user",
-                    "effort": effort,
-                    "environments": [],
-                    "input": [{"type": "text", "text": prompt}],
-                    "model": model,
-                    "permissions": permission_profile,
-                    "serviceTier": service_tier,
-                    "summary": reasoning_summary,
-                    "threadId": thread_id,
-                },
+                params,
             ),
             "turn/start response",
         )

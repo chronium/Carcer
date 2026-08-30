@@ -57,6 +57,37 @@ service-tier ID, and its catalog display name, when supplied, while implementor
 events also record agent contract version 3. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
 
+## Post-generation exit interviews
+
+After a cooperative `finish_generation`, a healthy implementor session may be
+retained ephemerally at the immutable generation gate. The operator can then
+start an exit interview and ask retrospective questions using the exact Sol
+thread that performed the generation. The generation archive, selected
+successor, source snapshot, and handoff are already frozen; an interview is not
+operator steering and cannot revise any of them.
+
+Interview turns use a read-only, no-network permission profile and an empty set
+of runtime workspace roots. Codex 0.150.1 does not support removing a thread's
+dynamic tool declarations on a later turn, so the trusted bridge also rejects
+every dynamic tool request during an interview before it can reach guest,
+build, feature-request, or reviewer services. Questions are wrapped only with a
+neutral retrospective/read-only boundary. Serving settings remain Sol, high
+reasoning, `summary=auto`, and Fast/`priority`.
+
+The plain console commands are `interview`, `ask <text>`, and
+`end-interview`; while interview mode is open, plain question text is also
+accepted at the `interview>` prompt and `end` closes it. Question and answer
+text is ephemeral console/live-activity presentation. Structured observability
+records low-cardinality interview lifecycle and serving provenance, not
+conversation content.
+
+The retained session is closed before `continue`, rollback, quit, or harness
+shutdown. The successor still starts in a new app-server process and thread
+using only the source, handoff, and trusted run state frozen before the
+interview. Generations completed before this support did not retain their
+ephemeral app-server thread and cannot receive a true same-thread interview;
+the harness does not create a reconstruction session in their place.
+
 ## Adopting harness updates at a generation gate
 
 A stopped harness may explicitly reopen an existing run only from a validated,

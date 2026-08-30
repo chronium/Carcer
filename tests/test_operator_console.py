@@ -24,6 +24,7 @@ from harness import (
     ToolResult,
 )
 from harness.operator_console import OperatorConsole, main
+from harness.codex_generation_worker import CodexGenerationSessionMode
 from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _fake_codex,
@@ -36,6 +37,82 @@ _TEST_HARDWARE = TEST_HARDWARE_PROFILE.manifest(
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_historical_gate_does_not_reconstruct_an_interview_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run", RuntimeState.AWAITING_NEXT_GENERATION
+            )
+            runtime.pending_generation_finish = PendingGenerationFinish(
+                "historical handoff",
+                b"snapshot",
+                Path(temporary) / "kernel",
+                Path(temporary) / "iso",
+            )
+            output = io.StringIO()
+            console = OperatorConsole(runtime, io.StringIO(), output)
+
+            console.execute_line("interview")
+
+            self.assertIsNone(console._session)
+            self.assertIn("No live generation session", output.getvalue())
+            self.assertIn("original Sol thread", output.getvalue())
+
+    def test_gate_transitions_close_retained_session_before_runtime_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run", RuntimeState.AWAITING_NEXT_GENERATION
+            )
+            runtime.pending_generation_finish = PendingGenerationFinish(
+                "handoff", b"snapshot", Path(temporary) / "kernel", Path(temporary) / "iso"
+            )
+            calls: list[str] = []
+            session = Mock()
+            session.mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+            session.close.side_effect = lambda: calls.append("close")
+            runtime.continue_generation.side_effect = lambda: calls.append("continue")
+            console = OperatorConsole(runtime, io.StringIO(), io.StringIO())
+            console._session = session
+            console._session_generation = 0
+
+            console._continue_generation()
+
+            self.assertEqual(calls, ["close", "continue"])
+            self.assertIsNone(console._session)
+
+            rollback_session = Mock()
+            rollback_session.mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+            rollback_session.close.side_effect = lambda: calls.append("rollback-close")
+            runtime.fork_from_generation.side_effect = lambda parent: calls.append(
+                f"fork-{parent}"
+            )
+            console._session = rollback_session
+            console._session_generation = 0
+            console._confirmation_handler = lambda prompt: True
+
+            console._rollback(0)
+
+            self.assertEqual(calls[-2:], ["rollback-close", "fork-0"])
+            self.assertIsNone(console._session)
+
+    def test_shutdown_closes_idle_retained_interview_session_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run", RuntimeState.AWAITING_NEXT_GENERATION
+            )
+            session = Mock()
+            session.mode = CodexGenerationSessionMode.RETAINED_AT_GATE
+            console = OperatorConsole(runtime, io.StringIO(), io.StringIO())
+            console._session = session
+            console._session_generation = 0
+
+            console.shutdown()
+            console.shutdown()
+
+            session.close.assert_called_once_with()
+            runtime.stop.assert_called_once_with()
+
     def test_feature_request_terminal_rendering_escapes_untrusted_controls(
         self,
     ) -> None:
@@ -501,15 +578,21 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 self.assertTrue(runtime.stop.called)
                 _assert_process_dead(self, fake.record()["pid"])
 
-    def test_cooperative_finish_closes_session_and_next_agent_is_fresh(
+    def test_cooperative_finish_retains_interview_then_next_agent_is_fresh(
         self,
     ) -> None:
+        marker = "EXIT-INTERVIEW-SECRET-91f-console"
         first_scenario = {
-            "tool_calls": [
+            "turns": [
                 {
-                    "tool": "finish_generation",
-                    "arguments": {"handoff": "Fresh successor context."},
-                }
+                    "tool_calls": [
+                        {
+                            "tool": "finish_generation",
+                            "arguments": {"handoff": "Fresh successor context."},
+                        }
+                    ]
+                },
+                {"final_message": "Retrospective answer."},
             ]
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -542,13 +625,20 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             runtime.continue_generation.side_effect = continue_generation
             holder: dict[str, OperatorConsole] = {}
 
-            def prepare_successor() -> None:
+            def wait_for_retained_session() -> None:
                 console = holder["console"]
                 _wait_for(
                     lambda: runtime.state
                     is RuntimeState.AWAITING_NEXT_GENERATION
-                    and console._session is None
+                    and console.exit_interview_state == "available"
                 )
+
+            def wait_for_interview_turn() -> None:
+                _wait_for(lambda: holder["console"]._turn_thread is None)
+
+            def prepare_successor() -> None:
+                console = holder["console"]
+                self.assertIsNone(console._session)
                 fake.scenario_path.write_text(
                     json.dumps({"final_message": "Fresh generation turn."}),
                     encoding="utf-8",
@@ -564,6 +654,9 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 _ObservedInput(
                     [
                         ("agent\n", None),
+                        ("interview\n", wait_for_retained_session),
+                        (marker + "\n", None),
+                        ("end\n", wait_for_interview_turn),
                         ("continue\n", prepare_successor),
                         ("agent\n", None),
                         ("quit\n", wait_successor_turn),
@@ -580,10 +673,18 @@ class OperatorConsoleCommandTests(unittest.TestCase):
 
             records = fake.records()
             self.assertEqual(len(records), 2)
-            self.assertNotEqual(records[0]["pid"], records[1]["pid"])
+            generation_record = next(
+                record for record in records if len(record["turn_ids"]) == 2
+            )
+            successor_record = next(
+                record for record in records if len(record["turn_ids"]) == 1
+            )
             self.assertNotEqual(
-                records[0]["thread_id"],
-                records[1]["thread_id"],
+                generation_record["pid"], successor_record["pid"]
+            )
+            self.assertNotEqual(
+                generation_record["thread_id"],
+                successor_record["thread_id"],
             )
             for record in records:
                 methods = [item.get("method") for item in record["messages"]]
@@ -599,8 +700,68 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 in item["params"]["input"][0]["text"]
             ]
             self.assertEqual(len(successor_prompts), 1)
+            all_successor_text = json.dumps(successor_record, ensure_ascii=False)
+            self.assertNotIn(marker, all_successor_text)
+            self.assertEqual(runtime.previous_handoff, "Fresh successor context.")
             self.assertIn("Generation 0 completed cooperatively", output.getvalue())
+            self.assertIn("Exit interview started", output.getvalue())
+            self.assertIn("Retrospective answer", output.getvalue())
             self.assertEqual(recorder.reconcile.call_count, 2)
+
+    def test_failed_turn_after_finish_is_not_retained_for_interview(self) -> None:
+        scenario = {
+            "tool_calls": [
+                {
+                    "tool": "finish_generation",
+                    "arguments": {"handoff": "Frozen despite turn failure."},
+                }
+            ],
+            "turn_status": "failed",
+            "turn_error": {"message": "synthetic terminal failure"},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+
+                def finish(name: str, arguments: list[bytes]) -> ToolResult:
+                    runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                    runtime.active_pid = None
+                    runtime.pending_generation_finish = PendingGenerationFinish(
+                        "Frozen despite turn failure.",
+                        b"snapshot",
+                        root / "kernel.elf",
+                        root / "codexos.iso",
+                    )
+                    return ToolResult(0, b"")
+
+                runtime.invoke_tool.side_effect = finish
+                holder: dict[str, OperatorConsole] = {}
+
+                def wait_for_failure() -> None:
+                    _wait_for(
+                        lambda: runtime.state
+                        is RuntimeState.AWAITING_NEXT_GENERATION
+                        and holder["console"]._turn_thread is None
+                        and holder["console"]._session is None
+                    )
+
+                output = io.StringIO()
+                console = OperatorConsole(
+                    runtime,
+                    _ObservedInput(
+                        [("agent\n", None), ("quit\n", wait_for_failure)]
+                    ),
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                holder["console"] = console
+                console.run()
+
+                self.assertEqual(console.exit_interview_state, "unavailable")
+                self.assertIn("Codex session failed", output.getvalue())
+                _assert_process_dead(self, fake.record()["pid"])
 
     def test_eof_cleans_up_active_codex_session_before_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

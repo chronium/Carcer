@@ -26,6 +26,7 @@ from harness import (
     CodexGenerationWorkerError,
     CodexOSRun,
     FeatureRequest,
+    PendingGenerationFinish,
     RuntimeState,
     ToolResult,
 )
@@ -38,6 +39,7 @@ from harness.codex_generation_worker import (
     AGENT_CONTRACT_VERSION,
     DEFAULT_REASONING_SUMMARY,
     DEFAULT_SERVICE_TIER,
+    CodexGenerationSessionMode,
     _implementor_prompt,
 )
 from harness.observability import ExperimentObservability
@@ -780,6 +782,13 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 "write",
             )
             self.assertFalse(profile["network"]["enabled"])
+            interview_profile = config["permissions"]["codexos-interview"]
+            self.assertEqual(interview_profile["filesystem"][":root"], "deny")
+            self.assertEqual(
+                interview_profile["filesystem"][":workspace_roots"]["."],
+                "read",
+            )
+            self.assertFalse(interview_profile["network"]["enabled"])
             self.assertEqual(config["web_search"], "disabled")
             self.assertFalse(config["features"]["apps"])
             self.assertFalse(config["features"]["plugins"])
@@ -925,6 +934,275 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
 
 
 class CodexGenerationSessionProtocolTests(unittest.TestCase):
+    def test_exit_interview_cannot_change_frozen_artifacts_or_successor_context(
+        self,
+    ) -> None:
+        marker = "EXIT-INTERVIEW-SECRET-91f-immutability"
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "finish_generation",
+                            "arguments": {"handoff": "Immutable handoff."},
+                        }
+                    ]
+                },
+                {"final_message": "Historical explanation only."},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            scenario
+        ) as fake:
+            root = Path(temporary)
+            archive = root / "generation-0000"
+            successor = archive / "successor"
+            successor.mkdir(parents=True)
+            files = {
+                archive / "source.snapshot": b"frozen source snapshot",
+                archive / "handoff.txt": b"Immutable handoff.",
+                archive / "metadata.json": b'{"outcome":"completed"}',
+                successor / "kernel.elf": b"frozen kernel",
+                successor / "codexos.iso": b"frozen iso",
+            }
+            for path, content in files.items():
+                path.write_bytes(content)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "CodexOS Test"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "codexos@example.invalid"],
+                cwd=repository,
+                check=True,
+            )
+            (repository / "seed.txt").write_text("generation source\n")
+            subprocess.run(["git", "add", "seed.txt"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "generation"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "tag",
+                    "-a",
+                    "experiment-test/generation-0000",
+                    "-m",
+                    "Frozen generation tag",
+                ],
+                cwd=repository,
+                check=True,
+            )
+            tag_object = subprocess.check_output(
+                ["git", "rev-parse", "experiment-test/generation-0000"],
+                cwd=repository,
+                text=True,
+            )
+            commit = subprocess.check_output(
+                ["git", "rev-list", "-n", "1", "experiment-test/generation-0000"],
+                cwd=repository,
+                text=True,
+            )
+            before_files = {path: path.read_bytes() for path in files}
+
+            observability = ExperimentObservability(root / "run")
+            runtime = _runtime_mock()
+            runtime.observability = observability
+            runtime.previous_handoff = None
+            approved = FeatureRequest(
+                1, 0, "Approved external capability", "Frozen decision.", "approved"
+            )
+            runtime.feature_requests.return_value = (approved,)
+
+            pending = PendingGenerationFinish(
+                "Immutable handoff.",
+                files[archive / "source.snapshot"],
+                successor / "kernel.elf",
+                successor / "codexos.iso",
+            )
+
+            def finish(tool: str, arguments: list[bytes]) -> ToolResult:
+                self.assertEqual(tool, "finish_generation")
+                runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                runtime.pending_generation_finish = pending
+                runtime.previous_handoff = pending.handoff_message
+                return ToolResult(0, b"")
+
+            runtime.invoke_tool.side_effect = finish
+            session = CodexGenerationSession(runtime, fake.executable, fake.auth_file)
+            session.run_initial_turn()
+            session.retain_for_exit_interview()
+            session.begin_exit_interview()
+            session.run_exit_interview_turn(marker)
+            session.end_exit_interview()
+            observability.close()
+
+            self.assertIs(runtime.pending_generation_finish, pending)
+            self.assertEqual(
+                {path: path.read_bytes() for path in files}, before_files
+            )
+            self.assertEqual(runtime.feature_requests(), (approved,))
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "rev-parse", "experiment-test/generation-0000"],
+                    cwd=repository,
+                    text=True,
+                ),
+                tag_object,
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "rev-list", "-n", "1", "experiment-test/generation-0000"],
+                    cwd=repository,
+                    text=True,
+                ),
+                commit,
+            )
+            successor_prompt = _implementor_prompt(runtime, None)
+            self.assertNotIn(marker, successor_prompt)
+            self.assertNotIn(marker, "".join(path.read_text(errors="ignore") for path in files))
+            self.assertNotIn(
+                marker,
+                (root / "run" / "events.jsonl").read_text(encoding="utf-8"),
+            )
+            events = [
+                json.loads(line)
+                for line in (root / "run" / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            event_names = [event["event"] for event in events]
+            self.assertIn("exit_interview_started", event_names)
+            self.assertIn("exit_interview_turn_started", event_names)
+            self.assertIn("exit_interview_turn_completed", event_names)
+            self.assertIn("exit_interview_ended", event_names)
+            interview_started = next(
+                event
+                for event in events
+                if event["event"] == "exit_interview_turn_started"
+            )
+            self.assertEqual(interview_started["data"]["model"], "gpt-5.6-sol")
+            self.assertEqual(interview_started["data"]["reasoning_effort"], "high")
+            self.assertEqual(interview_started["data"]["reasoning_summary"], "auto")
+            self.assertEqual(interview_started["data"]["service_tier"], "priority")
+
+    def test_exit_interview_reuses_thread_with_read_only_turn_and_denies_tools(
+        self,
+    ) -> None:
+        marker = "EXIT-INTERVIEW-SECRET-91f"
+        denied_tools = [
+            "list",
+            "read",
+            "write",
+            "truncate",
+            "remove",
+            "build",
+            "finish_generation",
+            "request_feature",
+            "review",
+        ]
+        scenario = {
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "tool": "finish_generation",
+                            "arguments": {"handoff": "Frozen handoff."},
+                        }
+                    ]
+                },
+                {
+                    "tool_calls": [
+                        {
+                            "namespace": None if tool == "review" else "codexos",
+                            "tool": tool,
+                            "arguments": {},
+                        }
+                        for tool in denied_tools
+                    ],
+                    "final_message": "Retrospective answer.",
+                },
+                {"final_message": "Second retrospective answer."},
+            ]
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.pending_generation_finish = None
+
+            def invoke(tool: str, arguments: list[bytes]) -> ToolResult:
+                self.assertEqual(tool, "finish_generation")
+                runtime.state = RuntimeState.AWAITING_NEXT_GENERATION
+                runtime.pending_generation_finish = object()
+                return ToolResult(0, b"")
+
+            runtime.invoke_tool.side_effect = invoke
+            activity = CodexActivityStream()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+                activity_stream=activity,
+            )
+
+            session.run_initial_turn()
+            original_thread = session.thread_id
+            original_pid = session.process_pid
+            session.retain_for_exit_interview()
+            self.assertIs(
+                session.mode, CodexGenerationSessionMode.RETAINED_AT_GATE
+            )
+            with self.assertRaisesRegex(RuntimeError, "unavailable after finish"):
+                session.run_continuation_turn()
+
+            session.begin_exit_interview()
+            first = session.run_exit_interview_turn(marker)
+            second = session.run_exit_interview_turn("Why this design?")
+
+            self.assertEqual(first.final_message, "Retrospective answer.")
+            self.assertEqual(second.final_message, "Second retrospective answer.")
+            self.assertEqual(session.thread_id, original_thread)
+            self.assertEqual(session.process_pid, original_pid)
+            runtime.invoke_tool.assert_called_once()
+            record = fake.record()
+            turns = [
+                message["params"]
+                for message in record["messages"]
+                if message.get("method") == "turn/start"
+            ]
+            self.assertEqual(len(turns), 3)
+            for turn in turns[1:]:
+                self.assertEqual(turn["threadId"], original_thread)
+                self.assertEqual(turn["model"], "gpt-5.6-sol")
+                self.assertEqual(turn["effort"], "high")
+                self.assertEqual(turn["summary"], "auto")
+                self.assertEqual(turn["serviceTier"], "priority")
+                self.assertEqual(turn["permissions"], "codexos-interview")
+                self.assertEqual(turn["runtimeWorkspaceRoots"], [])
+            prompt = turns[1]["input"][0]["text"]
+            self.assertIn("read-only exit interview", prompt)
+            self.assertIn("Operator question:\n" + marker, prompt)
+            self.assertNotIn("dynamicTools", turns[1])
+            self.assertTrue(
+                all(not response["result"]["success"] for response in record["server_responses"][-len(denied_tools):])
+            )
+            events = activity.drain()
+            questions = [
+                event
+                for event in events
+                if event.kind is CodexActivityKind.EXIT_INTERVIEW_QUESTION
+            ]
+            self.assertEqual([event.data["text"] for event in questions], [marker, "Why this design?"])
+
+            session.end_exit_interview()
+            self.assertIs(session.mode, CodexGenerationSessionMode.CLOSED)
+            _assert_process_dead(self, original_pid)
+
     def test_multiple_turns_reuse_one_process_and_thread(self) -> None:
         scenario = {
             "turns": [

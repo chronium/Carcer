@@ -108,7 +108,8 @@ The harness must then:
 2. archive the completed generation;
 3. capture the guest's handoff message for its successor;
 4. cleanly stop QEMU;
-5. terminate the current Codex session;
+5. retire the current Codex session from development, retaining a healthy
+   session at the gate only for an optional read-only exit interview;
 6. enter an `AWAITING_NEXT_GENERATION` state.
 
 The next generation must never start automatically by default.
@@ -116,6 +117,13 @@ The next generation must never start automatically by default.
 A human explicitly starts it after reviewing the previous generation.
 
 The new generation receives a fresh Codex session. Conversation history from previous generations must not be used as implicit memory.
+
+After cooperative completion, the operator may optionally question the same
+ephemeral Codex thread about the choices it already made. The archive, selected
+successor, and handoff are frozen before this exit interview begins. Interview
+turns have no guest tools, cannot change trusted state, are not persisted, and
+are closed before any continuation or rollback. Their content never enters the
+fresh successor session.
 
 Knowledge that must survive a reboot should be deliberately persisted by the guest.
 

@@ -34,6 +34,7 @@ from .operator_tui_model import (
     BuildPresentation,
     FeatureRequestPresentation,
     FeatureRequestRecordingState,
+    InterviewQuestionPresentation,
     LifecyclePresentation,
     NoticePresentation,
     OperatorPresentation,
@@ -262,6 +263,34 @@ class OperatorRow(Static, ActivityRow):
         self.update(_operator_content(presentation))
 
 
+class InterviewQuestionRow(Static, ActivityRow):
+    """A human retrospective question, distinct from operator command output."""
+
+    def __init__(self, entry: ActivityDisplayEntry) -> None:
+        presentation = _presentation(entry, InterviewQuestionPresentation)
+        self._entry = entry
+        super().__init__(
+            Group(
+                Text("You", style="bold bright_white"),
+                Padding(Text(presentation.text), (0, 0, 0, 2)),
+            ),
+            markup=False,
+            classes="activity-row interview-question-row",
+        )
+
+    def update_entry(self, entry: ActivityDisplayEntry) -> None:
+        if entry == self._entry:
+            return
+        presentation = _presentation(entry, InterviewQuestionPresentation)
+        self.update(
+            Group(
+                Text("You", style="bold bright_white"),
+                Padding(Text(presentation.text), (0, 0, 0, 2)),
+            )
+        )
+        self._entry = entry
+
+
 class LifecycleRow(Static, ActivityRow):
     def __init__(self, entry: ActivityDisplayEntry) -> None:
         presentation = _presentation(entry, LifecyclePresentation)
@@ -368,6 +397,7 @@ def _activity_row(entry: ActivityDisplayEntry) -> ActivityRow:
         ActivityDisplayKind.FEATURE_REQUEST: FeatureRequestRow,
         ActivityDisplayKind.BUILD: TrustedBuildRow,
         ActivityDisplayKind.OPERATOR: OperatorRow,
+        ActivityDisplayKind.INTERVIEW_QUESTION: InterviewQuestionRow,
         ActivityDisplayKind.LIFECYCLE: LifecycleRow,
         ActivityDisplayKind.NOTICE: NoticeRow,
     }[entry.kind]
@@ -804,7 +834,7 @@ class OperatorTui(App[None]):
             yield ActivityTranscript()
         yield Static("", id="follow-indicator")
         with Horizontal(id="command-row"):
-            yield Static("codexos>", id="command-prompt")
+            yield Static(self._console.input_prompt.strip(), id="command-prompt")
             yield Input(id="command-input", disabled=True)
 
     def on_mount(self) -> None:
@@ -873,7 +903,7 @@ class OperatorTui(App[None]):
             return
         self._busy = False
         prompt = self.query_one("#command-prompt", Static)
-        prompt.update("codexos>")
+        prompt.update(self._console.input_prompt.strip())
         input_widget = self.query_one("#command-input", Input)
         input_widget.disabled = False
         input_widget.focus()
@@ -901,7 +931,9 @@ class OperatorTui(App[None]):
             confirmation.accepted = value.strip() in {"y", "Y"}
             confirmation.completed.set()
             event.input.disabled = True
-            self.query_one("#command-prompt", Static).update("codexos>")
+            self.query_one("#command-prompt", Static).update(
+                self._console.input_prompt.strip()
+            )
             return
         if self._busy:
             return
@@ -918,7 +950,11 @@ class OperatorTui(App[None]):
         value: str,
         input_widget: Input,
     ) -> None:
-        self._model.begin_operator_block(value)
+        interview_question = (
+            self._console.exit_interview_state == "idle"
+            and value.strip() not in {"end", "end-interview", "quit"}
+        )
+        self._model.begin_operator_block(None if interview_question else value)
         self._activity_changed(1)
         self._busy = True
         input_widget.disabled = True
@@ -986,10 +1022,19 @@ class OperatorTui(App[None]):
         ):
             self._disarm_pause(refresh=False)
         busy = "operator busy" if self._busy else "operator idle"
+        interview = self._console.exit_interview_state
+        if interview == "answering":
+            runtime_status = "EXIT INTERVIEW · Sol answering"
+        elif interview == "idle":
+            runtime_status = "EXIT INTERVIEW · Sol idle"
+        elif interview == "available":
+            runtime_status = f"{state} · exit interview available"
+        else:
+            runtime_status = f"{state} · Sol {self._console.codex_turn_state}"
         header = (
             f"CodexOS   {self._runtime.run_directory.name} · "
-            f"gen {generation if generation is not None else '-'} · {state}   "
-            f"Sol {self._console.codex_turn_state} · {pending} pending · {busy}"
+            f"gen {generation if generation is not None else '-'} · "
+            f"{runtime_status} · {pending} pending · {busy}"
         )
         self.query_one("#status-header", Static).update(header)
         self._refresh_follow_indicator()
@@ -1066,7 +1111,9 @@ class OperatorTui(App[None]):
         confirmation.completed.set()
         input_widget = self.query_one("#command-input", Input)
         input_widget.disabled = True
-        self.query_one("#command-prompt", Static).update("codexos>")
+        self.query_one("#command-prompt", Static).update(
+            self._console.input_prompt.strip()
+        )
         self._disarm_pause()
         return True
 
