@@ -200,6 +200,55 @@ class CodexOSRun:
         self._record("run_started", None, {})
         self._record_generation_started()
 
+    def reopen_at_gate(self) -> None:
+        """Restore one validated archived generation gate without booting."""
+        if self._state is not RuntimeState.STOPPED:
+            raise RuntimeError("CodexOS run is not stopped")
+        if self._generation_number is not None:
+            raise RuntimeError("CodexOS run has already been opened")
+        partial = sorted(
+            path.name
+            for path in self._run_directory.iterdir()
+            if path.name.startswith(".generation-")
+        )
+        if partial:
+            raise RuntimeError(
+                "run contains partial generation state: " + ", ".join(partial)
+            )
+
+        archives = self.archived_generations()
+        if not archives:
+            raise RuntimeError("run has no archived generation gate")
+        self._validate_archived_history(archives)
+        latest = archives[-1]
+        pending: PendingGenerationFinish | None = None
+        previous_handoff: str | None = None
+        if latest.outcome == "completed":
+            if latest.handoff is None:
+                raise ValueError("completed generation handoff is unavailable")
+            snapshot = (latest.archive_path / "source.snapshot").read_bytes()
+            pending = PendingGenerationFinish(
+                latest.handoff,
+                snapshot,
+                latest.archive_path / "successor" / "kernel.elf",
+                latest.archive_path / "successor" / "codexos.iso",
+            )
+            previous_handoff = latest.handoff
+
+        self._generation_number = latest.generation
+        self._pending_finish = pending
+        self._previous_handoff = previous_handoff
+        self._state = RuntimeState.AWAITING_NEXT_GENERATION
+        self._run_started = True
+        self._record(
+            "run_reopened_at_gate",
+            latest.generation,
+            {
+                "latest_outcome": latest.outcome,
+                "successor_selected": pending is not None,
+            },
+        )
+
     def list_tools(self) -> list[str]:
         client = self._require_running_client()
         result = client.list_tools()
@@ -361,6 +410,30 @@ class CodexOSRun:
             raise RuntimeError(
                 "feature requests may be decided only while awaiting a generation"
             )
+
+    @staticmethod
+    def _validate_archived_history(
+        archives: Sequence[ArchivedGeneration],
+    ) -> None:
+        by_generation = {archive.generation: archive for archive in archives}
+        if len(by_generation) != len(archives) or sorted(by_generation) != list(
+            range(len(archives))
+        ):
+            raise ValueError("generation archive history is not contiguous")
+        for archive in archives[1:]:
+            parent_number = archive.parent_generation
+            parent = by_generation.get(parent_number)
+            if parent is None or parent.outcome != "completed":
+                raise ValueError(
+                    f"generation {archive.generation} has no completed parent"
+                )
+            if (
+                archive.transition == "successor"
+                and parent_number != archive.generation - 1
+            ):
+                raise ValueError(
+                    f"generation {archive.generation} has invalid successor ancestry"
+                )
 
     def _load_fork_generation(self, generation_number: int) -> tuple[Path, str]:
         archived = self._read_archived_generation(generation_number)

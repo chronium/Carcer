@@ -774,7 +774,9 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(description="CodexOS operator console")
     parser.add_argument("--run-directory", required=True, type=Path)
-    parser.add_argument("--initial-iso", required=True, type=Path)
+    opening = parser.add_mutually_exclusive_group(required=True)
+    opening.add_argument("--initial-iso", type=Path)
+    opening.add_argument("--resume-at-gate", action="store_true")
     parser.add_argument("--git-repository", type=Path)
     parser.add_argument("--git-base-ref")
     parser.add_argument("--otlp-endpoint")
@@ -801,8 +803,18 @@ def main(
                 arguments.run_directory,
                 arguments.git_base_ref,
             )
-        runtime.start(arguments.initial_iso)
-    except (ExperimentObservabilityError, OSError, RuntimeError) as error:
+        if arguments.resume_at_gate:
+            runtime.reopen_at_gate()
+        else:
+            if arguments.initial_iso is None:
+                raise RuntimeError("initial ISO is unavailable")
+            runtime.start(arguments.initial_iso)
+    except (
+        ExperimentObservabilityError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as error:
         if runtime is not None:
             runtime.stop()
         if observability is not None:

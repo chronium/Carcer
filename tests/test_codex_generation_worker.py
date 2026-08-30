@@ -10,6 +10,7 @@ import tomllib
 import unittest
 import warnings
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -30,6 +31,11 @@ from harness.codex_app_server import (
     CumulativeTokenUsage,
     token_usage_delta_from_notification,
 )
+from harness.codex_generation_worker import (
+    AGENT_CONTRACT_VERSION,
+    DEFAULT_SERVICE_TIER,
+    _implementor_prompt,
+)
 from harness.observability import ExperimentObservability
 
 _TOOLS = [
@@ -45,6 +51,89 @@ _TOOLS = [
 
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
+    def test_initial_prompt_states_the_behavioral_contract(self) -> None:
+        runtime = _runtime_mock()
+        runtime.previous_handoff = "Exact predecessor handoff."
+        runtime.current_transition = "rollback"
+        runtime.feature_requests.return_value = (
+            FeatureRequest(
+                1, 0, "Approved capability", "Exact description.", "approved"
+            ),
+            FeatureRequest(
+                2, 0, "Pending capability", "Not approved.", "pending"
+            ),
+            FeatureRequest(
+                3, 0, "Denied capability", "Not approved.", "denied"
+            ),
+        )
+
+        prompt = _implementor_prompt(runtime, "Trusted operator objective.")
+
+        for required in (
+            "genuinely general-purpose operating system",
+            "first major interactive userland milestone",
+            "not the definition or final purpose",
+            "supplied Doom executable and data must remain immutable",
+            "ordinary user workload",
+            "generic userland mechanisms",
+            "no Doom-specific behavior or special scheduling treatment",
+            "preemptive execution",
+            "does not voluntarily yield, block, or enter the kernel",
+            "must not prevent another runnable user workload from making progress",
+            "Doom must run concurrently with an unrelated user workload",
+            "programs unknown to you during development",
+            "development continues after Doom is playable",
+            "not a prescribed kernel architecture or implementation sequence",
+            "neither Unix, POSIX, System V",
+            "improve the guest-side development environment and tooling",
+            "conversation history does not survive a generation boundary",
+            "candidate booted under the current trusted hardware profile",
+            "reached the canonical READY state",
+            "spoke the canonical development protocol",
+            "requesting or approving it does not itself change the environment",
+            "would not by itself grant access to trusted networks or the public Internet",
+            "Exact predecessor handoff.",
+            "Later lineage was abandoned.",
+            "Trusted operator objective.",
+            "#1: Approved capability\nExact description.",
+        ):
+            self.assertIn(required, prompt)
+        self.assertNotIn("Pending capability", prompt)
+        self.assertNotIn("Denied capability", prompt)
+
+    def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
+        profiles = (
+            TEST_HARDWARE_PROFILE,
+            replace(
+                TEST_HARDWARE_PROFILE,
+                profile="prompt-alt-v1",
+                accelerator="kvm",
+                cpu_model="host",
+                vcpus=TEST_HARDWARE_PROFILE.vcpus + 2,
+                memory_mib=TEST_HARDWARE_PROFILE.memory_mib + 384,
+            ),
+        )
+        prompts: list[str] = []
+        for profile in profiles:
+            runtime = _runtime_mock()
+            runtime.hardware_profile = profile
+            prompt = _implementor_prompt(runtime, None)
+            prompts.append(prompt)
+            writable = ", ".join(profile.writable_block_devices) or "none"
+            for expected in (
+                f"Profile: {profile.profile}",
+                f"Machine: {profile.machine}",
+                f"Accelerator: {profile.accelerator}",
+                f"CPU: {profile.cpu_model}",
+                f"vCPUs: {profile.vcpus}",
+                f"RAM: {profile.memory_mib} MiB",
+                f"Graphics: {profile.graphics}",
+                f"Network interfaces: {profile.network}",
+                f"Writable block devices: {writable}",
+            ):
+                self.assertIn(expected, prompt)
+        self.assertNotEqual(prompts[0], prompts[1])
+
     def test_malformed_token_usage_degrades_observability_not_session(self) -> None:
         accepted = _token_usage(100, 30, 40, 10)
         missing = dict(accepted)
@@ -389,6 +478,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
             runtime.invoke_tool.return_value = ToolResult(7, b"\xff\x00A")
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
@@ -433,6 +523,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertNotEqual(thread["cwd"], record["codex_home"])
             self.assertEqual(thread["permissions"], "codexos-implementor")
+            self.assertEqual(thread["serviceTier"], DEFAULT_SERVICE_TIER)
             self.assertEqual(thread["approvalPolicy"], "never")
             dynamic_tools = thread["dynamicTools"]
             self.assertEqual(len(dynamic_tools), 2)
@@ -466,6 +557,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertIn("Previous generation handoff: none.", prompt_text)
             self.assertEqual(turn["effort"], "high")
             self.assertEqual(turn["model"], "gpt-5.6-sol")
+            self.assertEqual(turn["serviceTier"], DEFAULT_SERVICE_TIER)
 
             approvals = record["server_responses"]
             self.assertEqual(approvals[0]["result"], {"decision": "decline"})
@@ -494,6 +586,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
@@ -509,6 +602,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
@@ -521,6 +615,33 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotIn("turn/start", methods)
             _assert_process_dead(self, record["pid"])
 
+    def test_rejects_unavailable_or_malformed_service_tier_catalog(self) -> None:
+        cases = (
+            (
+                {"service_tiers": []},
+                "does not support service tier 'priority'",
+            ),
+            (
+                {"service_tiers": "not a catalog list"},
+                "malformed service-tier capabilities",
+            ),
+        )
+        for scenario, message in cases:
+            with self.subTest(message=message):
+                with _fake_codex(scenario) as fake:
+                    runtime = _runtime_mock()
+                    worker = CodexGenerationWorker(
+                        fake.executable,
+                        fake.auth_file,
+                    )
+
+                    with self.assertRaisesRegex(
+                        CodexGenerationWorkerError,
+                        message,
+                    ):
+                        worker.run_generation(runtime)
+                    _assert_process_dead(self, fake.record()["pid"])
+
     def test_surfaces_turn_failure_and_cleans_up(self) -> None:
         scenario = {
             "turn_status": "failed",
@@ -531,6 +652,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.state = RuntimeState.RUNNING
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
+            runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
@@ -588,6 +710,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 turns[1]["params"]["input"][0]["text"],
                 "Continue working on the current CodexOS generation.",
             )
+            self.assertTrue(
+                all(
+                    turn["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
+                    for turn in turns
+                )
+            )
             session.close()
             _assert_process_dead(self, pid)
 
@@ -627,6 +755,16 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             methods = [item.get("method") for item in record["messages"]]
             self.assertEqual(methods.count("turn/interrupt"), 1)
             self.assertEqual(methods.count("thread/start"), 1)
+            turns = [
+                item for item in record["messages"]
+                if item.get("method") == "turn/start"
+            ]
+            self.assertTrue(
+                all(
+                    item["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
+                    for item in turns
+                )
+            )
             session.close()
 
     def test_interrupt_requires_terminal_interrupted_notification(self) -> None:
@@ -963,6 +1101,7 @@ def _runtime_mock() -> Mock:
     runtime.generation_number = 0
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
+    runtime.hardware_profile = TEST_HARDWARE_PROFILE
     runtime.feature_requests.return_value = ()
     return runtime
 

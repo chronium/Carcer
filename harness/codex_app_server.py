@@ -197,7 +197,13 @@ class CodexAppServer:
                 "Codex is not authenticated using ChatGPT"
             )
 
-    def validate_model(self, model: str, effort: str) -> None:
+    def validate_model(
+        self,
+        model: str,
+        effort: str,
+        service_tier: str,
+    ) -> str:
+        """Validate one exact catalog configuration and return its tier name."""
         cursor: str | None = None
         while True:
             response = object_value(
@@ -213,7 +219,9 @@ class CodexAppServer:
                 if isinstance(entry, dict) and entry.get("model") == model:
                     supported = entry.get("supportedReasoningEfforts")
                     if not isinstance(supported, list):
-                        break
+                        raise CodexAppServerError(
+                            f"model {model!r} has malformed reasoning capabilities"
+                        )
                     values = {
                         option.get("reasoningEffort")
                         for option in supported
@@ -224,7 +232,24 @@ class CodexAppServer:
                             f"model {model!r} does not support reasoning "
                             f"effort {effort!r}"
                         )
-                    return
+                    tiers = entry.get("serviceTiers", [])
+                    if not isinstance(tiers, list):
+                        raise CodexAppServerError(
+                            f"model {model!r} has malformed service-tier capabilities"
+                        )
+                    for tier in tiers:
+                        if isinstance(tier, dict) and tier.get("id") == service_tier:
+                            tier_name = tier.get("name")
+                            if not isinstance(tier_name, str) or not tier_name:
+                                raise CodexAppServerError(
+                                    f"model {model!r} has malformed service-tier "
+                                    f"capabilities for {service_tier!r}"
+                                )
+                            return tier_name
+                    raise CodexAppServerError(
+                        f"model {model!r} does not support service tier "
+                        f"{service_tier!r}"
+                    )
             cursor_value = response.get("nextCursor")
             if cursor_value is None:
                 break
@@ -241,6 +266,7 @@ class CodexAppServer:
         self,
         *,
         model: str,
+        service_tier: str,
         permission_profile: str,
         dynamic_tools: list[dict[str, object]],
         require_read_only: bool = False,
@@ -262,6 +288,7 @@ class CodexAppServer:
                     "model": model,
                     "permissions": permission_profile,
                     "runtimeWorkspaceRoots": [str(workspace)],
+                    "serviceTier": service_tier,
                 },
             ),
             "thread/start response",
@@ -279,6 +306,10 @@ class CodexAppServer:
         if response.get("model") != model:
             raise CodexAppServerError(
                 "Codex app-server did not select the requested model"
+            )
+        if response.get("serviceTier") != service_tier:
+            raise CodexAppServerError(
+                "Codex app-server did not select the requested service tier"
             )
         profile = response.get("activePermissionProfile")
         if not isinstance(profile, dict) or profile.get("id") != permission_profile:
@@ -307,6 +338,7 @@ class CodexAppServer:
         prompt: str,
         model: str,
         effort: str,
+        service_tier: str,
         permission_profile: str,
     ) -> str:
         response = object_value(
@@ -320,6 +352,7 @@ class CodexAppServer:
                     "input": [{"type": "text", "text": prompt}],
                     "model": model,
                     "permissions": permission_profile,
+                    "serviceTier": service_tier,
                     "threadId": thread_id,
                 },
             ),

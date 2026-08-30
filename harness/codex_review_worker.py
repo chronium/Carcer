@@ -23,6 +23,7 @@ from .tool_protocol import ToolResult
 
 DEFAULT_REVIEWER_MODEL = "gpt-5.6-luna"
 DEFAULT_REVIEWER_REASONING_EFFORT = "high"
+DEFAULT_REVIEWER_SERVICE_TIER = "priority"
 
 _PERMISSION_PROFILE = "codexos-reviewer"
 
@@ -65,6 +66,7 @@ class CodexReviewWorker:
         request: str | None,
         model: str = DEFAULT_REVIEWER_MODEL,
         reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
     ) -> str:
         if runtime.state is not RuntimeState.RUNNING:
             raise CodexReviewWorkerError("CodexOS generation is not running")
@@ -74,14 +76,7 @@ class CodexReviewWorker:
             )
         started_at = time.monotonic()
         outcome = "failed"
-        self._record(
-            runtime,
-            "review_started",
-            model,
-            reasoning_effort,
-            focus,
-            None,
-        )
+        service_tier_name: str | None = None
         try:
             with CodexAppServer(
                 executable=self._codex_executable,
@@ -95,9 +90,24 @@ class CodexReviewWorker:
                     raise CodexAppServerError(
                         "Codex reviewer consultation was cancelled"
                     )
-                server.validate_model(model, reasoning_effort)
+                service_tier_name = server.validate_model(
+                    model,
+                    reasoning_effort,
+                    service_tier,
+                )
+                self._record(
+                    runtime,
+                    "review_started",
+                    model,
+                    reasoning_effort,
+                    service_tier,
+                    service_tier_name,
+                    focus,
+                    None,
+                )
                 thread_id = server.start_thread(
                     model=model,
+                    service_tier=service_tier,
                     permission_profile=_PERMISSION_PROFILE,
                     dynamic_tools=[_reviewer_tool_namespace()],
                     require_read_only=True,
@@ -120,6 +130,7 @@ class CodexReviewWorker:
                         prompt=_reviewer_prompt(objective, focus, request),
                         model=model,
                         effort=reasoning_effort,
+                        service_tier=service_tier,
                         permission_profile=_PERMISSION_PROFILE,
                     )
                     turn_value.append(turn_id)
@@ -146,6 +157,8 @@ class CodexReviewWorker:
                 f"review_{outcome}",
                 model,
                 reasoning_effort,
+                service_tier,
+                service_tier_name,
                 focus,
                 max(0.0, time.monotonic() - started_at),
             )
@@ -234,6 +247,8 @@ class CodexReviewWorker:
         event: str,
         model: str,
         reasoning_effort: str,
+        service_tier: str,
+        service_tier_name: str | None,
         focus: str,
         duration_seconds: float | None,
     ) -> None:
@@ -242,8 +257,11 @@ class CodexReviewWorker:
         data: dict[str, object] = {
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "service_tier": service_tier,
             "focus": focus,
         }
+        if service_tier_name is not None:
+            data["service_tier_name"] = service_tier_name
         if duration_seconds is not None:
             data["duration_seconds"] = duration_seconds
         runtime.observability.record(
