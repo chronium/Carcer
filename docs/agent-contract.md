@@ -39,3 +39,45 @@ Structured Codex lifecycle events record the requested service-tier ID and its
 catalog display name, when supplied, while implementor events also record agent
 contract version 2. These are serving and prompt provenance only. Model-token
 metric labels remain exactly `model` and `role`.
+
+## Adopting harness updates at a generation gate
+
+A stopped harness may explicitly reopen an existing run only from a validated,
+immutable archived generation gate. Reopening reconstructs
+`AWAITING_NEXT_GENERATION` from the archive history. A completed latest
+generation restores its exact archived successor and handoff; an aborted latest
+generation restores a gate with no selected successor. It does not boot QEMU,
+start Codex, rebuild source, or modify an archive. `events.jsonl` is reopened in
+append mode and records `run_reopened_at_gate` without emitting a second
+`run_started` event.
+
+Run-level feature requests and their immutable decisions are read from their
+existing store, so approved requests still enter the next implementor contract.
+Configured run-scoped Git provenance is reconciled normally and existing
+annotated tags are recognized rather than rewritten. Historical
+`hardware.json` files remain untouched; a later explicit boot uses the currently
+configured trusted hardware profile.
+
+The old console must be exited before another process reopens the run. A typical
+reviewed harness update is adopted manually:
+
+```console
+# Old harness, after generation N reaches its gate:
+codexos> git-record
+codexos> quit
+
+# Update and review the trusted harness, then open the same archived gate:
+.venv/bin/python -m harness.operator_console \
+  --run-directory /srv/codexos/experiment-002 \
+  --resume-at-gate \
+  --git-repository /path/to/CodexOS \
+  --git-base-ref experiment-start
+
+codexos> status
+codexos> continue
+codexos> agent
+```
+
+The first two actions after reopening remain explicit and distinct: `continue`
+boots the archived selected successor, and `agent` starts its fresh Codex
+session. An aborted gate instead requires an explicit rollback selection.
