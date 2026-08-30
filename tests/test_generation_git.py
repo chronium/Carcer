@@ -88,6 +88,14 @@ class GenerationGitRecorderTests(unittest.TestCase):
             self.assertEqual(_parent(repository, commits[1]), commits[0])
             self.assertEqual(_parent(repository, commits[2]), commits[1])
             self.assertEqual(_parent(repository, commits[4]), commits[0])
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 0)),
+                commits[2],
+            )
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 1)),
+                commits[4],
+            )
             self.assertNotEqual(commits[1], commits[2])
             self.assertEqual(
                 _git(repository, "show", f"{commits[1]}:seed/kernel.c"),
@@ -154,6 +162,23 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 _expected_tag_message(run.name, 0, None, "initial", handoff_zero),
             )
             self.assertTrue(tag_message.endswith(handoff_zero))
+            refs_before = {
+                ref: _git(repository, "rev-parse", ref).strip()
+                for ref in (
+                    *(
+                        f"refs/tags/{_generation_tag(run, generation)}"
+                        for generation in (0, 1, 2, 4)
+                    ),
+                    f"refs/heads/{_lineage_branch(run, 0)}",
+                    f"refs/heads/{_lineage_branch(run, 1)}",
+                )
+            }
+            commit_count_before = _git(
+                repository,
+                "rev-list",
+                "--all",
+                "--count",
+            )
 
             second = recorder.reconcile()
             self.assertTrue(all(item.already_recorded for item in second))
@@ -173,7 +198,385 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 ),
                 1,
             )
+            self.assertEqual(
+                {
+                    ref: _git(repository, "rev-parse", ref).strip()
+                    for ref in refs_before
+                },
+                refs_before,
+            )
+            self.assertEqual(
+                _git(repository, "rev-list", "--all", "--count"),
+                commit_count_before,
+            )
             self.assertEqual(_archive_bytes(run), archives_before)
+
+    def test_active_lineage_fast_forwards_incrementally(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, _ = _create_repository(root / "repository")
+            run = root / "experiment-002"
+            recorder: GenerationGitRecorder | None = None
+            previous: str | None = None
+            tag_objects: dict[int, str] = {}
+            for generation in range(3):
+                _archive_completed(
+                    run,
+                    generation,
+                    None if generation == 0 else generation - 1,
+                    "initial" if generation == 0 else "successor",
+                    [
+                        SnapshotFile(
+                            "seed/kernel.c",
+                            f"generation {generation}\n".encode("ascii"),
+                        )
+                    ],
+                )
+                if recorder is None:
+                    recorder = GenerationGitRecorder(
+                        repository,
+                        run,
+                        "test-base",
+                    )
+                records = recorder.reconcile()
+                current = records[-1].commit
+                self.assertEqual(
+                    _branch_target(repository, _lineage_branch(run, 0)),
+                    current,
+                )
+                self.assertEqual(
+                    _git(
+                        repository,
+                        "cat-file",
+                        "-t",
+                        f"refs/heads/{_lineage_branch(run, 0)}",
+                    ),
+                    "commit\n",
+                )
+                self.assertNotEqual(
+                    _git_result(
+                        repository,
+                        "symbolic-ref",
+                        "--quiet",
+                        f"refs/heads/{_lineage_branch(run, 0)}",
+                    ).returncode,
+                    0,
+                )
+                if previous is not None:
+                    self.assertEqual(
+                        _git_result(
+                            repository,
+                            "merge-base",
+                            "--is-ancestor",
+                            previous,
+                            current,
+                        ).returncode,
+                        0,
+                    )
+                previous = current
+                for record in records:
+                    tag = _generation_tag(run, record.generation)
+                    tag_object = _git(
+                        repository,
+                        "rev-parse",
+                        f"refs/tags/{tag}",
+                    ).strip()
+                    prior = tag_objects.setdefault(record.generation, tag_object)
+                    self.assertEqual(tag_object, prior)
+
+    def test_rollbacks_create_numbered_frozen_lineages_and_skip_aborts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, base = _create_repository(root / "repository")
+            run = root / "experiment-002"
+            for generation, parent, transition in (
+                (0, None, "initial"),
+                (1, 0, "successor"),
+                (2, 1, "successor"),
+            ):
+                _archive_completed(
+                    run,
+                    generation,
+                    parent,
+                    transition,
+                    [SnapshotFile("seed/kernel.c", f"G{generation}\n".encode())],
+                )
+            recorder = GenerationGitRecorder(repository, run, "test-base")
+            first = recorder.reconcile()
+            commits = {record.generation: record.commit for record in first}
+            frozen_zero = _branch_target(
+                repository,
+                _lineage_branch(run, 0),
+            )
+            self.assertEqual(frozen_zero, commits[2])
+
+            _archive_completed(
+                run,
+                3,
+                1,
+                "rollback",
+                [SnapshotFile("seed/kernel.c", b"G3\n")],
+            )
+            _archive_completed(
+                run,
+                4,
+                3,
+                "successor",
+                [SnapshotFile("seed/kernel.c", b"G4\n")],
+            )
+            second = recorder.reconcile()
+            commits = {record.generation: record.commit for record in second}
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 0)),
+                frozen_zero,
+            )
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 1)),
+                commits[4],
+            )
+
+            _archive_aborted(run, 5, 4, "successor")
+            recorder.reconcile()
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 1)),
+                commits[4],
+            )
+            self.assertIsNone(
+                _optional_branch_target(repository, _lineage_branch(run, 2))
+            )
+
+            _archive_completed(
+                run,
+                6,
+                1,
+                "rollback",
+                [SnapshotFile("seed/kernel.c", b"G6\n")],
+            )
+            _archive_completed(
+                run,
+                7,
+                6,
+                "successor",
+                [SnapshotFile("seed/kernel.c", b"G7\n")],
+            )
+            records = recorder.reconcile()
+            commits = {record.generation: record.commit for record in records}
+
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 0)),
+                commits[2],
+            )
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 1)),
+                commits[4],
+            )
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 2)),
+                commits[7],
+            )
+            self.assertEqual(_parent(repository, commits[3]), commits[1])
+            self.assertEqual(_parent(repository, commits[4]), commits[3])
+            self.assertEqual(_parent(repository, commits[6]), commits[1])
+            self.assertEqual(_parent(repository, commits[7]), commits[6])
+            self.assertEqual(
+                _git_result(
+                    repository,
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    f"refs/tags/{_generation_tag(run, 5)}",
+                ).returncode,
+                1,
+            )
+            self.assertEqual(
+                _git(repository, "rev-list", "--all", "--count").strip(),
+                str(1 + len(commits)),
+            )
+            self.assertEqual(_parent(repository, commits[0]), base)
+
+    def test_existing_generation_objects_gain_only_the_missing_lineage_ref(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, _ = _create_repository(root / "repository")
+            run = root / "experiment-002"
+            _archive_completed(
+                run,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"G0\n")],
+            )
+            _archive_completed(
+                run,
+                1,
+                0,
+                "successor",
+                [SnapshotFile("seed/kernel.c", b"G1\n")],
+            )
+            recorder = GenerationGitRecorder(repository, run, "test-base")
+            archives = CodexOSRun(run).archived_generations()
+            old_records = [recorder._record(archive) for archive in archives]
+            before = {
+                record.generation: (
+                    _git(
+                        repository,
+                        "rev-parse",
+                        f"refs/tags/{record.tag}",
+                    ).strip(),
+                    record.commit,
+                    _git_result(
+                        repository,
+                        "cat-file",
+                        "tag",
+                        f"refs/tags/{record.tag}",
+                    ).stdout,
+                    _git_result(
+                        repository,
+                        "cat-file",
+                        "commit",
+                        record.commit,
+                    ).stdout,
+                )
+                for record in old_records
+            }
+            self.assertIsNone(
+                _optional_branch_target(repository, _lineage_branch(run, 0))
+            )
+
+            records = recorder.reconcile()
+
+            self.assertEqual(
+                _branch_target(repository, _lineage_branch(run, 0)),
+                records[-1].commit,
+            )
+            for record in records:
+                tag_object, commit, tag_bytes, commit_bytes = before[
+                    record.generation
+                ]
+                self.assertEqual(
+                    _git(
+                        repository,
+                        "rev-parse",
+                        f"refs/tags/{record.tag}",
+                    ).strip(),
+                    tag_object,
+                )
+                self.assertEqual(record.commit, commit)
+                self.assertEqual(
+                    _git_result(
+                        repository,
+                        "cat-file",
+                        "tag",
+                        f"refs/tags/{record.tag}",
+                    ).stdout,
+                    tag_bytes,
+                )
+                self.assertEqual(
+                    _git_result(
+                        repository,
+                        "cat-file",
+                        "commit",
+                        record.commit,
+                    ).stdout,
+                    commit_bytes,
+                )
+
+    def test_conflicting_lineage_branches_are_never_repaired(self) -> None:
+        cases = ("rewound", "other-lineage", "unrelated", "unexpected")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    repository, base = _create_repository(root / "repository")
+                    run = root / "experiment-002"
+                    for generation, parent, transition in (
+                        (0, None, "initial"),
+                        (1, 0, "successor"),
+                        (2, 1, "successor"),
+                    ):
+                        _archive_completed(
+                            run,
+                            generation,
+                            parent,
+                            transition,
+                            [
+                                SnapshotFile(
+                                    "seed/kernel.c",
+                                    f"G{generation}\n".encode(),
+                                )
+                            ],
+                        )
+                    recorder = GenerationGitRecorder(
+                        repository,
+                        run,
+                        "test-base",
+                    )
+                    straight = recorder.reconcile()
+                    commits = {
+                        record.generation: record.commit for record in straight
+                    }
+                    branch = _lineage_branch(run, 0)
+                    conflict_branch = branch
+                    conflict_target = commits[2]
+                    if case == "other-lineage":
+                        _archive_completed(
+                            run,
+                            3,
+                            1,
+                            "rollback",
+                            [SnapshotFile("seed/kernel.c", b"G3\n")],
+                        )
+                        records = recorder.reconcile()
+                        rollback = records[-1].commit
+                        conflict_target = rollback
+                        _git(
+                            repository,
+                            "update-ref",
+                            f"refs/heads/{branch}",
+                            rollback,
+                            commits[2],
+                        )
+                    elif case == "rewound":
+                        conflict_target = commits[0]
+                        _git(
+                            repository,
+                            "update-ref",
+                            f"refs/heads/{branch}",
+                            commits[0],
+                            commits[2],
+                        )
+                    elif case == "unrelated":
+                        conflict_target = base
+                        _git(
+                            repository,
+                            "update-ref",
+                            f"refs/heads/{branch}",
+                            base,
+                            commits[2],
+                        )
+                    else:
+                        conflict_branch = _lineage_branch(run, 9)
+                        conflict_target = base
+                        _git(
+                            repository,
+                            "update-ref",
+                            f"refs/heads/{conflict_branch}",
+                            base,
+                        )
+
+                    with self.assertRaisesRegex(
+                        GenerationGitRecorderError,
+                        "lineage branch",
+                    ):
+                        recorder.reconcile()
+                    self.assertEqual(
+                        _branch_target(repository, conflict_branch),
+                        conflict_target,
+                    )
 
     def test_conflicting_generation_tag_is_not_rewritten(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -327,7 +730,7 @@ class GenerationGitRecorderTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 GenerationGitRecorderError,
-                "cannot form a Git tag namespace",
+                "cannot form a Git tag namespace or lineage branch namespace",
             ):
                 GenerationGitRecorder(repository, invalid_run, "test-base")
 
@@ -389,6 +792,20 @@ class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
                 self.assertEqual(_parent(repository, commits[0]), base)
                 self.assertEqual(_parent(repository, commits[1]), commits[0])
                 self.assertEqual(_parent(repository, commits[2]), commits[0])
+                self.assertEqual(
+                    _branch_target(
+                        repository,
+                        _lineage_branch(run_directory, 0),
+                    ),
+                    commits[1],
+                )
+                self.assertEqual(
+                    _branch_target(
+                        repository,
+                        _lineage_branch(run_directory, 1),
+                    ),
+                    commits[2],
+                )
                 self.assertEqual(
                     _git(repository, "show", f"{commits[0]}:seed/kernel.c").encode(),
                     original_kernel + mutation_a,
@@ -546,6 +963,29 @@ def _commit_message(repository: Path, commit: str) -> str:
 
 def _generation_tag(run: Path, generation: int) -> str:
     return f"{run.name}/generation-{generation:04d}"
+
+
+def _lineage_branch(run: Path, lineage: int) -> str:
+    return f"{run.name}/lineage-{lineage:04d}"
+
+
+def _branch_target(repository: Path, branch: str) -> str:
+    target = _optional_branch_target(repository, branch)
+    if target is None:
+        raise AssertionError(f"branch does not exist: {branch}")
+    return target
+
+
+def _optional_branch_target(repository: Path, branch: str) -> str | None:
+    result = _git_result(
+        repository,
+        "rev-parse",
+        "--verify",
+        f"refs/heads/{branch}^{{commit}}",
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("ascii").strip()
 
 
 def _tag_message(repository: Path, tag: str) -> str:
