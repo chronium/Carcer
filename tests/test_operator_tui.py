@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from rich.markdown import Markdown as RichMarkdown
 from textual.app import App, ComposeResult
 from textual.widgets import Input
 from textual.containers import VerticalScroll
@@ -21,12 +22,22 @@ from harness.codex_activity import (
 from harness.generation_runtime import RuntimeState
 from harness.operator_console import main
 from harness.operator_tui import (
+    AgentMessageRow,
     ActivityTranscript,
+    FeatureRequestRow,
+    LifecycleRow,
     OperatorTui,
+    OperatorRow,
+    ReasoningRow,
+    ToolDetailToggleRequested,
+    ToolRow,
+    TrustedBuildRow,
     run_operator_tui,
 )
 from harness.operator_tui_model import (
+    ActivityDisplayKind,
     ActivityDisplayEntry,
+    OperatorPresentation,
     OperatorActivityModel,
 )
 
@@ -48,7 +59,7 @@ class _TranscriptApp(App[None]):
     CSS = """
     #activity-scroll { height: 1fr; }
     #activity-rows { width: 1fr; height: auto; }
-    ActivityRow { width: 1fr; height: auto; margin-bottom: 1; }
+    .activity-row { width: 1fr; height: auto; margin-bottom: 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -59,10 +70,105 @@ class _TranscriptApp(App[None]):
 def _entry(index: int, *, body: str | None = None) -> ActivityDisplayEntry:
     return ActivityDisplayEntry(
         f"entry:{index}",
-        f"Entry {index}",
-        "operator",
-        body if body is not None else f"body {index}",
+        ActivityDisplayKind.OPERATOR,
+        OperatorPresentation(
+            None,
+            body if body is not None else f"body {index}",
+            True,
+        ),
     )
+
+
+def _activity_event(
+    sequence: int,
+    kind: CodexActivityKind,
+    data: dict[str, object],
+    *,
+    role: CodexActivityRole = CodexActivityRole.IMPLEMENTOR,
+    item_id: str | None = "item",
+) -> CodexActivityEvent:
+    return CodexActivityEvent(
+        sequence,
+        7,
+        role,
+        kind,
+        data,
+        thread_id="thread",
+        turn_id="turn",
+        item_id=item_id,
+    )
+
+
+def _representative_activity_model() -> OperatorActivityModel:
+    model = OperatorActivityModel()
+    model.begin_operator_block("inspect 7")
+    model.append_operator_output("Generation 7\nOutcome: completed")
+    model.finish_operator_block()
+    events: list[CodexActivityEvent] = [
+        _activity_event(1, CodexActivityKind.SESSION_STARTED, {"model": "sol"}),
+        _activity_event(2, CodexActivityKind.TURN_STARTED, {}),
+        _activity_event(
+            3,
+            CodexActivityKind.AGENT_TEXT_DELTA,
+            {"text": "Inspecting task ownership."},
+            item_id="sol-message",
+        ),
+        _activity_event(
+            4,
+            CodexActivityKind.AGENT_MESSAGE,
+            {"text": "I inspected **task ownership** before editing."},
+            item_id="sol-message",
+        ),
+        _activity_event(
+            5,
+            CodexActivityKind.AGENT_REASONING_SUMMARY,
+            {"summary": ["The allocation count is fixed; derive ownership dynamically."]},
+            item_id="sol-reasoning",
+        ),
+    ]
+    tool_calls = [
+        ("read", {"path": "seed/tasks.c", "offset": 0, "length": 10600}, {"status": 0, "output": b"int task;\n" * 1000}),
+        ("write", {"path": "seed/tasks.c", "offset": 0, "data": "int task;\n" * 900}, {"status": 0, "output": b""}),
+        ("truncate", {"path": "seed/tasks.c", "length": 10162}, {"status": 0, "output": b""}),
+        ("remove", {"path": "seed/old.c"}, {"status": 0, "output": b""}),
+    ]
+    sequence = 6
+    for index, (tool, arguments, result) in enumerate(tool_calls):
+        events.append(
+            _activity_event(
+                sequence,
+                CodexActivityKind.TOOL_COMPLETED,
+                {"tool": tool, "arguments": arguments, "result": result},
+                item_id=f"tool-{index}",
+            )
+        )
+        sequence += 1
+    events.extend(
+        [
+            _activity_event(
+                sequence,
+                CodexActivityKind.TOOL_FAILED,
+                {"tool": "read", "arguments": {"path": "seed/missing.c", "offset": 0, "length": 1}, "error": "file not found"},
+                item_id="failed-tool",
+            ),
+            _activity_event(sequence + 1, CodexActivityKind.BUILD_STARTED, {}, item_id=None),
+            _activity_event(sequence + 2, CodexActivityKind.BUILD_COMPILE_COMPLETED, {"result": "success"}, item_id=None),
+            _activity_event(sequence + 3, CodexActivityKind.BUILD_CANDIDATE_STARTED, {}, item_id=None),
+            _activity_event(sequence + 4, CodexActivityKind.BUILD_CANDIDATE_READY, {}, item_id=None),
+            _activity_event(sequence + 5, CodexActivityKind.BUILD_PROTOCOL_VALIDATED, {}, item_id=None),
+            _activity_event(sequence + 6, CodexActivityKind.BUILD_COMPLETED, {"status": 0}, item_id=None),
+            _activity_event(sequence + 7, CodexActivityKind.TOOL_COMPLETED, {"tool": "review", "arguments": {"focus": "correctness"}, "result": "Review result."}, item_id="review"),
+            _activity_event(sequence + 8, CodexActivityKind.AGENT_REASONING_SUMMARY, {"summary": ["Checking page restoration."]}, role=CodexActivityRole.REVIEWER, item_id="luna-reasoning"),
+            _activity_event(sequence + 9, CodexActivityKind.AGENT_MESSAGE, {"text": "The ownership accounting is sound."}, role=CodexActivityRole.REVIEWER, item_id="luna-message"),
+            _activity_event(sequence + 10, CodexActivityKind.TURN_COMPLETED, {}),
+            _activity_event(sequence + 11, CodexActivityKind.REVIEW_COMPLETED, {}, role=CodexActivityRole.REVIEWER),
+            _activity_event(sequence + 12, CodexActivityKind.TURN_INTERRUPTED, {"status": "interrupted"}, item_id=None),
+            _activity_event(sequence + 13, CodexActivityKind.TOOL_STARTED, {"tool": "request_feature", "arguments": {"title": "External capability", "description": "A trusted-environment capability is justified."}}, item_id="feature"),
+        ]
+    )
+    for event in events:
+        model.consume(event)
+    return model
 
 
 class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
@@ -130,14 +236,18 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(90, 24)) as pilot:
             transcript = app.query_one(ActivityTranscript)
             for index in range(3):
+                model.begin_operator_block()
                 model.append_operator_output(f"line {index}")
+                model.finish_operator_block()
             transcript.reconcile(model.entries)
             await pilot.pause()
             oldest_key = model.entries[0].key
             oldest_row = transcript.row_for(oldest_key)
 
             for index in range(3, 10):
+                model.begin_operator_block()
                 model.append_operator_output(f"line {index}")
+                model.finish_operator_block()
             transcript.reconcile(model.entries)
             await pilot.pause()
 
@@ -157,7 +267,9 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
         app = _TranscriptApp()
         model = OperatorActivityModel()
         for index in range(299):
+            model.begin_operator_block()
             model.append_operator_output(f"history {index}")
+            model.finish_operator_block()
         model.consume(
             CodexActivityEvent(
                 1,
@@ -211,11 +323,370 @@ class ActivityTranscriptTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(transcript.row_for(entries[0].key), first)
             self.assertIs(transcript.row_for(entries[150].key), middle)
             self.assertIs(transcript.row_for(entries[-1].key), tail)
-            self.assertIn("streamed update 100", tail.entry.body)
+            self.assertIn("streamed update 100", tail.entry.presentation.text)
             self.assertEqual(len(transcript.rows), len(entries))
 
 
+class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_representative_transcript_is_structural_at_common_sizes(self) -> None:
+        model = _representative_activity_model()
+        self.assertNotIn("turn.completed", model.render_text())
+        self.assertNotIn("session.started", model.render_text())
+        for size in ((80, 24), (100, 30), (140, 40)):
+            with self.subTest(size=size):
+                app = _TranscriptApp()
+                async with app.run_test(size=size) as pilot:
+                    transcript = app.query_one(ActivityTranscript)
+                    transcript.reconcile(model.entries)
+                    await pilot.pause()
+                    self.assertEqual(transcript.row_keys, tuple(entry.key for entry in model.entries))
+                    self.assertTrue(any(isinstance(row, AgentMessageRow) for row in transcript.rows))
+                    self.assertTrue(any(isinstance(row, ToolRow) for row in transcript.rows))
+                    self.assertTrue(any(isinstance(row, TrustedBuildRow) for row in transcript.rows))
+                    self.assertTrue(any(isinstance(row, FeatureRequestRow) for row in transcript.rows))
+                    self.assertEqual(
+                        app.query_one("#activity-scroll", VerticalScroll).max_scroll_x,
+                        0,
+                    )
+
+    async def test_feature_request_renders_pending_as_creation_time_status(self) -> None:
+        model = OperatorActivityModel()
+        request = {
+            "tool": "request_feature",
+            "arguments": {
+                "title": "External capacity",
+                "description": "A trusted-environment capability is justified.",
+            },
+        }
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.TOOL_STARTED,
+                request,
+                item_id="feature",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            row = transcript.rows[0]
+            self.assertIsInstance(row, FeatureRequestRow)
+            started = str(row.render())
+            self.assertIn("recording", started)
+            self.assertNotIn("pending", started)
+            self.assertNotIn("completed", started)
+
+            model.consume(
+                _activity_event(
+                    2,
+                    CodexActivityKind.TOOL_COMPLETED,
+                    {**request, "result": {"status": 0, "output": b"4"}},
+                    item_id="feature",
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            self.assertIs(transcript.rows[0], row)
+            recorded = str(row.render())
+            self.assertIn("recorded · request 4", recorded)
+            self.assertIn("initial status: pending", recorded)
+            self.assertIn("recording did not provision the capability", recorded)
+            self.assertNotIn("trusted status", recorded)
+            self.assertNotIn("approved", recorded)
+            self.assertNotIn("denied", recorded)
+            self.assertNotIn("completed", recorded)
+
+            failed_request = {
+                "tool": "request_feature",
+                "arguments": {
+                    "title": "Rejected request",
+                    "description": "Cannot be recorded.",
+                },
+            }
+            model.consume(
+                _activity_event(
+                    3,
+                    CodexActivityKind.TOOL_FAILED,
+                    {**failed_request, "error": "request rejected"},
+                    item_id="failed-feature",
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            failed_row = transcript.rows[1]
+            self.assertIsInstance(failed_row, FeatureRequestRow)
+            failed = str(failed_row.render())
+            self.assertIn("failed", failed)
+            self.assertIn("request rejected", failed)
+            self.assertNotIn("pending", failed)
+
+    async def test_streaming_message_finalizes_as_markdown_in_same_row(self) -> None:
+        model = OperatorActivityModel()
+        model.begin_operator_block()
+        model.append_operator_output("Stable operator output")
+        model.finish_operator_block()
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.AGENT_TEXT_DELTA,
+                {"text": "Streaming **plain**"},
+                item_id="message",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            unrelated = transcript.rows[0]
+            row = transcript.rows[1]
+            self.assertIsInstance(row, AgentMessageRow)
+            self.assertFalse(row.renders_markdown)
+
+            model.consume(
+                _activity_event(
+                    2,
+                    CodexActivityKind.AGENT_MESSAGE,
+                    {"text": "Final **Markdown** message.\x1b[2J"},
+                    item_id="message",
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            self.assertIs(transcript.rows[0], unrelated)
+            self.assertIs(transcript.rows[1], row)
+            self.assertTrue(row.renders_markdown)
+            self.assertIn("\\x1b[2J", row.entry.presentation.text)
+            self.assertNotIn("\x1b", row.entry.presentation.text)
+            renderable = row._Static__content.renderables[1].renderable
+            self.assertIsInstance(renderable, RichMarkdown)
+
+    async def test_representative_activity_selects_specialized_rows(self) -> None:
+        model = OperatorActivityModel()
+        model.begin_operator_block("inspect 7")
+        model.append_operator_output("Generation 7\nOutcome: completed")
+        model.finish_operator_block()
+        events = [
+            _activity_event(
+                1,
+                CodexActivityKind.AGENT_MESSAGE,
+                {"text": "Sol result."},
+                item_id="sol",
+            ),
+            _activity_event(
+                2,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {"summary": ["Inspect ownership."]},
+                item_id="reasoning",
+            ),
+            _activity_event(
+                3,
+                CodexActivityKind.TOOL_COMPLETED,
+                {
+                    "tool": "read",
+                    "arguments": {"path": "seed/tasks.c", "offset": 0, "length": 4096},
+                    "result": {"status": 0, "output": b"int task;\n" * 100},
+                },
+                item_id="read",
+            ),
+            _activity_event(4, CodexActivityKind.BUILD_STARTED, {}, item_id=None),
+            _activity_event(
+                5,
+                CodexActivityKind.TOOL_STARTED,
+                {
+                    "tool": "request_feature",
+                    "arguments": {"title": "External capability", "description": "Needed for later work."},
+                },
+                item_id="feature",
+            ),
+            _activity_event(
+                6,
+                CodexActivityKind.TURN_FAILED,
+                {"status": "failed"},
+                item_id=None,
+            ),
+        ]
+        for event in events:
+            model.consume(event)
+        app = _TranscriptApp()
+        async with app.run_test(size=(100, 30)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            self.assertEqual(
+                tuple(type(row) for row in transcript.rows),
+                (
+                    OperatorRow,
+                    AgentMessageRow,
+                    ReasoningRow,
+                    ToolRow,
+                    TrustedBuildRow,
+                    FeatureRequestRow,
+                    LifecycleRow,
+                ),
+            )
+
+    async def test_tool_completion_and_build_phases_preserve_outer_rows(self) -> None:
+        model = OperatorActivityModel()
+        call = {"tool": "read", "arguments": {"path": "seed/tasks.c", "offset": 0, "length": 64}}
+        model.consume(
+            _activity_event(1, CodexActivityKind.TOOL_STARTED, call, item_id="read")
+        )
+        model.consume(_activity_event(2, CodexActivityKind.BUILD_STARTED, {}, item_id=None))
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            tool_row, build_row = transcript.rows
+
+            model.consume(
+                _activity_event(
+                    3,
+                    CodexActivityKind.TOOL_COMPLETED,
+                    {**call, "result": {"status": 0, "output": b"source\n"}},
+                    item_id="read",
+                )
+            )
+            model.consume(
+                _activity_event(
+                    4,
+                    CodexActivityKind.BUILD_COMPILE_COMPLETED,
+                    {"result": "success"},
+                    item_id=None,
+                )
+            )
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            self.assertIs(transcript.rows[0], tool_row)
+            self.assertIs(transcript.rows[1], build_row)
+            self.assertFalse(tool_row.detail_expanded)
+            self.assertIn("compile/link", str(build_row.render()))
+
+    async def test_failed_tool_detail_defaults_visible(self) -> None:
+        model = OperatorActivityModel()
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.TOOL_FAILED,
+                {
+                    "tool": "read",
+                    "arguments": {"path": "seed/tasks.c", "offset": 0, "length": 4},
+                    "error": "guest read failed",
+                },
+                item_id="failed",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            row = transcript.rows[0]
+            self.assertIsInstance(row, ToolRow)
+            self.assertTrue(row.detail_expanded)
+            self.assertTrue(row.query_one(".tool-detail").display)
+            self.assertIn("guest read failed", str(row.query_one(".tool-detail").render()))
+
+    async def test_failed_write_displays_error_instead_of_source_payload(self) -> None:
+        model = OperatorActivityModel()
+        model.consume(
+            _activity_event(
+                1,
+                CodexActivityKind.TOOL_FAILED,
+                {
+                    "tool": "write",
+                    "arguments": {
+                        "path": "seed/tasks.c",
+                        "offset": 0,
+                        "data": "int attempted_write;\n" * 100,
+                    },
+                    "error": "guest write failed",
+                },
+                item_id="failed-write",
+            )
+        )
+        app = _TranscriptApp()
+        async with app.run_test(size=(90, 24)) as pilot:
+            transcript = app.query_one(ActivityTranscript)
+            transcript.reconcile(model.entries)
+            await pilot.pause()
+            row = transcript.rows[0]
+            self.assertIsInstance(row, ToolRow)
+            self.assertTrue(row.detail_expanded)
+            detail = str(row.query_one(".tool-detail").render())
+            self.assertIn("guest write failed", detail)
+            self.assertNotIn("attempted_write", detail)
+
+
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_detail_toggle_preserves_input_and_historical_scroll(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-tool-detail"))
+        stream = CodexActivityStream()
+        app = OperatorTui(runtime, stream)
+        async with app.run_test(size=(80, 18)) as pilot:
+            await pilot.pause(0.15)
+            for index in range(30):
+                stream.publish(
+                    6,
+                    CodexActivityRole.IMPLEMENTOR,
+                    CodexActivityKind.AGENT_MESSAGE,
+                    {"text": f"history {index} " + "x" * 60},
+                    thread_id="thread",
+                    turn_id="turn",
+                    item_id=f"history-{index}",
+                )
+            stream.publish(
+                6,
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.TOOL_COMPLETED,
+                {
+                    "tool": "read",
+                    "arguments": {"path": "seed/tasks.c", "offset": 0, "length": 8192},
+                    "result": {"status": 0, "output": b"source line\n" * 200},
+                },
+                thread_id="thread",
+                turn_id="turn",
+                item_id="read",
+            )
+            await pilot.pause(0.2)
+            input_widget = app.query_one("#command-input", Input)
+            input_widget.value = "partially typed"
+            input_widget.focus()
+            transcript = app.query_one(ActivityTranscript)
+            pane = app.query_one("#activity-scroll", VerticalScroll)
+            tool_row = transcript.rows[-1]
+            self.assertIsInstance(tool_row, ToolRow)
+            self.assertFalse(tool_row.detail_expanded)
+
+            app.action_activity_end()
+            await pilot.pause()
+            await pilot.click(tool_row._toggle, offset=(1, 0))
+            await pilot.pause()
+            self.assertTrue(tool_row.detail_expanded)
+            self.assertTrue(app._follow.following)
+            self.assertTrue(pane.is_vertical_scroll_end)
+            self.assertEqual(input_widget.value, "partially typed")
+            self.assertIs(app.focused, input_widget)
+            await pilot.click(tool_row._detail_close, offset=(1, 0))
+            await pilot.pause()
+            self.assertFalse(tool_row.detail_expanded)
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            reading_position = pane.scroll_y
+            tool_row.post_message(ToolDetailToggleRequested())
+            await pilot.pause()
+            self.assertTrue(tool_row.detail_expanded)
+            self.assertAlmostEqual(pane.scroll_y, reading_position)
+            self.assertEqual(input_widget.value, "partially typed")
+            self.assertIs(app.focused, input_widget)
+            app.exit()
+
+        app._executor.join(2.0)
+
     async def test_live_follow_anchors_only_after_content_overflows(self) -> None:
         runtime = _runtime(Path("/tmp/tui-short-content"))
         app = OperatorTui(runtime, CodexActivityStream())
@@ -231,7 +702,9 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(pane.is_anchored)
 
             for index in range(3):
+                app._model.begin_operator_block()
                 app._model.append_operator_output(f"short row {index}")
+                app._model.finish_operator_block()
             app._activity_changed(3)
             await pilot.pause()
             await pilot.pause()
@@ -249,7 +722,9 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(pane.is_anchored)
 
             for index in range(3, 24):
+                app._model.begin_operator_block()
                 app._model.append_operator_output(f"overflow row {index}")
+                app._model.finish_operator_block()
             app._activity_changed(21)
             await pilot.pause()
             await pilot.pause()
@@ -389,6 +864,18 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             rendered = app.activity_model.render_text()
             self.assertIn("Working asynchronously.", rendered)
             self.assertIn("State: STOPPED", rendered)
+            operator_entries = [
+                entry
+                for entry in app.activity_model.entries
+                if entry.kind is ActivityDisplayKind.OPERATOR
+            ]
+            command_blocks = [
+                entry.presentation
+                for entry in operator_entries
+                if entry.presentation.command == "status"
+            ]
+            self.assertEqual(len(command_blocks), 1)
+            self.assertIn("State: STOPPED", command_blocks[0].output)
             app.exit()
 
         app._executor.join(2.0)
