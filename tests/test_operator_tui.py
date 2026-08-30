@@ -35,6 +35,94 @@ def _runtime(path: Path, state: RuntimeState = RuntimeState.STOPPED) -> Mock:
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_two_escape_presses_submit_authoritative_pause(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-escape-pause"), RuntimeState.RUNNING)
+        app = OperatorTui(runtime, CodexActivityStream())
+        submit = Mock()
+        app._executor.submit = submit
+        async with app.run_test(size=(90, 24)) as pilot:
+            await pilot.pause(0.15)
+            input_widget = app.query_one("#command-input", Input)
+            input_widget.value = "partially typed"
+
+            await pilot.press("escape")
+            submit.assert_not_called()
+            runtime.pause.assert_not_called()
+            self.assertEqual(input_widget.value, "partially typed")
+            self.assertIn(
+                "Esc again to confirm pause",
+                str(app.query_one("#follow-indicator").render()),
+            )
+
+            await pilot.press("escape")
+            submit.assert_called_once_with("pause")
+            runtime.pause.assert_not_called()
+            self.assertEqual(input_widget.value, "partially typed")
+            app.exit()
+
+        app._executor.join(2.0)
+
+    async def test_escape_pause_expires_and_typing_disarms_it(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-escape-timeout"), RuntimeState.RUNNING)
+        with patch("harness.operator_tui.PAUSE_CONFIRMATION_SECONDS", 0.05):
+            app = OperatorTui(runtime, CodexActivityStream())
+            submit = Mock()
+            app._executor.submit = submit
+            async with app.run_test(size=(90, 24)) as pilot:
+                await pilot.pause(0.15)
+                input_widget = app.query_one("#command-input", Input)
+                input_widget.value = "keep"
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+                self.assertIsNone(app._pause_armed_deadline)
+                self.assertIn(
+                    "Esc: pause",
+                    str(app.query_one("#follow-indicator").render()),
+                )
+                submit.assert_not_called()
+
+                await pilot.press("escape")
+                await pilot.press("x")
+                self.assertIsNone(app._pause_armed_deadline)
+                self.assertEqual(input_widget.value, "keepx")
+                submit.assert_not_called()
+                runtime.pause.assert_not_called()
+                app.exit()
+
+            app._executor.join(2.0)
+
+    async def test_escape_pause_is_disarmed_by_runtime_transition(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-escape-state"), RuntimeState.RUNNING)
+        app = OperatorTui(runtime, CodexActivityStream())
+        submit = Mock()
+        app._executor.submit = submit
+        async with app.run_test(size=(90, 24)) as pilot:
+            await pilot.pause(0.15)
+            await pilot.press("escape")
+            self.assertIsNotNone(app._pause_armed_deadline)
+
+            runtime.generation_number += 1
+            app._refresh_header()
+            self.assertIsNone(app._pause_armed_deadline)
+
+            for state in (
+                RuntimeState.PAUSED,
+                RuntimeState.AWAITING_NEXT_GENERATION,
+                RuntimeState.STOPPED,
+            ):
+                runtime.state = state
+                app._refresh_header()
+                await pilot.press("escape")
+                submit.assert_not_called()
+                self.assertNotIn(
+                    "Esc: pause",
+                    str(app.query_one("#follow-indicator").render()),
+                )
+            runtime.pause.assert_not_called()
+            app.exit()
+
+        app._executor.join(2.0)
+
     async def test_command_output_and_activity_coexist_without_input_corruption(
         self,
     ) -> None:
@@ -122,10 +210,12 @@ class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.15)
             prompt = str(app.query_one("#command-prompt").render())
             self.assertIn("Stop the run without archiving", prompt)
-            await pilot.press("enter")
+            await pilot.press("escape")
             await pilot.pause(0.15)
             self.assertIn("Quit cancelled.", app.activity_model.render_text())
             self.assertFalse(app._busy)
+            self.assertIsNone(app._pause_armed_deadline)
+            runtime.pause.assert_not_called()
             app.exit()
 
         app._executor.join(2.0)

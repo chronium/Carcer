@@ -36,6 +36,7 @@ from harness.codex_app_server import (
 )
 from harness.codex_generation_worker import (
     AGENT_CONTRACT_VERSION,
+    DEFAULT_REASONING_SUMMARY,
     DEFAULT_SERVICE_TIER,
     _implementor_prompt,
 )
@@ -793,6 +794,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertIn("Previous generation handoff: none.", prompt_text)
             self.assertEqual(turn["effort"], "high")
+            self.assertEqual(turn["summary"], DEFAULT_REASONING_SUMMARY)
             self.assertEqual(turn["model"], "gpt-5.6-sol")
             self.assertEqual(turn["serviceTier"], DEFAULT_SERVICE_TIER)
 
@@ -879,6 +881,28 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                         worker.run_generation(runtime)
                     _assert_process_dead(self, fake.record()["pid"])
 
+    def test_rejects_unknown_reasoning_summary_without_fallback(self) -> None:
+        with _fake_codex({}) as fake:
+            runtime = _runtime_mock()
+            worker = CodexGenerationWorker(fake.executable, fake.auth_file)
+
+            with self.assertRaisesRegex(
+                CodexGenerationWorkerError,
+                "unsupported reasoning summary setting",
+            ):
+                worker.run_generation(
+                    runtime,
+                    reasoning_summary="automatic",
+                )
+            record = fake.record()
+            methods = [
+                message.get("method")
+                for message in record.get("messages", [])
+            ]
+            self.assertNotIn("thread/start", methods)
+            self.assertNotIn("turn/start", methods)
+            _assert_process_dead(self, record["pid"])
+
     def test_surfaces_turn_failure_and_cleans_up(self) -> None:
         scenario = {
             "turn_status": "failed",
@@ -955,6 +979,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                     for turn in turns
                 )
             )
+            self.assertTrue(
+                all(
+                    turn["params"]["summary"] == DEFAULT_REASONING_SUMMARY
+                    for turn in turns
+                )
+            )
             session.close()
             _assert_process_dead(self, pid)
 
@@ -1003,6 +1033,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     item["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
+                    for item in turns
+                )
+            )
+            self.assertTrue(
+                all(
+                    item["params"]["summary"] == DEFAULT_REASONING_SUMMARY
                     for item in turns
                 )
             )

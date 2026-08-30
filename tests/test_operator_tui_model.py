@@ -68,6 +68,91 @@ class OperatorActivityModelTests(unittest.TestCase):
         self.assertNotIn("Check \n", rendered)
         self.assertIn("Sol · reasoning summary", rendered)
 
+    def test_empty_reasoning_is_suppressed_and_nonempty_items_stay_distinct(
+        self,
+    ) -> None:
+        model = OperatorActivityModel()
+        model.consume(
+            _event(
+                1,
+                CodexActivityKind.AGENT_REASONING_DELTA,
+                {"text": "", "summary_index": 0},
+                item_id="empty-delta",
+            )
+        )
+        model.consume(
+            _event(
+                2,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {"summary": ["", "  "]},
+                item_id="empty-completion",
+            )
+        )
+        self.assertEqual(model.entries, ())
+
+        model.consume(
+            _event(
+                3,
+                CodexActivityKind.AGENT_REASONING_DELTA,
+                {"text": "Inspect ", "summary_index": 0},
+                item_id="sol-reasoning",
+            )
+        )
+        model.consume(
+            _event(
+                4,
+                CodexActivityKind.AGENT_REASONING_DELTA,
+                {"text": "state.", "summary_index": 0},
+                item_id="sol-reasoning",
+            )
+        )
+        self.assertEqual(len(model.entries), 1)
+        self.assertIn("Inspect state.", model.entries[0].body)
+        model.consume(
+            _event(
+                5,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {"summary": ["Inspected state."]},
+                item_id="sol-reasoning",
+            )
+        )
+        self.assertEqual(len(model.entries), 1)
+        self.assertEqual(model.entries[0].body, "Inspected state.")
+
+        model.consume(
+            _event(
+                6,
+                CodexActivityKind.AGENT_REASONING_DELTA,
+                {"text": "Transient", "summary_index": 0},
+                item_id="transient",
+            )
+        )
+        model.consume(
+            _event(
+                7,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {"summary": []},
+                item_id="transient",
+            )
+        )
+        self.assertEqual(len(model.entries), 1)
+        self.assertNotIn("Transient", model.render_text())
+
+        model.consume(
+            _event(
+                8,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {"summary": ["Reviewer summary."]},
+                role=CodexActivityRole.REVIEWER,
+                item_id="luna-reasoning",
+            )
+        )
+        self.assertEqual(len(model.entries), 2)
+        self.assertEqual(
+            [entry.label for entry in model.entries],
+            ["Sol · reasoning summary", "Luna · reasoning summary"],
+        )
+
     def test_tool_lifecycle_coalesces_and_failed_tool_is_final(self) -> None:
         model = OperatorActivityModel()
         started = {

@@ -173,6 +173,11 @@ class OperatorActivityModel:
             parts.clear()
             parts.update(enumerate(summary))
         text = "\n".join(parts[index] for index in sorted(parts))
+        if not text.strip():
+            if event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY:
+                self._reasoning_text.pop(key, None)
+                self._remove(key)
+            return
         self._upsert(
             key,
             f"{self._role_name(event.role)} · reasoning summary",
@@ -181,6 +186,16 @@ class OperatorActivityModel:
         )
         if event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY:
             self._reasoning_text.pop(key, None)
+
+    def _remove(self, key: str) -> None:
+        position = self._positions.get(key)
+        if position is None:
+            return
+        self._entries.pop(position)
+        self._forget(key)
+        self._positions = {
+            entry.key: index for index, entry in enumerate(self._entries)
+        }
 
     def _consume_tool(self, event: CodexActivityEvent) -> None:
         key = self._correlation_key(event, "tool")
