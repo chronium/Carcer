@@ -22,6 +22,11 @@ from harness.observability import (
     ExperimentObservability,
     ExperimentObservabilityError,
 )
+from harness.codex_generation_worker import (
+    AGENT_CONTRACT_VERSION,
+    DEFAULT_SERVICE_TIER,
+)
+from harness.codex_review_worker import DEFAULT_REVIEWER_SERVICE_TIER
 from harness import (
     TEST_HARDWARE_PROFILE,
     CodexGenerationWorker,
@@ -123,7 +128,13 @@ class ExperimentObservabilityTests(unittest.TestCase):
             observability.record(
                 "codex_session_started",
                 47,
-                {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+                {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "high",
+                    "service_tier": DEFAULT_SERVICE_TIER,
+                    "service_tier_name": "Fast",
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
+                },
             )
             observability.record(
                 "codex_turn_completed",
@@ -131,6 +142,9 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 {
                     "model": "gpt-5.6-sol",
                     "reasoning_effort": "high",
+                    "service_tier": DEFAULT_SERVICE_TIER,
+                    "service_tier_name": "Fast",
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
                     "turn_number": 1,
                     "duration_seconds": 2.0,
                     "result": "completed",
@@ -142,6 +156,8 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 {
                     "model": "gpt-5.6-luna",
                     "reasoning_effort": "high",
+                    "service_tier": DEFAULT_REVIEWER_SERVICE_TIER,
+                    "service_tier_name": "Fast",
                     "focus": "security",
                     "duration_seconds": 0.5,
                 },
@@ -473,6 +489,34 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 generation_started["data"]["memory_mib"],
                 TEST_HARDWARE_PROFILE.memory_mib,
+            )
+            implementor_started = next(
+                event
+                for event in events
+                if event["event"] == "codex_session_started"
+            )
+            self.assertEqual(
+                implementor_started["data"]["service_tier"],
+                DEFAULT_SERVICE_TIER,
+            )
+            self.assertEqual(
+                implementor_started["data"]["service_tier_name"],
+                "Fast",
+            )
+            self.assertEqual(
+                implementor_started["data"]["agent_contract_version"],
+                AGENT_CONTRACT_VERSION,
+            )
+            review_started = next(
+                event for event in events if event["event"] == "review_started"
+            )
+            self.assertEqual(
+                review_started["data"]["service_tier"],
+                DEFAULT_REVIEWER_SERVICE_TIER,
+            )
+            self.assertEqual(
+                review_started["data"]["service_tier_name"],
+                "Fast",
             )
             serialized = json.dumps(events, ensure_ascii=False)
             self.assertNotIn("OBSERVABILITY-HANDOFF-SECRET", serialized)

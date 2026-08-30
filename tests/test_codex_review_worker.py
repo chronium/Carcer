@@ -19,6 +19,7 @@ from harness import (
     ToolResult,
 )
 from harness.observability import ExperimentObservability
+from harness.codex_review_worker import DEFAULT_REVIEWER_SERVICE_TIER
 from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _build_seed,
@@ -305,6 +306,10 @@ class CodexReviewerProtocolTests(unittest.TestCase):
             thread = _request(record["messages"], "thread/start")["params"]
             self.assertTrue(thread["ephemeral"])
             self.assertEqual(thread["model"], "gpt-5.6-luna")
+            self.assertEqual(
+                thread["serviceTier"],
+                DEFAULT_REVIEWER_SERVICE_TIER,
+            )
             self.assertEqual(thread["permissions"], "codexos-reviewer")
             self.assertEqual(len(thread["dynamicTools"]), 1)
             namespace = thread["dynamicTools"][0]
@@ -312,6 +317,13 @@ class CodexReviewerProtocolTests(unittest.TestCase):
             self.assertEqual(
                 [tool["name"] for tool in namespace["tools"]],
                 ["list", "read"],
+            )
+            turn = _request(record["messages"], "turn/start")["params"]
+            self.assertEqual(turn["model"], "gpt-5.6-luna")
+            self.assertEqual(turn["effort"], "high")
+            self.assertEqual(
+                turn["serviceTier"],
+                DEFAULT_REVIEWER_SERVICE_TIER,
             )
             config = tomllib.loads(record["config"])
             profile = config["permissions"]["codexos-reviewer"]
@@ -526,6 +538,44 @@ class CodexReviewerProtocolTests(unittest.TestCase):
         )
         self.assertTrue(implementor_record["tool_results"][1]["result"]["success"])
         runtime.invoke_tool.assert_called_once_with("list", [])
+        _assert_process_dead(self, reviewer_record["pid"])
+
+    def test_unavailable_reviewer_fast_tier_is_an_isolated_review_failure(
+        self,
+    ) -> None:
+        implementor_scenario = {
+            "tool_calls": [
+                {"namespace": None, "tool": "review", "arguments": {}},
+                {"tool": "list", "arguments": {}},
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "service_tiers": [],
+        }
+        with _fake_codex(implementor_scenario) as implementor:
+            with _fake_codex(reviewer_scenario) as reviewer:
+                runtime = _runtime_mock()
+                runtime.invoke_tool.return_value = ToolResult(0, b"")
+                result = CodexGenerationWorker(
+                    implementor.executable,
+                    implementor.auth_file,
+                    reviewer_codex_executable=reviewer.executable,
+                    reviewer_auth_file=reviewer.auth_file,
+                ).run_generation(runtime)
+                response = implementor.record()["tool_results"]
+                reviewer_record = reviewer.record()
+
+        self.assertEqual(result.turn_status, "completed")
+        self.assertFalse(response[0]["result"]["success"])
+        self.assertIn(
+            "does not support service tier 'priority'",
+            response[0]["result"]["contentItems"][0]["text"],
+        )
+        self.assertTrue(response[1]["result"]["success"])
+        runtime.invoke_tool.assert_called_once_with("list", [])
+        self.assertIs(runtime.state, RuntimeState.RUNNING)
         _assert_process_dead(self, reviewer_record["pid"])
 
     def test_reviewer_setup_oserror_is_isolated_from_implementor(self) -> None:

@@ -33,6 +33,7 @@ from harness.codex_app_server import (
 )
 from harness.codex_generation_worker import (
     AGENT_CONTRACT_VERSION,
+    DEFAULT_SERVICE_TIER,
     _implementor_prompt,
 )
 from harness.observability import ExperimentObservability
@@ -522,6 +523,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertNotEqual(thread["cwd"], record["codex_home"])
             self.assertEqual(thread["permissions"], "codexos-implementor")
+            self.assertEqual(thread["serviceTier"], DEFAULT_SERVICE_TIER)
             self.assertEqual(thread["approvalPolicy"], "never")
             dynamic_tools = thread["dynamicTools"]
             self.assertEqual(len(dynamic_tools), 2)
@@ -555,6 +557,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertIn("Previous generation handoff: none.", prompt_text)
             self.assertEqual(turn["effort"], "high")
             self.assertEqual(turn["model"], "gpt-5.6-sol")
+            self.assertEqual(turn["serviceTier"], DEFAULT_SERVICE_TIER)
 
             approvals = record["server_responses"]
             self.assertEqual(approvals[0]["result"], {"decision": "decline"})
@@ -611,6 +614,33 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             methods = [message.get("method") for message in record.get("messages", [])]
             self.assertNotIn("turn/start", methods)
             _assert_process_dead(self, record["pid"])
+
+    def test_rejects_unavailable_or_malformed_service_tier_catalog(self) -> None:
+        cases = (
+            (
+                {"service_tiers": []},
+                "does not support service tier 'priority'",
+            ),
+            (
+                {"service_tiers": "not a catalog list"},
+                "malformed service-tier capabilities",
+            ),
+        )
+        for scenario, message in cases:
+            with self.subTest(message=message):
+                with _fake_codex(scenario) as fake:
+                    runtime = _runtime_mock()
+                    worker = CodexGenerationWorker(
+                        fake.executable,
+                        fake.auth_file,
+                    )
+
+                    with self.assertRaisesRegex(
+                        CodexGenerationWorkerError,
+                        message,
+                    ):
+                        worker.run_generation(runtime)
+                    _assert_process_dead(self, fake.record()["pid"])
 
     def test_surfaces_turn_failure_and_cleans_up(self) -> None:
         scenario = {
@@ -680,6 +710,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 turns[1]["params"]["input"][0]["text"],
                 "Continue working on the current CodexOS generation.",
             )
+            self.assertTrue(
+                all(
+                    turn["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
+                    for turn in turns
+                )
+            )
             session.close()
             _assert_process_dead(self, pid)
 
@@ -719,6 +755,16 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             methods = [item.get("method") for item in record["messages"]]
             self.assertEqual(methods.count("turn/interrupt"), 1)
             self.assertEqual(methods.count("thread/start"), 1)
+            turns = [
+                item for item in record["messages"]
+                if item.get("method") == "turn/start"
+            ]
+            self.assertTrue(
+                all(
+                    item["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
+                    for item in turns
+                )
+            )
             session.close()
 
     def test_interrupt_requires_terminal_interrupted_notification(self) -> None:

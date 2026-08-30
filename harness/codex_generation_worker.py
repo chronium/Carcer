@@ -23,6 +23,7 @@ from .codex_app_server import (
 from .codex_review_worker import (
     DEFAULT_REVIEWER_MODEL,
     DEFAULT_REVIEWER_REASONING_EFFORT,
+    DEFAULT_REVIEWER_SERVICE_TIER,
     CodexReviewWorker,
     CodexReviewWorkerError,
 )
@@ -36,6 +37,7 @@ from .tool_protocol import ToolResult
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
 AGENT_CONTRACT_VERSION = 2
 
@@ -78,11 +80,13 @@ class CodexGenerationSession:
         *,
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        service_tier: str = DEFAULT_SERVICE_TIER,
         objective: str | None = None,
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
     ) -> None:
         self._codex_executable = codex_executable
         self._auth_file = (
@@ -98,9 +102,12 @@ class CodexGenerationSession:
         )
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
+        self._reviewer_service_tier = reviewer_service_tier
         self._runtime = runtime
         self._model = model
         self._reasoning_effort = reasoning_effort
+        self._service_tier = service_tier
+        self._service_tier_name: str | None = None
         self._objective = objective
         self._generation_number = runtime.generation_number
         self._server: CodexAppServer | None = None
@@ -155,9 +162,14 @@ class CodexGenerationSession:
         )
         try:
             server.__enter__()
-            server.validate_model(self._model, self._reasoning_effort)
+            service_tier_name = server.validate_model(
+                self._model,
+                self._reasoning_effort,
+                self._service_tier,
+            )
             thread_id = server.start_thread(
                 model=self._model,
+                service_tier=self._service_tier,
                 permission_profile=_PERMISSION_PROFILE,
                 dynamic_tools=[
                     _dynamic_tool_namespace(),
@@ -166,6 +178,7 @@ class CodexGenerationSession:
             )
             self._server = server
             self._thread_id = thread_id
+            self._service_tier_name = service_tier_name
             server.set_server_request_handler(self._handle_server_request)
             self._started = True
             self._record(
@@ -173,6 +186,8 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "service_tier": self._service_tier,
+                    "service_tier_name": service_tier_name,
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
@@ -223,6 +238,7 @@ class CodexGenerationSession:
                     prompt=prompt,
                     model=self._model,
                     effort=self._reasoning_effort,
+                    service_tier=self._service_tier,
                     permission_profile=_PERMISSION_PROFILE,
                 )
             except CodexAppServerError as error:
@@ -237,6 +253,8 @@ class CodexGenerationSession:
             {
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
+                "service_tier": self._service_tier,
+                **self._service_tier_name_data(),
                 "turn_number": turn_number,
                 "agent_contract_version": AGENT_CONTRACT_VERSION,
             },
@@ -249,6 +267,8 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "service_tier": self._service_tier,
+                    **self._service_tier_name_data(),
                     "turn_number": turn_number,
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                     "duration_seconds": max(
@@ -329,6 +349,8 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "service_tier": self._service_tier,
+                    **self._service_tier_name_data(),
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
@@ -388,12 +410,19 @@ class CodexGenerationSession:
             {
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
+                "service_tier": self._service_tier,
+                **self._service_tier_name_data(),
                 "turn_number": turn_number,
                 "agent_contract_version": AGENT_CONTRACT_VERSION,
                 "duration_seconds": max(0.0, time.monotonic() - started_at),
                 "result": "failed",
             },
         )
+
+    def _service_tier_name_data(self) -> dict[str, object]:
+        if self._service_tier_name is None:
+            return {}
+        return {"service_tier_name": self._service_tier_name}
 
     def _record_token_usage(
         self,
@@ -583,6 +612,7 @@ class CodexGenerationSession:
                 request=request,
                 model=self._reviewer_model,
                 reasoning_effort=self._reviewer_reasoning_effort,
+                service_tier=self._reviewer_service_tier,
             )
         finally:
             with self._lock:
@@ -690,6 +720,7 @@ class CodexGenerationWorker:
         reviewer_auth_file: str | Path | None = None,
         reviewer_model: str = DEFAULT_REVIEWER_MODEL,
         reviewer_reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
+        reviewer_service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
     ) -> None:
         self._codex_executable = codex_executable
         self._auth_file = auth_file
@@ -697,6 +728,7 @@ class CodexGenerationWorker:
         self._reviewer_auth_file = reviewer_auth_file
         self._reviewer_model = reviewer_model
         self._reviewer_reasoning_effort = reviewer_reasoning_effort
+        self._reviewer_service_tier = reviewer_service_tier
         self._running = False
 
     def run_generation(
@@ -705,6 +737,7 @@ class CodexGenerationWorker:
         *,
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        service_tier: str = DEFAULT_SERVICE_TIER,
         objective: str | None = None,
     ) -> CodexGenerationResult:
         if self._running:
@@ -716,11 +749,13 @@ class CodexGenerationWorker:
             self._auth_file,
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             objective=objective,
             reviewer_codex_executable=self._reviewer_codex_executable,
             reviewer_auth_file=self._reviewer_auth_file,
             reviewer_model=self._reviewer_model,
             reviewer_reasoning_effort=self._reviewer_reasoning_effort,
+            reviewer_service_tier=self._reviewer_service_tier,
         )
         try:
             return session.run_initial_turn()

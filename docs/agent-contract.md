@@ -26,3 +26,16 @@ Mutable guest source and guest-side tooling are the implementor's persistent
 engineering state. Knowledge needed by later generations must be persisted there
 or placed deliberately in the generation handoff; Codex conversation history is
 not carried across generations.
+
+The implementor requests `gpt-5.6-sol` with high reasoning and Codex Fast mode.
+The reviewer independently requests `gpt-5.6-luna` with high reasoning and Fast
+mode. In the current app-server catalog, Fast is the protocol service-tier ID
+`priority`. The harness validates that exact catalog-backed tier before starting
+either thread and repeats it on every turn; it never falls back silently to the
+default service tier. The thread remains on the same tier across explicit
+continuation turns and pause/resume.
+
+Structured Codex lifecycle events record the requested service-tier ID and its
+catalog display name, when supplied, while implementor events also record agent
+contract version 2. These are serving and prompt provenance only. Model-token
+metric labels remain exactly `model` and `role`.

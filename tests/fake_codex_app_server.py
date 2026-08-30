@@ -125,23 +125,33 @@ permission_profile = scenario.get(
     "codexos-implementor",
 )
 models = expect_request("model/list")
+model_entry = {
+    "id": model,
+    "model": model,
+    "displayName": model,
+    "description": "fake",
+    "hidden": False,
+    "isDefault": True,
+    "defaultReasoningEffort": "low",
+    "supportedReasoningEfforts": [
+        {"reasoningEffort": "high", "description": "fake"}
+    ],
+}
+if not scenario.get("omit_service_tiers"):
+    model_entry["serviceTiers"] = scenario.get(
+        "service_tiers",
+        [
+            {
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage",
+            }
+        ],
+    )
 respond(
     models,
     {
-        "data": [
-            {
-                "id": model,
-                "model": model,
-                "displayName": model,
-                "description": "fake",
-                "hidden": False,
-                "isDefault": True,
-                "defaultReasoningEffort": "low",
-                "supportedReasoningEfforts": [
-                    {"reasoningEffort": "high", "description": "fake"}
-                ],
-            }
-        ],
+        "data": [model_entry],
         "nextCursor": None,
     },
 )
@@ -168,6 +178,7 @@ respond(
         "sandbox": {"type": "readOnly", "networkAccess": False},
         "activePermissionProfile": {"id": permission_profile},
         "reasoningEffort": None,
+        "serviceTier": thread_params.get("serviceTier"),
     },
 )
 
