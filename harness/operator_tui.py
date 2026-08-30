@@ -444,11 +444,15 @@ def run_operator_tui(
     git_recorder: GenerationGitRecorder | None = None,
 ) -> None:
     """Run the full-screen frontend and restore the terminal on every exit."""
-    app = OperatorTui(runtime, activity_stream, git_recorder=git_recorder)
+    app: OperatorTui | None = None
     try:
+        app = OperatorTui(runtime, activity_stream, git_recorder=git_recorder)
         app.run()
     finally:
-        app.cancel_confirmation()
-        app._executor.stop()
-        app._executor.join()
-        app.operator_console.shutdown()
+        if app is None:
+            runtime.stop()
+        else:
+            app.cancel_confirmation()
+            app._executor.stop()
+            app._executor.join()
+            app.operator_console.shutdown()

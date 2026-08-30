@@ -903,7 +903,10 @@ def main(
                 git_recorder=recorder,
             ).run()
     finally:
-        observability.close()
+        try:
+            runtime.stop()
+        finally:
+            observability.close()
     return 0
 
 

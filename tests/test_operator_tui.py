@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -129,6 +130,16 @@ class _TtyStream(io.StringIO):
 
 
 class OperatorTuiSelectionTests(unittest.TestCase):
+    def test_tui_constructor_failure_stops_started_runtime(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-constructor-failure"))
+        with patch(
+            "harness.operator_tui.OperatorTui",
+            side_effect=RuntimeError("simulated TUI constructor failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "constructor failure"):
+                run_operator_tui(runtime, CodexActivityStream())
+        runtime.stop.assert_called_once_with()
+
     def test_failed_tui_initialization_still_stops_runtime(self) -> None:
         runtime = _runtime(Path("/tmp/tui-failure"))
         with patch.object(
@@ -139,6 +150,36 @@ class OperatorTuiSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "simulated TUI"):
                 run_operator_tui(runtime, CodexActivityStream())
         runtime.stop.assert_called_once_with()
+
+    def test_lazy_tui_import_failure_stops_runtime_and_observability(self) -> None:
+        runtime = _runtime(Path("/tmp/tui-import-failure"))
+        observability = Mock()
+        environment = {**os.environ, "TERM": "xterm-256color"}
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, environment, clear=True),
+            patch.dict(sys.modules, {"harness.operator_tui": None}),
+            patch(
+                "harness.operator_console.ExperimentObservability",
+                return_value=observability,
+            ),
+            patch(
+                "harness.operator_console.CodexOSRun", return_value=runtime
+            ),
+        ):
+            with self.assertRaises(ModuleNotFoundError):
+                main(
+                    [
+                        "--run-directory",
+                        temporary,
+                        "--initial-iso",
+                        str(Path(temporary) / "seed.iso"),
+                    ],
+                    _TtyStream(),
+                    _TtyStream(),
+                )
+        runtime.stop.assert_called_once_with()
+        observability.close.assert_called_once_with()
 
     def test_plain_mode_does_not_create_unused_activity_stream(self) -> None:
         runtime = _runtime(Path("/tmp/plain-selection"))
