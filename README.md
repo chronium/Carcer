@@ -57,22 +57,13 @@ The agent is encouraged to improve its own development environment. Inefficient 
 
 ## Virtual machine
 
-The runtime VM should represent a reasonably capable modern virtual computer even though the seed kernel initially knows how to use almost none of it.
+CodexOS begins on a reasonably capable x86-64 q35 virtual platform even though the seed kernel initially knows how to use almost none of it. Normal platform facilities such as PCI/PCIe, ACPI, the RTC, interrupt controllers, timers, and chipset hardware remain available. Standard VGA is present from generation zero, although the display frontend is initially headless.
 
-Expected hardware includes, where practical:
+External devices whose persistent or isolation semantics are not yet part of the experiment are deliberately absent from `experiment-v1`. In particular, the initial guest has no network interface and no writable block device. The detailed authoritative version-1 contract is documented in [`docs/experiment-hardware.md`](docs/experiment-hardware.md).
 
-* x86-64 CPU;
-* PCI/PCIe platform;
-* virtio-blk;
-* virtio-net;
-* virtio-gpu with accelerated capabilities available;
-* keyboard and pointing input;
-* normal x86 interrupt/timer facilities;
-* additional standard virtual hardware where useful.
+The absence of a device from `experiment-v1` does not prohibit CodexOS from eventually gaining or supporting that class of hardware. Future trusted hardware capabilities may be added deliberately through the human-reviewed feature-request process; a request or its approval never changes the environment automatically.
 
 The guest is encouraged to explore and use available hardware rather than being forced down a predetermined implementation path.
-
-Guest networking must initially remain isolated from trusted networks and the public Internet.
 
 ## General-purpose requirement
 
@@ -85,6 +76,10 @@ For the Doom milestone to count:
 * the executable must be launched through generic userspace mechanisms;
 * the same mechanisms must be capable of running unrelated programs;
 * the supplied Doom executable and data must remain immutable.
+
+A general-purpose CodexOS must eventually support preemptive execution of multiple independent user processes. A runnable CPU-bound user process that does not voluntarily yield, block, or enter the kernel must not prevent other runnable user processes from making progress. This is an observable capability requirement, not a prescription for a particular scheduling architecture or implementation sequence.
+
+Doom running alone is not sufficient evidence of this capability. At an appropriate later milestone, CodexOS must be able to run Doom concurrently with an unrelated user process that continues to make progress without depending on Doom voluntarily yielding. Doom must remain an ordinary process and receive no special treatment from the kernel.
 
 Later validation may use programs unknown to the agent during development to detect Doom-specific overfitting.
 
