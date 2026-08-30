@@ -100,9 +100,12 @@ reasoning, `summary=auto`, and Fast/`priority`.
 The plain console commands are `interview`, `ask <text>`, and
 `end-interview`; while interview mode is open, plain question text is also
 accepted at the `interview>` prompt and `end` closes it. Question and answer
-text is ephemeral console/live-activity presentation. Structured observability
-records low-cardinality interview lifecycle and serving provenance, not
-conversation content.
+text remains outside operational telemetry and autonomous context. On
+conclusion, the operator layer persists the interview as human/research
+provenance under `artifacts/interviews/<run>/`; this artifact is not part of the
+agent contract or generation state. Structured observability records
+low-cardinality interview lifecycle and serving provenance, not conversation
+content.
 
 The retained session is closed before `continue`, rollback, quit, or harness
 shutdown. The successor still starts in a new app-server process and thread

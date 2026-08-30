@@ -66,7 +66,24 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 "uncommitted developer change\n",
                 encoding="utf-8",
             )
+            interview = (
+                repository
+                / "artifacts"
+                / "interviews"
+                / run.name
+                / "generation-0004.md"
+            )
+            interview.parent.mkdir(parents=True)
+            interview.write_text(
+                "# CodexOS Exit Interview\n\nResearch provenance.\n",
+                encoding="utf-8",
+            )
+            interview_before = interview.read_bytes()
             status_before = _git(repository, "status", "--porcelain")
+            self.assertIn(
+                "?? artifacts/",
+                status_before,
+            )
             head_before = _git(repository, "rev-parse", "HEAD")
             branch_before = _git(repository, "symbolic-ref", "--short", "HEAD")
             archives_before = _archive_bytes(run)
@@ -187,6 +204,7 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 [commits[generation] for generation in (0, 1, 2, 4)],
             )
             self.assertEqual(_git(repository, "status", "--porcelain"), status_before)
+            self.assertEqual(interview.read_bytes(), interview_before)
             self.assertEqual(_git(repository, "rev-parse", "HEAD"), head_before)
             self.assertEqual(
                 _git(repository, "symbolic-ref", "--short", "HEAD"),

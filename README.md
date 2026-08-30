@@ -121,9 +121,10 @@ The new generation receives a fresh Codex session. Conversation history from pre
 After cooperative completion, the operator may optionally question the same
 ephemeral Codex thread about the choices it already made. The archive, selected
 successor, and handoff are frozen before this exit interview begins. Interview
-turns have no guest tools, cannot change trusted state, are not persisted, and
-are closed before any continuation or rollback. Their content never enters the
-fresh successor session.
+turns have no guest tools, cannot change trusted state, and are closed before
+any continuation or rollback. Completed interview content is persisted only as
+a human-facing research artifact in the trusted repository; it never enters the
+fresh successor session or autonomous generation state.
 
 Knowledge that must survive a reboot should be deliberately persisted by the guest.
 

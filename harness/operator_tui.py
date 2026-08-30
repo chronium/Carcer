@@ -789,6 +789,7 @@ class OperatorTui(App[None]):
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
         git_recorder: GenerationGitRecorder | None = None,
+        interview_repository: str | Path | None = None,
     ) -> None:
         super().__init__()
         self._runtime = runtime
@@ -811,6 +812,7 @@ class OperatorTui(App[None]):
             reviewer_codex_executable=reviewer_codex_executable,
             reviewer_auth_file=reviewer_auth_file,
             git_recorder=git_recorder,
+            interview_repository=interview_repository,
             output_handler=self._receive_operator_output,
             confirmation_handler=self._request_confirmation,
         )
@@ -1184,11 +1186,17 @@ def run_operator_tui(
     activity_stream: CodexActivityStream,
     *,
     git_recorder: GenerationGitRecorder | None = None,
+    interview_repository: str | Path | None = None,
 ) -> None:
     """Run the full-screen frontend and restore the terminal on every exit."""
     app: OperatorTui | None = None
     try:
-        app = OperatorTui(runtime, activity_stream, git_recorder=git_recorder)
+        app = OperatorTui(
+            runtime,
+            activity_stream,
+            git_recorder=git_recorder,
+            interview_repository=interview_repository,
+        )
         app.run()
     finally:
         if app is None:
