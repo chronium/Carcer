@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .codex_app_server import (
+    CumulativeTokenUsage,
     CodexAppServer,
     CodexAppServerError,
     default_auth_file,
@@ -158,7 +159,7 @@ class CodexReviewWorker:
         model: str,
     ) -> str:
         last_agent_message: str | None = None
-        token_usage_total = (0, 0)
+        token_usage_total = CumulativeTokenUsage()
         while True:
             message = server.next_notification()
             method = message.get("method")
@@ -181,12 +182,15 @@ class CodexReviewWorker:
                         f"reviewer token usage telemetry was ignored: {error}"
                     )
                     continue
-                if delta != (0, 0):
+                if not delta.is_zero():
                     observability.record_model_tokens(
                         model=model,
                         role="reviewer",
-                        input_tokens=delta[0],
-                        output_tokens=delta[1],
+                        input_tokens=delta.input_tokens,
+                        cached_input_tokens=delta.cached_input_tokens,
+                        uncached_input_tokens=delta.uncached_input_tokens,
+                        output_tokens=delta.output_tokens,
+                        reasoning_output_tokens=delta.reasoning_output_tokens,
                     )
                 continue
             if method == "item/completed" and isinstance(params, dict):

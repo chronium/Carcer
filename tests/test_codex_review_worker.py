@@ -23,8 +23,10 @@ from tests.test_codex_generation_worker import (
     _assert_process_dead,
     _build_seed,
     _fake_codex,
+    _expected_token_metric_values,
     _metric_values,
     _request,
+    _token_usage,
     _wait_for,
 )
 
@@ -98,6 +100,65 @@ class CodexReviewerProtocolTests(unittest.TestCase):
                             for name in _metric_values(reader)
                         )
                     )
+                    observability.close()
+
+    def test_each_reviewer_uses_an_independent_token_baseline(self) -> None:
+        usage = _token_usage(80, 25, 30, 12)
+        implementor_scenario = {
+            "tool_calls": [
+                {"namespace": None, "tool": "review", "arguments": {}},
+                {"namespace": None, "tool": "review", "arguments": {}},
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "token_usage": usage,
+            "final_message": "No meaningful issues found.",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            with _fake_codex(implementor_scenario) as implementor:
+                with _fake_codex(reviewer_scenario) as reviewer:
+                    reader = InMemoryMetricReader()
+                    observability = ExperimentObservability(
+                        temporary,
+                        metric_readers=[reader],
+                    )
+                    runtime = _runtime_mock()
+                    runtime.generation_number = 0
+                    runtime.observability = observability
+
+                    CodexGenerationWorker(
+                        implementor.executable,
+                        implementor.auth_file,
+                        reviewer_codex_executable=reviewer.executable,
+                        reviewer_auth_file=reviewer.auth_file,
+                    ).run_generation(runtime)
+
+                    expected = {
+                        name: value * 2
+                        for name, value in _expected_token_metric_values(
+                            usage
+                        ).items()
+                    }
+                    self.assertEqual(_metric_values(reader), expected)
+                    metrics = reader.get_metrics_data()
+                    for resource in metrics.resource_metrics:
+                        for scope in resource.scope_metrics:
+                            for metric in scope.metrics:
+                                if metric.name.startswith("codexos_model_"):
+                                    self.assertEqual(
+                                        dict(
+                                            metric.data.data_points[
+                                                0
+                                            ].attributes
+                                        ),
+                                        {
+                                            "model": "gpt-5.6-luna",
+                                            "role": "reviewer",
+                                        },
+                                    )
+                    self.assertTrue(observability.healthy)
                     observability.close()
 
     def test_active_review_is_cancelled_before_implementor_interrupt(self) -> None:

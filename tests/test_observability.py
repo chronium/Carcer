@@ -167,7 +167,10 @@ class ExperimentObservabilityTests(unittest.TestCase):
                 model="gpt-5.6-sol",
                 role="implementor",
                 input_tokens=100,
+                cached_input_tokens=40,
+                uncached_input_tokens=60,
                 output_tokens=25,
+                reasoning_output_tokens=10,
             )
 
             points = _metric_points(reader)
@@ -180,11 +183,34 @@ class ExperimentObservabilityTests(unittest.TestCase):
             self.assertIn("codexos_operator_actions_total", names)
             self.assertIn("codexos_feature_requests_total", names)
             self.assertIn("codexos_model_input_tokens_total", names)
+            self.assertIn(
+                "codexos_model_cached_input_tokens_total", names
+            )
+            self.assertIn(
+                "codexos_model_uncached_input_tokens_total", names
+            )
+            self.assertIn("codexos_model_output_tokens_total", names)
+            self.assertIn(
+                "codexos_model_reasoning_output_tokens_total", names
+            )
             for _, attributes in points:
                 self.assertNotIn("path", attributes)
                 self.assertNotIn("generation", attributes)
                 self.assertNotIn("request_id", attributes)
                 self.assertNotIn("call_id", attributes)
+            metrics = reader.get_metrics_data()
+            for resource in metrics.resource_metrics:
+                for scope in resource.scope_metrics:
+                    for metric in scope.metrics:
+                        if metric.name.startswith("codexos_model_"):
+                            self.assertEqual(metric.unit, "{token}")
+                            self.assertEqual(
+                                dict(metric.data.data_points[0].attributes),
+                                {
+                                    "model": "gpt-5.6-sol",
+                                    "role": "implementor",
+                                },
+                            )
             observability.close()
 
     def test_event_record_contains_no_excluded_bodies(self) -> None:
