@@ -321,6 +321,17 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             "response and transcript do not automatically become memory",
             "Provisioning one external capability does not imply or grant any "
             "other trusted-environment capability",
+            "Trusted provided-asset host services",
+            "immutable opaque trusted inputs available to guest code",
+            "list_provided_assets takes no arguments",
+            "<id><TAB><filename><TAB><size-decimal><TAB><sha256-hex><NEWLINE>",
+            "read_provided_asset takes exactly three arguments",
+            "Length is at most 1 MiB",
+            "Invalid requests fail rather than being truncated",
+            "supplies no guest filesystem, installation location, archive "
+            "extraction, compiler, runtime, executable compatibility",
+            "Asset IDs and filenames do not prescribe how their bytes should be "
+            "used",
             "Exact predecessor handoff.",
             "Later lineage was abandoned.",
             "Trusted operator objective.",
@@ -341,8 +352,8 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotIn(steering, prompt)
         self.assertNotIn("every workaround", prompt.lower())
 
-    def test_agent_contract_version_is_five(self) -> None:
-        self.assertEqual(AGENT_CONTRACT_VERSION, 5)
+    def test_agent_contract_version_is_six(self) -> None:
+        self.assertEqual(AGENT_CONTRACT_VERSION, 6)
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (
@@ -1434,6 +1445,8 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             "finish_generation",
             "request_feature",
             "list_requests",
+            "list_provided_assets",
+            "read_provided_asset",
             "review",
         ]
         scenario = {

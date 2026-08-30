@@ -1213,6 +1213,8 @@ class OperatorTuiSelectionTests(unittest.TestCase):
                     temporary,
                     "--initial-iso",
                     str(Path(temporary) / "seed.iso"),
+                    "--provided-assets",
+                    str(Path(temporary) / "external-assets"),
                     "--plain",
                 ],
                 _TtyStream(),
@@ -1220,6 +1222,10 @@ class OperatorTuiSelectionTests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
         self.assertIsNone(runtime_type.call_args.kwargs["activity_stream"])
+        self.assertEqual(
+            runtime_type.call_args.kwargs["provided_assets_directory"],
+            Path(temporary) / "external-assets",
+        )
         console_type.return_value.run.assert_called_once_with()
 
     def test_interactive_default_passes_one_stream_to_runtime_and_tui(self) -> None:

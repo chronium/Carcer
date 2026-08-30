@@ -67,6 +67,34 @@ def read_frame(
     return Frame(message_type=message_type, request_id=request_id, payload=payload)
 
 
+def extract_frame(buffer: bytearray) -> Frame | None:
+    """Remove and return one complete frame from an incremental byte buffer."""
+    prefix_length = min(len(buffer), len(MAGIC))
+    if buffer[:prefix_length] != MAGIC[:prefix_length]:
+        raise FramingError(f"invalid frame magic {bytes(buffer[:4])!r}")
+    if len(buffer) < _HEADER.size:
+        return None
+
+    magic, version, message_type, request_id, payload_length = _HEADER.unpack_from(
+        buffer
+    )
+    if magic != MAGIC:
+        raise FramingError(f"invalid frame magic {magic!r}")
+    if version != PROTOCOL_VERSION:
+        raise FramingError(f"unsupported protocol version {version}")
+    if payload_length > MAX_PAYLOAD_SIZE:
+        raise FramingError(
+            f"payload length {payload_length} exceeds the 16 MiB version 1 limit"
+        )
+
+    frame_length = _HEADER.size + payload_length
+    if len(buffer) < frame_length:
+        return None
+    payload = bytes(buffer[_HEADER.size:frame_length])
+    del buffer[:frame_length]
+    return Frame(message_type=message_type, request_id=request_id, payload=payload)
+
+
 def _read_exact(
     connection: SerialConnection,
     size: int,

@@ -22,7 +22,9 @@ from .guest_startup import (
 from .hardware import CodexOSHardwareProfile
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
+from .provided_assets import ProvidedAssets
 from .serial import SerialConnection, SerialError
+from .serial_protocol import SerialProtocolDispatcher
 from .tool_protocol import ToolClient, ToolProtocolError
 from .trusted_build import BuildStatus
 
@@ -49,6 +51,7 @@ class CandidateBootValidator:
         temporary_parent: str | Path | None = None,
         activity_stream: CodexActivityStream | None = None,
         generation: int | None = None,
+        provided_assets: ProvidedAssets | None = None,
     ) -> None:
         if ready_timeout_seconds <= 0:
             raise ValueError("candidate readiness timeout must be positive")
@@ -60,6 +63,7 @@ class CandidateBootValidator:
         )
         self._activity_stream = activity_stream
         self._generation = generation
+        self._provided_assets = provided_assets
 
     def validate(self, candidate_iso: str | Path) -> CandidateBootResult:
         """Return guest failure or harness failure without leaking QEMU state."""
@@ -114,6 +118,7 @@ class CandidateBootValidator:
         serial_path = workspace / "serial.sock"
         qmp = QmpClient(qmp_path)
         serial = SerialConnection(serial_path)
+        protocol: SerialProtocolDispatcher | None = None
         controller = QemuProcessController(self._qemu_executable)
         qmp_connected = False
         result: CandidateBootResult
@@ -162,12 +167,21 @@ class CandidateBootValidator:
                                 "CODEXOS-SEED-READY"
                             )
                     else:
-                        result = self._validate_guest(serial)
+                        protocol = SerialProtocolDispatcher(
+                            serial,
+                            startup_host_services=self._provided_assets,
+                            background_host_services=self._provided_assets,
+                            exchange_host_services=self._provided_assets,
+                        )
+                        result = self._validate_guest(protocol)
         finally:
             cleanup_errors: list[str] = []
             try:
-                serial.close()
-            except OSError as error:
+                if protocol is None:
+                    serial.close()
+                else:
+                    protocol.close()
+            except (OSError, SerialError) as error:
                 cleanup_errors.append(f"serial close failed: {error}")
             if qmp_connected:
                 try:
@@ -193,9 +207,15 @@ class CandidateBootValidator:
         cleanup_error = "; ".join(cleanup_errors) if cleanup_errors else None
         return result, cleanup_error
 
-    def _validate_guest(self, serial: SerialConnection) -> CandidateBootResult:
+    def _validate_guest(
+        self,
+        protocol: SerialProtocolDispatcher,
+    ) -> CandidateBootResult:
         try:
-            wait_for_ready(serial, self._ready_timeout_seconds)
+            wait_for_ready(
+                protocol,
+                self._ready_timeout_seconds,
+            )
         except GuestReadyError as error:
             detail = error.reason
             if error.serial_output:
@@ -207,7 +227,8 @@ class CandidateBootValidator:
         self._publish(CodexActivityKind.BUILD_CANDIDATE_READY)
 
         try:
-            ToolClient(serial).list_tools()
+            client = ToolClient(protocol)
+            client.list_tools()
         except (
             FramingError,
             OSError,

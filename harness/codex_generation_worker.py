@@ -55,7 +55,7 @@ DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_REASONING_SUMMARY = "auto"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
-AGENT_CONTRACT_VERSION = 5
+AGENT_CONTRACT_VERSION = 6
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -1501,6 +1501,8 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
         + "\n\n"
         + _trusted_tools_contract()
         + "\n\n"
+        + _provided_assets_contract()
+        + "\n\n"
         + _trusted_hardware_context(runtime.hardware_profile)
         + "\n\n"
         + approved_text
@@ -1581,6 +1583,29 @@ def _trusted_tools_contract() -> str:
         "Provisioning one external capability does not imply or grant any other "
         "trusted-environment capability. No human source edits or architectural "
         "guidance are available through these tools."
+    )
+
+
+def _provided_assets_contract() -> str:
+    return (
+        "Trusted provided-asset host services:\n\n"
+        "When this capability has been explicitly provisioned, provided assets "
+        "are immutable opaque trusted inputs available to guest code through the "
+        "existing guest-to-host service protocol. list_provided_assets takes no "
+        "arguments and returns UTF-8 records ordered by asset ID, one per line, "
+        "as <id><TAB><filename><TAB><size-decimal><TAB><sha256-hex><NEWLINE>. "
+        "An empty supplied set returns an empty successful payload.\n\n"
+        "read_provided_asset takes exactly three arguments: the asset ID as "
+        "UTF-8, then offset and length as canonical unsigned ASCII decimal. On "
+        "success it returns that exact raw byte range. Length is at most 1 MiB; "
+        "the complete requested range must be within the advertised size, and an "
+        "offset equal to size is valid only with zero length. Invalid requests "
+        "fail rather than being truncated.\n\n"
+        "This facility supplies no guest filesystem, installation location, "
+        "archive extraction, compiler, runtime, executable compatibility, or "
+        "other supporting capability. Asset IDs and filenames do not prescribe "
+        "how their bytes should be used, and data relevant to a milestone does "
+        "not make any other missing capability appear."
     )
 
 

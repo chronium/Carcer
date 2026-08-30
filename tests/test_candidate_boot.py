@@ -23,6 +23,7 @@ from harness import (
     encode_source_snapshot,
 )
 from harness.guest_startup import GuestReadyError, wait_for_ready
+from harness.serial_protocol import SerialProtocolDispatcher
 from harness.tool_protocol import ToolClient
 from tests.test_build_host_service import _current_seed_files, _response
 
@@ -264,8 +265,12 @@ class GuestReadinessDiagnosticsTests(unittest.TestCase):
             raise TimeoutError
 
         serial.read.side_effect = read
-        with self.assertRaises(GuestReadyError) as caught:
-            wait_for_ready(serial, 0.01)
+        protocol = SerialProtocolDispatcher(serial)
+        try:
+            with self.assertRaises(GuestReadyError) as caught:
+                wait_for_ready(protocol, 0.01)
+        finally:
+            protocol.close()
 
         message = str(caught.exception)
         self.assertIn("timed out waiting for CODEXOS-SEED-READY", message)

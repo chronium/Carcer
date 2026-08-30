@@ -20,6 +20,7 @@ from .host_service_protocol import (
     create_host_service_response,
 )
 from .observability import ExperimentObservability
+from .provided_assets import ProvidedAssets
 from .source_snapshot import SourceSnapshotError, decode_source_snapshot
 
 _FINISH_ACCEPTED = 0
@@ -50,6 +51,7 @@ class CodexOSHostServices:
         generation: int | None = None,
         observability: ExperimentObservability | None = None,
         activity_stream: CodexActivityStream | None = None,
+        provided_assets: ProvidedAssets | None = None,
     ) -> None:
         if (feature_request_store is None) != (generation is None):
             raise ValueError(
@@ -65,6 +67,7 @@ class CodexOSHostServices:
         self._feature_request_store = feature_request_store
         self._generation = generation
         self._observability = observability
+        self._provided_assets = provided_assets
 
     @property
     def latest_successful_build(self) -> StagedBuildArtifacts | None:
@@ -87,6 +90,17 @@ class CodexOSHostServices:
             return self._finish_generation(request)
         if request.service_name == "request_feature":
             return self._request_feature(request)
+        if request.service_name in {
+            "list_provided_assets",
+            "read_provided_asset",
+        }:
+            if self._provided_assets is None:
+                return create_host_service_response(
+                    request.request_id,
+                    1,
+                    b"provided-assets service is not configured",
+                )
+            return self._provided_assets.handle_request(request)
         return create_host_service_response(
             request.request_id,
             1,

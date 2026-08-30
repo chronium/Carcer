@@ -12,10 +12,20 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
-Contract version 5 retains the version 4 behavioral contract and adds one
-read-only trusted tool: `list_requests`. It exposes the authoritative current
-run-level feature-request records, ordered by stable request ID, so a fresh
-generation can distinguish pending, approved/provisioned, and denied requests
+Contract version 6 retains the version 5 behavioral contract and adds the
+generic provided-asset host-service interface. When that trusted capability is
+explicitly provisioned, guest code can enumerate immutable opaque inputs with
+`list_provided_assets` and read exact bounded byte ranges with
+`read_provided_asset`. The contract specifies their simple descriptor and range
+semantics without preloading concrete asset identities or contents into model
+context. The interface supplies no guest filesystem, installation, extraction,
+compiler, runtime, executable compatibility, or other supporting capability;
+asset names do not prescribe how CodexOS should use their bytes.
+
+Version 5 added one read-only trusted tool: `list_requests`. It exposes the
+authoritative current run-level feature-request records, ordered by stable
+request ID, so a fresh generation can distinguish pending,
+approved/provisioned, and denied requests
 without relying exclusively on handoff repetition. Pending requests are neither
 provisioned nor promised and carry no ETA or approval probability; approved
 requests are usable only within the exact capability and scope actually
@@ -23,7 +33,7 @@ provisioned; denied requests are unavailable under that request. The tool does
 not modify request state and is never invoked automatically.
 
 Version 4 clarified three semantic boundaries which remain unchanged in version
-5. Milestones and future validation describe required outcomes, not implicit
+6. Milestones and future validation describe required outcomes, not implicit
 grants of supporting trusted-environment capabilities. An absent external
 capability must not be assumed to appear merely because a future outcome would
 require it.
@@ -82,12 +92,13 @@ settings across explicit continuation turns and pause/resume.
 
 Structured Codex lifecycle events record the requested reasoning-summary mode,
 service-tier ID, and its catalog display name, when supplied, while implementor
-events also record agent contract version 5. These are serving and prompt
+events also record agent contract version 6. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
 
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
-Generation 10 ran under contract version 4, and generation 11 onward runs under
-contract version 5. Other runs record the contract version actually used in
+Generation 10 ran under contract version 4. No autonomous generation ran under
+contract version 5 before it was superseded. Generation 11 onward runs under
+contract version 6. Other runs record the contract version actually used in
 their implementor provenance; historical events are not backfilled.
 
 ## Post-generation exit interviews
@@ -144,6 +155,14 @@ annotated tags are recognized rather than rewritten. Historical
 `hardware.json` files remain untouched; a later explicit boot uses the currently
 configured trusted hardware profile.
 
+The operator may explicitly configure an external asset directory with
+`--provided-assets PATH`. The harness freezes its derived opaque assets in
+memory and records only run-level IDs, exposed filenames, sizes, and SHA-256
+digests in `provided-assets.json`. Later reopens must supply a byte-identical
+derived set (the external path itself may differ), and omission or mismatch
+fails before a generation boots. Asset bytes are not copied into generation
+archives, autonomous Git provenance, or model context.
+
 The old console must be exited before another process reopens the run. A typical
 reviewed harness update is adopted manually:
 
@@ -156,6 +175,7 @@ codexos> quit
 .venv/bin/python -m harness.operator_console \
   --run-directory /srv/codexos/experiment-002 \
   --resume-at-gate \
+  --provided-assets /path/to/operator-assets \
   --git-repository /path/to/CodexOS \
   --git-base-ref experiment-start
 

@@ -13,6 +13,7 @@ from harness import (
     CodexOSHostServices,
     QemuProcessController,
     SerialConnection,
+    SerialProtocolDispatcher,
     ToolClient,
 )
 
@@ -43,11 +44,16 @@ class GuestFinishGenerationIntegrationTest(unittest.TestCase):
                 temporary_path / "staging",
                 _candidate_validator(temporary_path),
             )
-            with _running_guest(image, temporary_path, "accepted") as (
+            with _running_guest(
+                image,
+                temporary_path,
+                "accepted",
+                host_services,
+            ) as (
                 controller,
-                serial,
+                protocol,
             ):
-                client = ToolClient(serial, host_services)
+                client = ToolClient(protocol)
                 self.assertEqual(client.list_tools(), _TOOLS)
 
                 invalid_utf8 = client.invoke_tool("finish_generation", [b"\xff"])
@@ -108,11 +114,16 @@ class GuestFinishGenerationIntegrationTest(unittest.TestCase):
                 temporary_path / "staging",
                 _candidate_validator(temporary_path),
             )
-            with _running_guest(image, temporary_path, "mismatch") as (
+            with _running_guest(
+                image,
+                temporary_path,
+                "mismatch",
+                host_services,
+            ) as (
                 controller,
-                serial,
+                protocol,
             ):
-                client = ToolClient(serial, host_services)
+                client = ToolClient(protocol)
                 first_write = client.invoke_tool(
                     "write",
                     [
@@ -174,7 +185,12 @@ def _build_seed(repository: Path) -> Path:
 
 
 @contextmanager
-def _running_guest(image: Path, temporary: Path, name: str):
+def _running_guest(
+    image: Path,
+    temporary: Path,
+    name: str,
+    host_services: CodexOSHostServices,
+):
     qemu = shutil.which("qemu-system-x86_64")
     if qemu is None:
         raise AssertionError("qemu-system-x86_64 must be installed")
@@ -193,7 +209,15 @@ def _running_guest(image: Path, temporary: Path, name: str):
             raise AssertionError("QEMU did not expose a PID")
         with serial:
             _wait_for_ready(serial)
-            yield controller, serial
+            protocol = SerialProtocolDispatcher(
+                serial,
+                exchange_host_services=host_services,
+            )
+            protocol.start_ready()
+            try:
+                yield controller, protocol
+            finally:
+                protocol.close()
     if controller.is_running:
         raise AssertionError("QEMU remained alive after cleanup")
     try:

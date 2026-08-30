@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import time
+from .framing import FramingError
+from .serial import SerialError
+from .serial_protocol import READY_MARKER, SerialProtocolDispatcher
 
-from .serial import SerialConnection, SerialError
-
-READY_MARKER = b"CODEXOS-SEED-READY\n"
 _MAX_DIAGNOSTIC_BYTES = 4 * 1024
 
 
@@ -26,41 +25,29 @@ class GuestReadyError(RuntimeError):
 
 
 def wait_for_ready(
-    serial: SerialConnection,
+    dispatcher: SerialProtocolDispatcher,
     timeout_seconds: float,
 ) -> None:
-    """Wait for READY while retaining only bounded diagnostic serial bytes."""
-    if timeout_seconds <= 0:
-        raise ValueError("guest readiness timeout must be positive")
-
-    deadline = time.monotonic() + timeout_seconds
-    diagnostic = bytearray()
-    marker_tail = bytearray()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise GuestReadyError(
-                "timed out waiting for CODEXOS-SEED-READY",
-                bytes(diagnostic),
-            )
-        try:
-            chunk = serial.read(4096, min(0.5, remaining))
-        except TimeoutError:
-            continue
-        except SerialError as error:
-            raise GuestReadyError(
-                "serial connection closed before CODEXOS-SEED-READY",
-                bytes(diagnostic),
-            ) from error
-
-        if len(diagnostic) < _MAX_DIAGNOSTIC_BYTES:
-            available = _MAX_DIAGNOSTIC_BYTES - len(diagnostic)
-            diagnostic.extend(chunk[:available])
-        combined = bytes(marker_tail) + chunk
-        if READY_MARKER in combined:
-            return
-        tail_length = len(READY_MARKER) - 1
-        marker_tail[:] = combined[-tail_length:]
+    """Wait for canonical READY through the connection's sole reader."""
+    dispatcher.start()
+    try:
+        dispatcher.wait_until_ready(timeout_seconds)
+    except TimeoutError as error:
+        raise GuestReadyError(
+            "timed out waiting for CODEXOS-SEED-READY",
+            dispatcher.startup_diagnostic,
+        ) from error
+    except SerialError as error:
+        raise GuestReadyError(
+            "serial connection closed before CODEXOS-SEED-READY",
+            dispatcher.startup_diagnostic,
+        ) from error
+    except (FramingError, OSError) as error:
+        raise GuestReadyError(
+            "invalid provided-asset request before CODEXOS-SEED-READY: "
+            + str(error),
+            dispatcher.startup_diagnostic,
+        ) from error
 
 
 def escape_diagnostic_bytes(data: bytes) -> str:

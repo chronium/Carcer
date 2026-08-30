@@ -28,9 +28,11 @@ from .hardware import (
 )
 from .guest_startup import wait_for_ready
 from .observability import ExperimentObservability
+from .provided_assets import ProvidedAssets, configure_provided_assets
 from .qemu import QemuProcessController
 from .qmp import QmpClient, QmpError
 from .serial import SerialConnection
+from .serial_protocol import SerialProtocolDispatcher
 from .source_snapshot import decode_source_snapshot
 from .tool_protocol import ToolClient, ToolResult
 
@@ -68,12 +70,16 @@ class CodexOSRun:
         hardware_profile: CodexOSHardwareProfile = EXPERIMENT_HARDWARE_PROFILE,
         observability: ExperimentObservability | None = None,
         activity_stream: CodexActivityStream | None = None,
+        provided_assets_directory: str | Path | None = None,
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
         self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._observability = observability
         self._activity_stream = activity_stream
+        self._provided_assets_directory = provided_assets_directory
+        self._provided_assets: ProvidedAssets | None = None
+        self._provided_assets_configured = False
         if observability is not None:
             observability.set_feature_requests_pending(
                 sum(
@@ -100,6 +106,7 @@ class CodexOSRun:
         self._controller: QemuProcessController | None = None
         self._qmp: QmpClient | None = None
         self._serial: SerialConnection | None = None
+        self._serial_protocol: SerialProtocolDispatcher | None = None
         self._host_services: CodexOSHostServices | None = None
         self._tool_client: ToolClient | None = None
 
@@ -199,6 +206,7 @@ class CodexOSRun:
         image = Path(initial_iso).resolve()
         if not image.is_file():
             raise FileNotFoundError(image)
+        self._configure_provided_assets()
         self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
         self._state = RuntimeState.RUNNING
@@ -227,6 +235,7 @@ class CodexOSRun:
         if not archives:
             raise RuntimeError("run has no archived generation gate")
         self._validate_archived_history(archives)
+        self._configure_provided_assets()
         latest = archives[-1]
         pending: PendingGenerationFinish | None = None
         previous_handoff: str | None = None
@@ -613,11 +622,13 @@ class CodexOSRun:
                 self._hardware_profile,
                 activity_stream=self._activity_stream,
                 generation=generation_number,
+                provided_assets=self._provided_assets,
             ),
             feature_request_store=self._feature_request_store,
             generation=generation_number,
             observability=self._observability,
             activity_stream=self._activity_stream,
+            provided_assets=self._provided_assets,
         )
 
         self._workspace = workspace
@@ -626,6 +637,7 @@ class CodexOSRun:
         self._controller = controller
         self._qmp = qmp
         self._serial = serial
+        self._serial_protocol = None
         self._host_services = host_services
         self._tool_client = None
         self._current_hardware = hardware
@@ -643,8 +655,18 @@ class CodexOSRun:
             )
             qmp.connect()
             serial.connect()
-            wait_for_ready(serial, _STARTUP_TIMEOUT_SECONDS)
-            self._tool_client = ToolClient(serial, host_services)
+            protocol = SerialProtocolDispatcher(
+                serial,
+                startup_host_services=self._provided_assets,
+                background_host_services=self._provided_assets,
+                exchange_host_services=host_services,
+            )
+            self._serial_protocol = protocol
+            wait_for_ready(
+                protocol,
+                _STARTUP_TIMEOUT_SECONDS,
+            )
+            self._tool_client = ToolClient(protocol)
             self._current_boot_image = boot_image
             self._current_parent_generation = parent_generation
             self._current_transition = transition
@@ -652,6 +674,15 @@ class CodexOSRun:
             self._shutdown_qemu()
             self._cleanup_workspace()
             raise
+
+    def _configure_provided_assets(self) -> None:
+        if self._provided_assets_configured:
+            return
+        self._provided_assets = configure_provided_assets(
+            self._run_directory,
+            self._provided_assets_directory,
+        )
+        self._provided_assets_configured = True
 
     def _finish_if_requested(self) -> None:
         if self._host_services is None:
@@ -815,6 +846,7 @@ class CodexOSRun:
         controller = self._controller
         qmp = self._qmp
         serial = self._serial
+        protocol = self._serial_protocol
 
         try:
             if qmp is not None and controller is not None and controller.is_running:
@@ -828,17 +860,28 @@ class CodexOSRun:
             if controller is not None and controller.is_running:
                 controller.stop(timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS)
         finally:
-            if serial is not None:
-                serial.close()
-            if qmp is not None:
-                qmp.close()
-            if controller is not None:
-                controller.stop(timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS)
-            self._tool_client = None
-            self._host_services = None
-            self._serial = None
-            self._qmp = None
-            self._controller = None
+            try:
+                if protocol is not None:
+                    protocol.close()
+                elif serial is not None:
+                    serial.close()
+            finally:
+                try:
+                    if qmp is not None:
+                        qmp.close()
+                finally:
+                    try:
+                        if controller is not None:
+                            controller.stop(
+                                timeout_seconds=_QEMU_EXIT_TIMEOUT_SECONDS
+                            )
+                    finally:
+                        self._tool_client = None
+                        self._host_services = None
+                        self._serial = None
+                        self._serial_protocol = None
+                        self._qmp = None
+                        self._controller = None
 
     def _cleanup_workspace(self) -> None:
         workspace = self._workspace

@@ -2,6 +2,7 @@
 
 import struct
 from dataclasses import dataclass
+from typing import Protocol
 
 from .framing import MAX_PAYLOAD_SIZE, Frame
 
@@ -25,6 +26,12 @@ class HostServiceRequest:
     request_id: int
     service_name: str
     arguments: tuple[bytes, ...]
+
+
+class HostServiceHandler(Protocol):
+    """Dispatch one validated guest-originated host-service request."""
+
+    def handle_request(self, request: HostServiceRequest) -> Frame: ...
 
 
 def decode_host_service_request(frame: Frame) -> HostServiceRequest:

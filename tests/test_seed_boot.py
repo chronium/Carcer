@@ -7,7 +7,13 @@ import time
 import unittest
 from pathlib import Path
 
-from harness import QemuProcessController, SerialConnection, SerialError, ToolClient
+from harness import (
+    QemuProcessController,
+    SerialConnection,
+    SerialError,
+    SerialProtocolDispatcher,
+    ToolClient,
+)
 
 
 class SeedBootIntegrationTest(unittest.TestCase):
@@ -78,7 +84,9 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         except TimeoutError:
                             continue
 
-                    client = ToolClient(serial)
+                    protocol = SerialProtocolDispatcher(serial)
+                    protocol.start_ready()
+                    client = ToolClient(protocol)
                     self.assertEqual(
                         client.list_tools(),
                         [
@@ -335,6 +343,7 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         serial.read(1, timeout_seconds=0.25)
 
                     self.assertTrue(controller.is_running)
+                    protocol.close()
 
                 with self.assertRaisesRegex(SerialError, "not connected"):
                     serial.read(1, timeout_seconds=0.1)
