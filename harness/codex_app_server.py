@@ -9,6 +9,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -21,6 +22,69 @@ _CLOSED = object()
 
 class CodexAppServerError(RuntimeError):
     """The concrete Codex app-server process or protocol failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class CumulativeTokenUsage:
+    """One accepted cumulative app-server token-usage snapshot."""
+
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_output_tokens: int = 0
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        return self.input_tokens - self.cached_input_tokens
+
+    def delta_from(self, previous: CumulativeTokenUsage) -> TokenUsageDelta:
+        if (
+            self.input_tokens < previous.input_tokens
+            or self.cached_input_tokens < previous.cached_input_tokens
+            or self.output_tokens < previous.output_tokens
+            or self.reasoning_output_tokens < previous.reasoning_output_tokens
+        ):
+            raise CodexAppServerError("token usage cumulative total decreased")
+        if self.uncached_input_tokens < previous.uncached_input_tokens:
+            raise CodexAppServerError(
+                "token usage cumulative uncached input decreased"
+            )
+        return TokenUsageDelta(
+            input_tokens=self.input_tokens - previous.input_tokens,
+            cached_input_tokens=(
+                self.cached_input_tokens - previous.cached_input_tokens
+            ),
+            uncached_input_tokens=(
+                self.uncached_input_tokens - previous.uncached_input_tokens
+            ),
+            output_tokens=self.output_tokens - previous.output_tokens,
+            reasoning_output_tokens=(
+                self.reasoning_output_tokens
+                - previous.reasoning_output_tokens
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TokenUsageDelta:
+    """Non-duplicating token increments derived from cumulative usage."""
+
+    input_tokens: int
+    cached_input_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+
+    def is_zero(self) -> bool:
+        return not any(
+            (
+                self.input_tokens,
+                self.cached_input_tokens,
+                self.uncached_input_tokens,
+                self.output_tokens,
+                self.reasoning_output_tokens,
+            )
+        )
 
 
 class CodexAppServer:
@@ -629,8 +693,8 @@ def token_usage_delta_from_notification(
     params: object,
     thread_id: str,
     turn_id: str,
-    previous_total: tuple[int, int],
-) -> tuple[tuple[int, int], tuple[int, int]]:
+    previous_total: CumulativeTokenUsage,
+) -> tuple[CumulativeTokenUsage, TokenUsageDelta]:
     """Read exact cumulative usage and return its non-duplicating delta."""
     values = object_value(params, "thread/tokenUsage/updated notification")
     if values.get("threadId") != thread_id or values.get("turnId") != turn_id:
@@ -639,22 +703,29 @@ def token_usage_delta_from_notification(
         )
     token_usage = object_value(values.get("tokenUsage"), "token usage")
     total = object_value(token_usage.get("total"), "total token usage")
-    input_tokens = total.get("inputTokens")
-    output_tokens = total.get("outputTokens")
-    if (
-        type(input_tokens) is not int
-        or input_tokens < 0
-        or type(output_tokens) is not int
-        or output_tokens < 0
+    field_values = {
+        "inputTokens": total.get("inputTokens"),
+        "cachedInputTokens": total.get("cachedInputTokens"),
+        "outputTokens": total.get("outputTokens"),
+        "reasoningOutputTokens": total.get("reasoningOutputTokens"),
+    }
+    if any(
+        type(value) is not int or value < 0
+        for value in field_values.values()
     ):
         raise CodexAppServerError("token usage has invalid counts")
-    current_total = (input_tokens, output_tokens)
-    if any(
-        current < previous
-        for current, previous in zip(current_total, previous_total, strict=True)
-    ):
-        raise CodexAppServerError("token usage cumulative total decreased")
-    return current_total, (
-        input_tokens - previous_total[0],
-        output_tokens - previous_total[1],
+    current_total = CumulativeTokenUsage(
+        input_tokens=field_values["inputTokens"],
+        cached_input_tokens=field_values["cachedInputTokens"],
+        output_tokens=field_values["outputTokens"],
+        reasoning_output_tokens=field_values["reasoningOutputTokens"],
     )
+    if current_total.cached_input_tokens > current_total.input_tokens:
+        raise CodexAppServerError(
+            "token usage cached input exceeds total input"
+        )
+    if current_total.reasoning_output_tokens > current_total.output_tokens:
+        raise CodexAppServerError(
+            "token usage reasoning output exceeds total output"
+        )
+    return current_total, current_total.delta_from(previous_total)

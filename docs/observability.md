@@ -46,7 +46,20 @@ being available.
 
 Model token counters use positive deltas from the app-server notification's
 cumulative `tokenUsage.total` values. Repeated snapshots add nothing; malformed
-or decreasing snapshots degrade observability without affecting the Codex turn.
+or decreasing snapshots degrade observability without affecting the Codex turn
+or replacing the last accepted cumulative baseline. All token counters use only
+the trusted `model` and `role` attributes and the `{token}` unit.
+
+The model-token metrics are:
+
+* `codexos_model_input_tokens_total`: all input tokens, including cached input;
+* `codexos_model_cached_input_tokens_total`: the cached subset of input;
+* `codexos_model_uncached_input_tokens_total`: input not served from cache;
+* `codexos_model_output_tokens_total`: all output tokens, including reasoning;
+* `codexos_model_reasoning_output_tokens_total`: the reasoning subset of output.
+
+Thus total input is cached input plus uncached input. The app-server's current
+usage schema reports reasoning output as a breakdown within total output.
 
 Representative PromQL queries:
 
@@ -54,6 +67,26 @@ Representative PromQL queries:
 rate(codexos_tool_calls_total[5m])
 rate(codexos_builds_total[15m])
 codexos_generation_state{state="running"}
+```
+
+Representative model-token panels for one selected run can use:
+
+```promql
+sum by (role, model) (
+  last_over_time(codexos_model_input_tokens_total{codexos_run="$run"}[$__range])
+)
+sum by (role, model) (
+  last_over_time(codexos_model_cached_input_tokens_total{codexos_run="$run"}[$__range])
+)
+sum by (role, model) (
+  last_over_time(codexos_model_uncached_input_tokens_total{codexos_run="$run"}[$__range])
+)
+sum by (role, model) (
+  last_over_time(codexos_model_output_tokens_total{codexos_run="$run"}[$__range])
+)
+sum by (role, model) (
+  last_over_time(codexos_model_reasoning_output_tokens_total{codexos_run="$run"}[$__range])
+)
 ```
 
 Because each Loki line is JSON, LogQL can decode fields at query time. The

@@ -144,8 +144,20 @@ class ExperimentObservability:
             "codexos_model_input_tokens_total",
             unit="{token}",
         )
+        self._model_cached_input_tokens = meter.create_counter(
+            "codexos_model_cached_input_tokens_total",
+            unit="{token}",
+        )
+        self._model_uncached_input_tokens = meter.create_counter(
+            "codexos_model_uncached_input_tokens_total",
+            unit="{token}",
+        )
         self._model_output_tokens = meter.create_counter(
             "codexos_model_output_tokens_total",
+            unit="{token}",
+        )
+        self._model_reasoning_output_tokens = meter.create_counter(
+            "codexos_model_reasoning_output_tokens_total",
             unit="{token}",
         )
         self.set_runtime_state(None, "stopped")
@@ -236,12 +248,24 @@ class ExperimentObservability:
         model: str,
         role: str,
         input_tokens: int,
+        cached_input_tokens: int,
+        uncached_input_tokens: int,
         output_tokens: int,
+        reasoning_output_tokens: int,
     ) -> None:
         try:
             attributes = {"model": model, "role": role}
             self._model_input_tokens.add(input_tokens, attributes)
+            self._model_cached_input_tokens.add(
+                cached_input_tokens, attributes
+            )
+            self._model_uncached_input_tokens.add(
+                uncached_input_tokens, attributes
+            )
             self._model_output_tokens.add(output_tokens, attributes)
+            self._model_reasoning_output_tokens.add(
+                reasoning_output_tokens, attributes
+            )
         except (RuntimeError, TypeError, ValueError) as error:
             self._degrade(f"token metric recording failed: {error}")
 

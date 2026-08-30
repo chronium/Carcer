@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .codex_app_server import (
+    CumulativeTokenUsage,
     CodexAppServer,
     CodexAppServerError,
     default_auth_file,
@@ -113,7 +114,7 @@ class CodexGenerationSession:
         self._healthy = True
         self._initial_turn_started = False
         self._turn_number = 0
-        self._token_usage_total = (0, 0)
+        self._token_usage_total = CumulativeTokenUsage()
         self._last_agent_message: str | None = None
         self._active_reviewer: CodexReviewWorker | None = None
 
@@ -409,12 +410,15 @@ class CodexGenerationSession:
             )
             return
         self._token_usage_total = total
-        if delta != (0, 0):
+        if not delta.is_zero():
             observability.record_model_tokens(
                 model=self._model,
                 role="implementor",
-                input_tokens=delta[0],
-                output_tokens=delta[1],
+                input_tokens=delta.input_tokens,
+                cached_input_tokens=delta.cached_input_tokens,
+                uncached_input_tokens=delta.uncached_input_tokens,
+                output_tokens=delta.output_tokens,
+                reasoning_output_tokens=delta.reasoning_output_tokens,
             )
 
     def _record(self, event: str, data: Mapping[str, object]) -> None:

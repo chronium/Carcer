@@ -25,7 +25,11 @@ from harness import (
     RuntimeState,
     ToolResult,
 )
-from harness.codex_app_server import CodexAppServerError
+from harness.codex_app_server import (
+    CodexAppServerError,
+    CumulativeTokenUsage,
+    token_usage_delta_from_notification,
+)
 from harness.observability import ExperimentObservability
 
 _TOOLS = [
@@ -42,19 +46,29 @@ _TOOLS = [
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
     def test_malformed_token_usage_degrades_observability_not_session(self) -> None:
+        accepted = _token_usage(100, 30, 40, 10)
+        missing = dict(accepted)
+        del missing["reasoningOutputTokens"]
+        wrong_type = dict(accepted, inputTokens="invalid")
+        negative = dict(accepted, cachedInputTokens=-1)
+        decreased = _token_usage(99, 30, 40, 10)
+        excessive_cache = _token_usage(100, 101, 40, 10)
+        excessive_reasoning = _token_usage(100, 30, 40, 41)
+        decreased_uncached = _token_usage(110, 45, 40, 10)
+        final = _token_usage(180, 60, 70, 20)
         scenario = {
             "turns": [
                 {
                     "token_usage_params": [
-                        {
-                            "tokenUsage": {
-                                "last": {},
-                                "total": {
-                                    "inputTokens": "invalid",
-                                    "outputTokens": 1,
-                                },
-                            }
-                        }
+                        _token_usage_params(accepted),
+                        _token_usage_params(missing),
+                        _token_usage_params(wrong_type),
+                        _token_usage_params(negative),
+                        _token_usage_params(decreased),
+                        _token_usage_params(excessive_cache),
+                        _token_usage_params(excessive_reasoning),
+                        _token_usage_params(decreased_uncached),
+                        _token_usage_params(final),
                     ]
                 },
                 {"tool_calls": [{"tool": "list", "arguments": {}}]},
@@ -94,24 +108,16 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 "implementor token usage telemetry was ignored",
                 observability.degraded_reason or "",
             )
-            self.assertFalse(
-                any(
-                    name.startswith("codexos_model_")
-                    for name in _metric_values(reader)
-                )
+            self.assertEqual(
+                _metric_values(reader),
+                _expected_token_metric_values(final),
             )
             session.close()
             observability.close()
 
-    def test_authoritative_turn_usage_updates_token_metrics(self) -> None:
-        usage = {
-            "cacheWriteInputTokens": 0,
-            "cachedInputTokens": 10,
-            "inputTokens": 123,
-            "outputTokens": 45,
-            "reasoningOutputTokens": 20,
-            "totalTokens": 168,
-        }
+    def test_authoritative_breakdown_ignores_unused_total_tokens(self) -> None:
+        usage = _token_usage(123, 10, 45, 20)
+        usage["totalTokens"] = "irrelevant upstream aggregate"
         with tempfile.TemporaryDirectory() as temporary, _fake_codex(
             {"token_usage": usage}
         ) as fake:
@@ -141,37 +147,26 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                                     "role": "implementor",
                                 },
                             )
-            self.assertEqual(values["codexos_model_input_tokens_total"], 123)
-            self.assertEqual(values["codexos_model_output_tokens_total"], 45)
+            self.assertEqual(values, _expected_token_metric_values(usage))
             observability.close()
 
     def test_cumulative_token_usage_adds_only_positive_deltas(self) -> None:
-        first = {
-            "cachedInputTokens": 10,
-            "inputTokens": 100,
-            "outputTokens": 20,
-            "reasoningOutputTokens": 5,
-            "totalTokens": 120,
-        }
-        second = {
-            "cachedInputTokens": 15,
-            "inputTokens": 150,
-            "outputTokens": 35,
-            "reasoningOutputTokens": 8,
-            "totalTokens": 185,
-        }
+        first = _token_usage(100, 10, 20, 5)
+        second = _token_usage(150, 40, 35, 8)
+        final = _token_usage(210, 75, 55, 13)
         scenario = {
             "turns": [
                 {
                     "token_usage_params": [
-                        {"tokenUsage": {"last": first, "total": first}},
-                        {"tokenUsage": {"last": first, "total": first}},
+                        _token_usage_params(first),
+                        _token_usage_params(first),
                     ]
                 },
                 {
                     "token_usage_params": [
-                        {"tokenUsage": {"last": second, "total": second}},
-                        {"tokenUsage": {"last": first, "total": first}},
+                        _token_usage_params(second),
+                        _token_usage_params(final),
+                        _token_usage_params(final),
                     ]
                 },
             ]
@@ -199,15 +194,93 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertEqual(first_result.turn_status, "completed")
             self.assertEqual(second_result.turn_status, "completed")
             self.assertTrue(session.healthy)
-            values = _metric_values(reader)
-            self.assertEqual(values["codexos_model_input_tokens_total"], 150)
-            self.assertEqual(values["codexos_model_output_tokens_total"], 35)
-            self.assertIn(
-                "cumulative total decreased",
-                observability.degraded_reason or "",
+            self.assertEqual(
+                _metric_values(reader),
+                _expected_token_metric_values(final),
             )
+            self.assertTrue(observability.healthy)
             session.close()
             observability.close()
+
+    def test_rejects_invalid_cumulative_snapshots(self) -> None:
+        previous_usage = _token_usage(100, 30, 40, 10)
+        previous, _ = token_usage_delta_from_notification(
+            _complete_token_notification(previous_usage),
+            "thread-1",
+            "turn-1",
+            CumulativeTokenUsage(),
+        )
+        missing = dict(previous_usage)
+        del missing["cachedInputTokens"]
+        cases = {
+            "missing field": missing,
+            "wrong type": dict(previous_usage, outputTokens="40"),
+            "negative": dict(previous_usage, reasoningOutputTokens=-1),
+            "decreasing cumulative": _token_usage(99, 30, 40, 10),
+            "decreasing cached": _token_usage(100, 29, 40, 10),
+            "decreasing output": _token_usage(100, 30, 39, 10),
+            "decreasing reasoning": _token_usage(100, 30, 40, 9),
+            "cached exceeds input": _token_usage(100, 101, 40, 10),
+            "reasoning exceeds output": _token_usage(100, 30, 40, 41),
+            "uncached decreases": _token_usage(110, 45, 40, 10),
+        }
+
+        for description, usage in cases.items():
+            with self.subTest(description=description):
+                with self.assertRaises(CodexAppServerError):
+                    token_usage_delta_from_notification(
+                        _complete_token_notification(usage),
+                        "thread-1",
+                        "turn-1",
+                        previous,
+                    )
+
+    def test_cumulative_snapshot_returns_exact_named_deltas(self) -> None:
+        first_usage = _token_usage(100, 35, 40, 12)
+        second_usage = _token_usage(165, 70, 58, 19)
+        first, _ = token_usage_delta_from_notification(
+            _complete_token_notification(first_usage),
+            "thread-1",
+            "turn-1",
+            CumulativeTokenUsage(),
+        )
+
+        _, delta = token_usage_delta_from_notification(
+            _complete_token_notification(second_usage),
+            "thread-1",
+            "turn-1",
+            first,
+        )
+
+        self.assertEqual(
+            delta.input_tokens,
+            second_usage["inputTokens"] - first_usage["inputTokens"],
+        )
+        self.assertEqual(
+            delta.cached_input_tokens,
+            second_usage["cachedInputTokens"]
+            - first_usage["cachedInputTokens"],
+        )
+        self.assertEqual(
+            delta.uncached_input_tokens,
+            (
+                second_usage["inputTokens"]
+                - second_usage["cachedInputTokens"]
+            )
+            - (
+                first_usage["inputTokens"]
+                - first_usage["cachedInputTokens"]
+            ),
+        )
+        self.assertEqual(
+            delta.output_tokens,
+            second_usage["outputTokens"] - first_usage["outputTokens"],
+        )
+        self.assertEqual(
+            delta.reasoning_output_tokens,
+            second_usage["reasoningOutputTokens"]
+            - first_usage["reasoningOutputTokens"],
+        )
 
     def test_feature_request_bridge_and_approved_prompt_are_concrete(self) -> None:
         approved_title = "Approved title\nraw\r\x1b[2J"
@@ -892,6 +965,54 @@ def _runtime_mock() -> Mock:
     runtime.current_transition = "initial"
     runtime.feature_requests.return_value = ()
     return runtime
+
+
+def _token_usage(
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    reasoning_output_tokens: int,
+) -> dict[str, object]:
+    return {
+        "cacheWriteInputTokens": 0,
+        "cachedInputTokens": cached_input_tokens,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": reasoning_output_tokens,
+        "totalTokens": input_tokens + output_tokens,
+    }
+
+
+def _token_usage_params(usage: dict[str, object]) -> dict[str, object]:
+    return {"tokenUsage": {"last": usage, "total": usage}}
+
+
+def _complete_token_notification(
+    usage: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        **_token_usage_params(usage),
+    }
+
+
+def _expected_token_metric_values(
+    usage: dict[str, object],
+) -> dict[str, int]:
+    input_tokens = int(usage["inputTokens"])
+    cached_input_tokens = int(usage["cachedInputTokens"])
+    return {
+        "codexos_model_input_tokens_total": input_tokens,
+        "codexos_model_cached_input_tokens_total": cached_input_tokens,
+        "codexos_model_uncached_input_tokens_total": (
+            input_tokens - cached_input_tokens
+        ),
+        "codexos_model_output_tokens_total": int(usage["outputTokens"]),
+        "codexos_model_reasoning_output_tokens_total": int(
+            usage["reasoningOutputTokens"]
+        ),
+    }
 
 
 def _metric_values(reader: InMemoryMetricReader) -> dict[str, int]:
