@@ -24,7 +24,7 @@ SECTIONS
         *(.data .data.*)
     } :data
 
-    ASSERT(SIZEOF(.data) <= 64K, "embedded seed data exceeds 64 KiB")
+    ASSERT(SIZEOF(.data) <= 256K, "embedded seed data exceeds 256 KiB")
 
     .limine_requests : ALIGN(16) {
         KEEP(*(.limine_requests_start))

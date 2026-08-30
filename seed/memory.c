@@ -145,26 +145,44 @@ void *memory_physical_to_virtual(uint64_t physical_address) {
     return (void *)(uintptr_t)(physical_address + direct_map_offset);
 }
 
-uint64_t memory_page_alloc(void) {
-    if (!allocator_ready) {
+uint64_t memory_pages_alloc(uint64_t page_count) {
+    if (!allocator_ready || page_count == 0 ||
+        page_count >= managed_page_count) {
         return 0;
     }
 
-    for (uint64_t page = 1; page < managed_page_count; ++page) {
-        if (page_bit(page)) {
+    for (uint64_t first = 1; first < managed_page_count; ++first) {
+        if (page_count > managed_page_count - first) {
+            break;
+        }
+
+        uint64_t available = 0;
+        while (available < page_count && !page_bit(first + available)) {
+            ++available;
+        }
+        if (available != page_count) {
+            first += available;
             continue;
         }
-        set_page_bit(page);
-        --free_page_count;
 
-        uint64_t physical_address = page * (uint64_t)MEMORY_PAGE_SIZE;
-        uint8_t *memory = (uint8_t *)memory_physical_to_virtual(physical_address);
+        for (uint64_t index = 0; index < page_count; ++index) {
+            set_page_bit(first + index);
+        }
+        free_page_count -= page_count;
+
+        uint64_t physical_address = first * (uint64_t)MEMORY_PAGE_SIZE;
+        uint8_t *memory =
+            (uint8_t *)memory_physical_to_virtual(physical_address);
         if (memory == (uint8_t *)0) {
-            clear_page_bit(page);
-            ++free_page_count;
+            for (uint64_t index = 0; index < page_count; ++index) {
+                clear_page_bit(first + index);
+            }
+            free_page_count += page_count;
             return 0;
         }
-        for (uint32_t offset = 0; offset < MEMORY_PAGE_SIZE; ++offset) {
+
+        uint64_t byte_count = page_count * (uint64_t)MEMORY_PAGE_SIZE;
+        for (uint64_t offset = 0; offset < byte_count; ++offset) {
             memory[offset] = 0;
         }
         return physical_address;
@@ -172,24 +190,44 @@ uint64_t memory_page_alloc(void) {
     return 0;
 }
 
-int memory_page_free(uint64_t physical_address) {
-    if (!allocator_ready ||
+uint64_t memory_page_alloc(void) {
+    return memory_pages_alloc(1);
+}
+
+int memory_pages_free(uint64_t physical_address, uint64_t page_count) {
+    if (!allocator_ready || page_count == 0 ||
         (physical_address & ((uint64_t)MEMORY_PAGE_SIZE - 1u)) != 0 ||
         physical_address == 0) {
         return 0;
     }
 
-    uint64_t page = physical_address / MEMORY_PAGE_SIZE;
-    if (page >= managed_page_count || !page_bit(page) ||
-        !physical_page_is_usable(physical_address) ||
-        (page >= bitmap_physical_base / MEMORY_PAGE_SIZE &&
-         page < bitmap_physical_base / MEMORY_PAGE_SIZE + bitmap_page_count)) {
+    uint64_t first = physical_address / MEMORY_PAGE_SIZE;
+    if (first >= managed_page_count ||
+        page_count > managed_page_count - first) {
         return 0;
     }
 
-    clear_page_bit(page);
-    ++free_page_count;
+    uint64_t bitmap_first = bitmap_physical_base / MEMORY_PAGE_SIZE;
+    for (uint64_t index = 0; index < page_count; ++index) {
+        uint64_t page = first + index;
+        uint64_t address = physical_address +
+                           index * (uint64_t)MEMORY_PAGE_SIZE;
+        if (!page_bit(page) || !physical_page_is_usable(address) ||
+            (page >= bitmap_first &&
+             page < bitmap_first + bitmap_page_count)) {
+            return 0;
+        }
+    }
+
+    for (uint64_t index = 0; index < page_count; ++index) {
+        clear_page_bit(first + index);
+    }
+    free_page_count += page_count;
     return 1;
+}
+
+int memory_page_free(uint64_t physical_address) {
+    return memory_pages_free(physical_address, 1);
 }
 
 struct memory_stats memory_get_stats(void) {
@@ -201,26 +239,22 @@ struct memory_stats memory_get_stats(void) {
 }
 
 static int allocator_self_test(void) {
-    uint64_t first = memory_page_alloc();
-    uint64_t second = memory_page_alloc();
-    if (first == 0 || second == 0 || first == second ||
-        (first & (MEMORY_PAGE_SIZE - 1u)) != 0 ||
-        (second & (MEMORY_PAGE_SIZE - 1u)) != 0) {
+    uint64_t first = memory_pages_alloc(2);
+    if (first == 0 || (first & (MEMORY_PAGE_SIZE - 1u)) != 0) {
         return 0;
     }
 
-    uint8_t *first_data = (uint8_t *)memory_physical_to_virtual(first);
-    uint8_t *second_data = (uint8_t *)memory_physical_to_virtual(second);
-    if (first_data == (uint8_t *)0 || second_data == (uint8_t *)0) {
+    uint8_t *data = (uint8_t *)memory_physical_to_virtual(first);
+    if (data == (uint8_t *)0) {
         return 0;
     }
-    for (uint32_t offset = 0; offset < MEMORY_PAGE_SIZE; ++offset) {
-        if (first_data[offset] != 0 || second_data[offset] != 0) {
+    for (uint32_t offset = 0; offset < MEMORY_PAGE_SIZE * 2u; ++offset) {
+        if (data[offset] != 0) {
             return 0;
         }
-        first_data[offset] = 0xa5u;
+        data[offset] = 0xa5u;
     }
-    return memory_page_free(first) && memory_page_free(second);
+    return memory_pages_free(first, 2);
 }
 
 int memory_init(void) {

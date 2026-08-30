@@ -3,15 +3,15 @@
 
 #include <stdint.h>
 
-#define FILE_CONTENT_CAPACITY (64u * 1024u)
 #define FILE_MAX_COUNT 128u
 #define FILE_MAX_PATH_LENGTH 255u
 
 struct file {
     uint8_t path[FILE_MAX_PATH_LENGTH];
     uint16_t path_length;
-    uint32_t content_offset;
+    uint8_t *content;
     uint32_t content_length;
+    uint32_t content_capacity;
 };
 
 struct embedded_file {
