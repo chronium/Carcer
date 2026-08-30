@@ -434,6 +434,13 @@ class CodexOSRun:
                 raise ValueError(
                     f"generation {archive.generation} has invalid successor ancestry"
                 )
+            if (
+                archive.transition == "rollback"
+                and parent_number == archive.generation - 1
+            ):
+                raise ValueError(
+                    f"generation {archive.generation} has invalid rollback ancestry"
+                )
 
     def _load_fork_generation(self, generation_number: int) -> tuple[Path, str]:
         archived = self._read_archived_generation(generation_number)

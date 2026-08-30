@@ -190,6 +190,44 @@ class ArchivedGateReopenTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "partial generation state"):
                 CodexOSRun(partial).reopen_at_gate()
 
+    def test_reopen_rejects_rollback_from_immediately_previous_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, rollback_parent in (
+                ("invalid", 2),
+                ("valid", 1),
+            ):
+                run = root / name
+                for generation, parent, transition in (
+                    (0, None, "initial"),
+                    (1, 0, "successor"),
+                    (2, 1, "successor"),
+                    (3, rollback_parent, "rollback"),
+                ):
+                    _archive_completed(
+                        run,
+                        generation,
+                        parent,
+                        transition,
+                        [
+                            SnapshotFile(
+                                "seed/kernel.c",
+                                f"G{generation}\n".encode("ascii"),
+                            )
+                        ],
+                    )
+
+            with self.assertRaisesRegex(ValueError, "invalid rollback ancestry"):
+                CodexOSRun(root / "invalid").reopen_at_gate()
+
+            valid = CodexOSRun(root / "valid")
+            valid.reopen_at_gate()
+            self.assertIs(valid.state, RuntimeState.AWAITING_NEXT_GENERATION)
+            self.assertEqual(valid.generation_number, 3)
+            valid.stop()
+
     def test_feature_and_git_provenance_continue_across_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
