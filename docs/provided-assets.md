@@ -26,6 +26,9 @@ in [`../protocol/provided-assets-host-service.md`](../protocol/provided-assets-h
 The active generation and candidate validation share the same in-memory
 snapshot. One dispatcher owns each guest serial stream, so provided-asset
 requests are serviced before and after READY without waiting for unrelated
-development-tool traffic. Asset bytes are not Codex dynamic-tool results and
-do not enter source snapshots, generation archives, autonomous Git commits,
-prompts, handoffs, interview artifacts, or operational telemetry.
+development-tool traffic. Other trusted development host services retain their
+existing scope inside a harness-initiated development-tool exchange; making
+provided assets continuously available does not expose those services to idle
+guest code. Asset bytes are not Codex dynamic-tool results and do not enter
+source snapshots, generation archives, autonomous Git commits, prompts,
+handoffs, interview artifacts, or operational telemetry.

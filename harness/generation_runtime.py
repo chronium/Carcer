@@ -658,7 +658,8 @@ class CodexOSRun:
             protocol = SerialProtocolDispatcher(
                 serial,
                 startup_host_services=self._provided_assets,
-                host_services=host_services,
+                background_host_services=self._provided_assets,
+                exchange_host_services=host_services,
             )
             self._serial_protocol = protocol
             wait_for_ready(

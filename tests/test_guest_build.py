@@ -80,7 +80,7 @@ class GuestBuildIntegrationTest(unittest.TestCase):
                     _wait_for_ready(first_serial)
                     protocol = SerialProtocolDispatcher(
                         first_serial,
-                        host_services=host_services,
+                        exchange_host_services=host_services,
                     )
                     protocol.start_ready()
                     client = ToolClient(protocol)

@@ -39,6 +39,7 @@ generation and its ephemeral candidate-validation VMs use the same frozen
 in-memory snapshot. The provided-assets dispatcher remains available whenever
 each VM is running, both while the guest is approaching canonical READY and
 after READY, independently of harness-initiated development-tool traffic.
-Other host services are not thereby enabled during startup. The interface does
+Other trusted development host services retain their scoped invocation
+semantics and are not thereby exposed to idle guest code. The interface does
 not define a guest filesystem, installation path, extraction behavior,
 executable format, or use policy.

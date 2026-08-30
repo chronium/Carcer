@@ -298,7 +298,8 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
             protocol = SerialProtocolDispatcher(
                 serial,
                 startup_host_services=assets,
-                host_services=assets,
+                background_host_services=assets,
+                exchange_host_services=assets,
             )
             try:
                 wait_for_ready(protocol, 1.0)
@@ -484,7 +485,8 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                 ready.assert_called_once()
                 protocol = ready.call_args.args[0]
                 self.assertIs(protocol._startup_host_services, frozen)
-                self.assertIs(protocol._host_services, active)
+                self.assertIs(protocol._background_host_services, frozen)
+                self.assertIs(protocol._exchange_host_services, active)
                 runtime.stop()
 
 

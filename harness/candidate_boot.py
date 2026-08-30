@@ -170,7 +170,8 @@ class CandidateBootValidator:
                         protocol = SerialProtocolDispatcher(
                             serial,
                             startup_host_services=self._provided_assets,
-                            host_services=self._provided_assets,
+                            background_host_services=self._provided_assets,
+                            exchange_host_services=self._provided_assets,
                         )
                         result = self._validate_guest(protocol)
         finally:

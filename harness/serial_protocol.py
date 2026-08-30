@@ -30,11 +30,13 @@ class SerialProtocolDispatcher:
         serial: SerialConnection,
         *,
         startup_host_services: HostServiceHandler | None = None,
-        host_services: HostServiceHandler | None = None,
+        background_host_services: HostServiceHandler | None = None,
+        exchange_host_services: HostServiceHandler | None = None,
     ) -> None:
         self._serial = serial
         self._startup_host_services = startup_host_services
-        self._host_services = host_services
+        self._background_host_services = background_host_services
+        self._exchange_host_services = exchange_host_services
         self._condition = threading.Condition()
         self._exchange_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -217,13 +219,20 @@ class SerialProtocolDispatcher:
             if frame is None:
                 return
             if frame.message_type == HOST_SERVICE_REQUEST:
-                self._dispatch_host_service(frame, self._host_services)
+                with self._condition:
+                    handler = (
+                        self._exchange_host_services
+                        if self._pending_response
+                        else self._background_host_services
+                    )
+                self._dispatch_host_service(frame, handler)
                 continue
             with self._condition:
                 if not self._pending_response or self._response is not None:
                     raise FramingError(
                         "received an unexpected guest tool-protocol response"
                     )
+                self._pending_response = False
                 self._response = frame
                 self._condition.notify_all()
 

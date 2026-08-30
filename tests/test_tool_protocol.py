@@ -42,9 +42,17 @@ def connected_serial_peer():
 
 
 @contextmanager
-def connected_protocol(host_services=None):
+def connected_protocol(
+    exchange_host_services=None,
+    *,
+    background_host_services=None,
+):
     with connected_serial_peer() as (serial, peer):
-        protocol = SerialProtocolDispatcher(serial, host_services=host_services)
+        protocol = SerialProtocolDispatcher(
+            serial,
+            background_host_services=background_host_services,
+            exchange_host_services=exchange_host_services,
+        )
         protocol.start_ready()
         try:
             yield protocol, peer
@@ -267,7 +275,9 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             data = b"idle post-ready bytes\x00\xff"
             (asset / "payload.bin").write_bytes(data)
             assets = ProvidedAssets.from_directory(supplied)
-            with connected_protocol(assets) as (protocol, peer):
+            with connected_protocol(
+                background_host_services=assets,
+            ) as (protocol, peer):
                 self.assertTrue(protocol.reader_alive)
                 peer.sendall(host_request(41, "list_provided_assets", ()))
                 listed = receive_peer_frame(peer)
@@ -293,6 +303,108 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                         (0, expected),
                     )
 
+    def test_idle_guest_cannot_reach_exchange_host_services(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            supplied = Path(temporary) / "supplied"
+            asset = supplied / "alpha"
+            asset.mkdir(parents=True)
+            (asset / "payload.bin").write_bytes(b"scoped asset bytes")
+            assets = ProvidedAssets.from_directory(supplied)
+
+            class ExchangeHostServices:
+                def __init__(self) -> None:
+                    self.requests = []
+
+                def handle_request(self, request):
+                    self.requests.append(request)
+                    if request.service_name in {
+                        "list_provided_assets",
+                        "read_provided_asset",
+                    }:
+                        return assets.handle_request(request)
+                    return create_host_service_response(
+                        request.request_id,
+                        0,
+                        b"exchange service completed",
+                    )
+
+            exchange_services = ExchangeHostServices()
+            with (
+                connected_protocol(
+                    exchange_services,
+                    background_host_services=assets,
+                ) as (protocol, peer),
+                ThreadPoolExecutor() as pool,
+            ):
+                for request_id, service_name in enumerate(
+                    ("build", "finish_generation", "request_feature"),
+                    51,
+                ):
+                    peer.sendall(host_request(request_id, service_name, ()))
+                    response = receive_peer_frame(peer)
+                    status = struct.unpack_from("<I", response.payload)[0]
+                    diagnostic = response.payload[4:]
+                    self.assertEqual(response.request_id, request_id)
+                    self.assertEqual(status, 1)
+                    self.assertTrue(diagnostic)
+                    self.assertLessEqual(len(diagnostic), 4 * 1024)
+                self.assertEqual(exchange_services.requests, [])
+
+                client = ToolClient(protocol)
+                ordinary = pool.submit(client.list_tools)
+                ordinary_request = receive_peer_frame(peer)
+                peer.sendall(
+                    encode_frame(
+                        Frame(
+                            0x8001,
+                            ordinary_request.request_id,
+                            struct.pack("<H", 0),
+                        )
+                    )
+                    + host_request(60, "build", ())
+                )
+                self.assertEqual(ordinary.result(1.0), [])
+                after_response = receive_peer_frame(peer)
+                self.assertEqual(after_response.request_id, 60)
+                self.assertEqual(
+                    struct.unpack_from("<I", after_response.payload)[0],
+                    1,
+                )
+                self.assertEqual(exchange_services.requests, [])
+
+                build = pool.submit(client.invoke_tool, "build", [])
+                build_request = receive_peer_frame(peer)
+                peer.sendall(host_request(61, "build", ()))
+                build_service_response = receive_peer_frame(peer)
+                self.assertEqual(
+                    (build_service_response.request_id, build_service_response.payload),
+                    (61, struct.pack("<I", 0) + b"exchange service completed"),
+                )
+
+                peer.sendall(host_request(62, "list_provided_assets", ()))
+                asset_response = receive_peer_frame(peer)
+                self.assertEqual(asset_response.request_id, 62)
+                self.assertEqual(struct.unpack_from("<I", asset_response.payload)[0], 0)
+                self.assertIn(b"alpha\tpayload.bin", asset_response.payload[4:])
+
+                peer.sendall(
+                    encode_frame(
+                        Frame(
+                            0x8002,
+                            build_request.request_id,
+                            struct.pack("<I", 0) + b"tool build completed",
+                        )
+                    )
+                )
+                self.assertEqual(
+                    build.result(1.0),
+                    ToolResult(0, b"tool build completed"),
+                )
+                self.assertEqual(
+                    [request.service_name for request in exchange_services.requests],
+                    ["build", "list_provided_assets"],
+                )
+
     def test_candidate_validation_services_assets_after_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             supplied = Path(temporary) / "supplied"
@@ -309,7 +421,8 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                 protocol = SerialProtocolDispatcher(
                     serial,
                     startup_host_services=assets,
-                    host_services=assets,
+                    background_host_services=assets,
+                    exchange_host_services=assets,
                 )
                 try:
                     result = pool.submit(validator._validate_guest, protocol)
@@ -346,7 +459,9 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             asset.mkdir(parents=True)
             (asset / "data").write_bytes(b"bytes")
             assets = ProvidedAssets.from_directory(supplied)
-            with connected_protocol(assets) as (_protocol, peer):
+            with connected_protocol(
+                background_host_services=assets,
+            ) as (_protocol, peer):
                 peer.sendall(
                     encode_frame(Frame(0x0003, 51, b"\x05\x00bad"))
                     + host_request(52, "list_provided_assets", ())

@@ -211,7 +211,7 @@ def _running_guest(
             _wait_for_ready(serial)
             protocol = SerialProtocolDispatcher(
                 serial,
-                host_services=host_services,
+                exchange_host_services=host_services,
             )
             protocol.start_ready()
             try:
