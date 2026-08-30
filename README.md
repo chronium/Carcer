@@ -63,6 +63,8 @@ External devices whose persistent or isolation semantics are not yet part of the
 
 The absence of a device from `experiment-v1` does not prohibit CodexOS from eventually gaining or supporting that class of hardware. Future trusted hardware capabilities may be added deliberately through the human-reviewed feature-request process; a request or its approval never changes the environment automatically.
 
+If networking hardware is later provisioned, its presence alone must not grant access to trusted networks or the public Internet. Network reachability remains a separate trusted-environment capability that may be enabled only through deliberate human-reviewed provisioning.
+
 The guest is encouraged to explore and use available hardware rather than being forced down a predetermined implementation path.
 
 ## General-purpose requirement
@@ -77,9 +79,9 @@ For the Doom milestone to count:
 * the same mechanisms must be capable of running unrelated programs;
 * the supplied Doom executable and data must remain immutable.
 
-A general-purpose CodexOS must eventually support preemptive execution of multiple independent user processes. A runnable CPU-bound user process that does not voluntarily yield, block, or enter the kernel must not prevent other runnable user processes from making progress. This is an observable capability requirement, not a prescription for a particular scheduling architecture or implementation sequence.
+A general-purpose CodexOS must eventually support preemptive execution of multiple independent concurrently runnable user workloads. A runnable CPU-bound user workload that does not voluntarily yield, block, or enter the kernel must not prevent another runnable user workload from making progress. This is an observable capability requirement, not a prescription for a particular scheduling architecture, execution model, or implementation sequence.
 
-Doom running alone is not sufficient evidence of this capability. At an appropriate later milestone, CodexOS must be able to run Doom concurrently with an unrelated user process that continues to make progress without depending on Doom voluntarily yielding. Doom must remain an ordinary process and receive no special treatment from the kernel.
+Doom running alone is not sufficient evidence of this capability. At an appropriate later milestone, CodexOS must be able to run Doom concurrently with an unrelated user workload that continues to make progress without depending on Doom voluntarily yielding. Doom must receive no special scheduling or kernel treatment.
 
 Later validation may use programs unknown to the agent during development to detect Doom-specific overfitting.
 
