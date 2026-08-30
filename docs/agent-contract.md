@@ -12,7 +12,24 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
-Contract version 3 explicitly describes the trusted implementor tool surface.
+Contract version 4 retains the trusted implementor tool surface made explicit in
+version 3 and clarifies three semantic boundaries. Milestones and future
+validation describe required outcomes, not implicit grants of supporting
+trusted-environment capabilities. An absent external capability must not be
+assumed to appear merely because a future outcome would require it.
+
+An advisory external feature request may coexist with continued guest-side work,
+including a local workaround. Recording a legitimate request does not require
+depending on it, waiting for it, or stopping the generation, while a workaround
+does not by itself make the request inappropriate. This does not change the rule
+that `request_feature` cannot substitute for functionality that belongs inside
+CodexOS.
+
+Generation handoffs must distinguish implemented end-to-end capabilities and
+explicitly provisioned trusted capabilities from unresolved dependencies or
+assumptions. A future path must not be described as available unless every
+required step is implemented or explicitly provisioned.
+
 The source inspection and mutation tools operate only on persistent mutable guest
 source, build success includes candidate boot and protocol validation, generation
 finish is permanent and requires the matching validated build, and review is a
@@ -23,7 +40,8 @@ the human-controlled trusted external environment. It is not a request for a hum
 to implement CodexOS kernel or userland functionality, and neither requesting nor
 approving it provisions or changes anything by itself. Examples of likely future
 requests are intentionally omitted so the contract does not steer autonomous
-decisions.
+decisions. A request may remain pending or be denied, and neither requesting nor
+approving it provisions a capability by itself.
 
 Current hardware facts are rendered from the trusted `CodexOSHardwareProfile`
 used by the running generation. The prompt does not carry a second copy of the
@@ -54,8 +72,13 @@ settings across explicit continuation turns and pause/resume.
 
 Structured Codex lifecycle events record the requested reasoning-summary mode,
 service-tier ID, and its catalog display name, when supplied, while implementor
-events also record agent contract version 3. These are serving and prompt
+events also record agent contract version 4. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
+
+In `experiment-002`, generations 0 through 9 ran under contract version 3.
+Generation 10 onward runs under contract version 4. Other runs record the
+contract version actually used in their implementor provenance; historical
+events are not backfilled.
 
 ## Post-generation exit interviews
 
