@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from harness import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
     EXPERIMENT_HARDWARE_PROFILE,
     TEST_HARDWARE_PROFILE,
     BuildHostService,
@@ -32,6 +35,7 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
         qemu = _qemu()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            activity = CodexActivityStream()
             build = build_source_snapshot(
                 encode_source_snapshot(_current_seed_files(repository)),
                 root / "compiled",
@@ -41,11 +45,26 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
                 qemu,
                 TEST_HARDWARE_PROFILE,
                 temporary_parent=root,
+                activity_stream=activity,
+                generation=4,
             )
 
             pids, result = _validate_tracking_process(validator, build.iso)
 
             self.assertEqual(result.status, BuildStatus.SUCCESS, result.diagnostics)
+            events = activity.drain()
+            self.assertEqual(
+                [event.kind for event in events],
+                [
+                    CodexActivityKind.BUILD_CANDIDATE_STARTED,
+                    CodexActivityKind.BUILD_CANDIDATE_READY,
+                    CodexActivityKind.BUILD_PROTOCOL_VALIDATED,
+                ],
+            )
+            self.assertTrue(all(event.generation == 4 for event in events))
+            self.assertTrue(
+                all(event.role is CodexActivityRole.HARNESS for event in events)
+            )
             _assert_candidate_cleanup(self, root, pids)
 
     def test_compile_valid_nonbooting_and_protocol_broken_candidates_fail(
@@ -82,6 +101,7 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
                 ("early-exit", early_exit, "before CODEXOS-SEED-READY"),
             ):
                 with self.subTest(candidate=name):
+                    activity = CodexActivityStream()
                     build = build_source_snapshot(
                         encode_source_snapshot(candidate),
                         root / f"compiled-{name}",
@@ -96,6 +116,8 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
                         TEST_HARDWARE_PROFILE,
                         ready_timeout_seconds=0.25,
                         temporary_parent=root,
+                        activity_stream=activity,
+                        generation=5,
                     )
                     pids, result = _validate_tracking_process(
                         validator,
@@ -117,6 +139,10 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
                             r"CODEXOS-NOT-READY\n",
                             result.diagnostics,
                         )
+                    self.assertIs(
+                        activity.drain()[-1].kind,
+                        CodexActivityKind.BUILD_CANDIDATE_FAILED,
+                    )
                     _assert_candidate_cleanup(self, root, pids)
 
     def test_later_boot_failure_preserves_previous_success_and_blocks_finish(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .build_host_service import BuildHostService, StagedBuildArtifacts
 from .candidate_boot import CandidateBootValidator
+from .codex_activity import CodexActivityStream
 from .feature_requests import (
     MAX_FEATURE_DESCRIPTION_BYTES,
     MAX_FEATURE_TITLE_BYTES,
@@ -48,6 +49,7 @@ class CodexOSHostServices:
         feature_request_store: FeatureRequestStore | None = None,
         generation: int | None = None,
         observability: ExperimentObservability | None = None,
+        activity_stream: CodexActivityStream | None = None,
     ) -> None:
         if (feature_request_store is None) != (generation is None):
             raise ValueError(
@@ -56,6 +58,8 @@ class CodexOSHostServices:
         self._build_service = BuildHostService(
             staging_directory,
             candidate_validator,
+            activity_stream=activity_stream,
+            generation=generation,
         )
         self._pending_finish: PendingGenerationFinish | None = None
         self._feature_request_store = feature_request_store

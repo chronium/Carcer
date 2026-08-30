@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 from .candidate_boot import CandidateBootValidator
+from .codex_activity import CodexActivityStream
 from .feature_requests import FeatureRequest, FeatureRequestStore
 from .generation_finish_host_service import (
     CodexOSHostServices,
@@ -66,11 +67,13 @@ class CodexOSRun:
         *,
         hardware_profile: CodexOSHardwareProfile = EXPERIMENT_HARDWARE_PROFILE,
         observability: ExperimentObservability | None = None,
+        activity_stream: CodexActivityStream | None = None,
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
         self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._observability = observability
+        self._activity_stream = activity_stream
         if observability is not None:
             observability.set_feature_requests_pending(
                 sum(
@@ -111,6 +114,10 @@ class CodexOSRun:
     @property
     def observability(self) -> ExperimentObservability | None:
         return self._observability
+
+    @property
+    def activity_stream(self) -> CodexActivityStream | None:
+        return self._activity_stream
 
     @property
     def hardware_profile(self) -> CodexOSHardwareProfile:
@@ -604,10 +611,13 @@ class CodexOSRun:
             CandidateBootValidator(
                 self._qemu_executable,
                 self._hardware_profile,
+                activity_stream=self._activity_stream,
+                generation=generation_number,
             ),
             feature_request_store=self._feature_request_store,
             generation=generation_number,
             observability=self._observability,
+            activity_stream=self._activity_stream,
         )
 
         self._workspace = workspace

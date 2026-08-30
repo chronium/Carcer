@@ -9,6 +9,13 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from .codex_activity import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
+    publish_activity,
+    publish_renderable_codex_notification,
+)
 from .codex_app_server import (
     CumulativeTokenUsage,
     CodexAppServer,
@@ -39,6 +46,8 @@ class CodexReviewWorker:
         self,
         codex_executable: str = "codex",
         auth_file: str | Path | None = None,
+        *,
+        activity_stream: CodexActivityStream | None = None,
     ) -> None:
         self._codex_executable = codex_executable
         self._auth_file = (
@@ -49,6 +58,7 @@ class CodexReviewWorker:
         self._lock = threading.Lock()
         self._server: CodexAppServer | None = None
         self._cancelled = threading.Event()
+        self._activity_stream = activity_stream
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -105,6 +115,16 @@ class CodexReviewWorker:
                     focus,
                     None,
                 )
+                self._publish(
+                    runtime,
+                    CodexActivityKind.REVIEW_STARTED,
+                    {
+                        "model": model,
+                        "reasoning_effort": reasoning_effort,
+                        "service_tier": service_tier,
+                        "focus": focus,
+                    },
+                )
                 thread_id = server.start_thread(
                     model=model,
                     service_tier=service_tier,
@@ -134,6 +154,13 @@ class CodexReviewWorker:
                         permission_profile=_PERMISSION_PROFILE,
                     )
                     turn_value.append(turn_id)
+                    self._publish(
+                        runtime,
+                        CodexActivityKind.TURN_STARTED,
+                        {"focus": focus},
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    )
                 finally:
                     turn_ready.set()
                 result = self._wait_for_turn(
@@ -162,6 +189,24 @@ class CodexReviewWorker:
                 focus,
                 max(0.0, time.monotonic() - started_at),
             )
+            review_kind = {
+                "completed": CodexActivityKind.REVIEW_COMPLETED,
+                "cancelled": CodexActivityKind.REVIEW_CANCELLED,
+                "failed": CodexActivityKind.REVIEW_FAILED,
+            }[outcome]
+            self._publish(
+                runtime,
+                review_kind,
+                {
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "service_tier": service_tier,
+                    "focus": focus,
+                    "duration_seconds": max(
+                        0.0, time.monotonic() - started_at
+                    ),
+                },
+            )
 
     def _wait_for_turn(
         self,
@@ -177,6 +222,14 @@ class CodexReviewWorker:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
+            publish_renderable_codex_notification(
+                self._activity_stream,
+                runtime.generation_number,
+                CodexActivityRole.REVIEWER,
+                message,
+                thread_id,
+                turn_id,
+            )
             if method == "thread/tokenUsage/updated":
                 observability = runtime.observability
                 if observability is None:
@@ -231,6 +284,18 @@ class CodexReviewWorker:
                     raise CodexReviewWorkerError(
                         f"review turn has invalid status {status!r}"
                     )
+                kind = (
+                    CodexActivityKind.TURN_INTERRUPTED
+                    if status == "interrupted"
+                    else CodexActivityKind.TURN_FAILED
+                )
+                self._publish(
+                    runtime,
+                    kind,
+                    {"status": status},
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                )
                 raise CodexReviewWorkerError(
                     f"Codex reviewer turn {status}: {short_json(turn.get('error'))}"
                 )
@@ -239,7 +304,35 @@ class CodexReviewWorker:
                 raise CodexReviewWorkerError(
                     "Codex reviewer completed without a final response"
                 )
+            self._publish(
+                runtime,
+                CodexActivityKind.TURN_COMPLETED,
+                {"status": "completed"},
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
             return final_message
+
+    def _publish(
+        self,
+        runtime: CodexOSRun,
+        kind: CodexActivityKind,
+        data: Mapping[str, object] | None = None,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        item_id: str | None = None,
+    ) -> None:
+        publish_activity(
+            self._activity_stream,
+            runtime.generation_number,
+            CodexActivityRole.REVIEWER,
+            kind,
+            data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=item_id,
+        )
 
     @staticmethod
     def _record(
@@ -317,6 +410,16 @@ class CodexReviewWorker:
         thread_id: str,
         turn_id: str,
     ) -> dict[str, object]:
+        activity_data = _dynamic_tool_activity_data(params)
+        call_id = _activity_call_id(params)
+        self._publish(
+            runtime,
+            CodexActivityKind.TOOL_STARTED,
+            activity_data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=call_id,
+        )
         try:
             values = object_value(params, "reviewer dynamic tool request")
             _validate_tool_call(values, thread_id, turn_id)
@@ -327,6 +430,26 @@ class CodexReviewWorker:
                 raise ValueError("reviewer dynamic tool name must be a string")
             arguments = _arguments(values.get("arguments"))
             result = _dispatch_read_only_tool(runtime, tool, arguments)
+            activity_kind = (
+                CodexActivityKind.TOOL_COMPLETED
+                if result.status == 0
+                else CodexActivityKind.TOOL_FAILED
+            )
+            self._publish(
+                runtime,
+                activity_kind,
+                {
+                    **activity_data,
+                    "success": result.status == 0,
+                    "result": {
+                        "status": result.status,
+                        "output": result.output,
+                    },
+                },
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
             return {
                 "contentItems": [
                     {"type": "inputText", "text": _format_tool_result(result)}
@@ -334,12 +457,30 @@ class CodexReviewWorker:
                 "success": True,
             }
         except (CodexAppServerError, RuntimeError, TypeError, ValueError) as error:
+            self._publish(
+                runtime,
+                CodexActivityKind.TOOL_FAILED,
+                {**activity_data, "success": False, "error": str(error)},
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
             return {
                 "contentItems": [
                     {"type": "inputText", "text": f"Bridge error: {error}"}
                 ],
                 "success": False,
             }
+        except Exception as error:
+            self._publish(
+                runtime,
+                CodexActivityKind.TOOL_FAILED,
+                {**activity_data, "success": False, "error": str(error)},
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=call_id,
+            )
+            raise
 
 
 def _dispatch_read_only_tool(
@@ -366,6 +507,23 @@ def _dispatch_read_only_tool(
             ],
         )
     raise ValueError(f"unsupported reviewer CodexOS tool: {tool}")
+
+
+def _dynamic_tool_activity_data(params: object) -> dict[str, object]:
+    if not isinstance(params, dict):
+        return {"namespace": None, "tool": None, "arguments": params}
+    return {
+        "namespace": params.get("namespace"),
+        "tool": params.get("tool"),
+        "arguments": params.get("arguments"),
+    }
+
+
+def _activity_call_id(params: object) -> str | None:
+    if not isinstance(params, dict):
+        return None
+    call_id = params.get("callId")
+    return call_id if isinstance(call_id, str) else None
 
 
 def _reviewer_tool_namespace() -> dict[str, object]:

@@ -230,6 +230,69 @@ for turn_index, turn_scenario in enumerate(turns, 1):
     for method in turn_scenario.get("server_requests", []):
         request_client(method, {})
 
+    for index, activity in enumerate(
+        turn_scenario.get("visible_activity", []),
+        1,
+    ):
+        item_id = f"activity-{turn_index}-{index}"
+        kind = activity["kind"]
+        if kind == "agent_delta":
+            send(
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "itemId": item_id,
+                        "delta": activity["text"],
+                    },
+                }
+            )
+        elif kind == "reasoning_summary_delta":
+            send(
+                {
+                    "method": "item/reasoning/summaryTextDelta",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "itemId": item_id,
+                        "summaryIndex": activity.get("summary_index", 0),
+                        "delta": activity["text"],
+                    },
+                }
+            )
+        elif kind == "reasoning_completed":
+            send(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": {
+                            "id": item_id,
+                            "type": "reasoning",
+                            "summary": activity["summary"],
+                            "content": activity.get("content", []),
+                        },
+                    },
+                }
+            )
+        elif kind == "reasoning_text_delta":
+            send(
+                {
+                    "method": "item/reasoning/textDelta",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "itemId": item_id,
+                        "contentIndex": 0,
+                        "delta": activity["text"],
+                    },
+                }
+            )
+        else:
+            raise SystemExit(f"unsupported visible activity kind: {kind}")
+
     for index, call in enumerate(turn_scenario.get("tool_calls", []), 1):
         call_params = {
             "threadId": call.get("thread_id", thread_id),

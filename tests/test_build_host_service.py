@@ -6,6 +6,9 @@ from pathlib import Path
 
 from harness import (
     BuildHostService,
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
     CandidateBootValidator,
     CodexOSHostServices,
     FeatureRequestStore,
@@ -22,9 +25,12 @@ class BuildHostServiceIntegrationTests(unittest.TestCase):
         files = _current_seed_files(repository)
 
         with tempfile.TemporaryDirectory() as temporary:
+            activity = CodexActivityStream()
             service = BuildHostService(
                 Path(temporary) / "staging",
                 _candidate_validator(temporary),
+                activity_stream=activity,
+                generation=8,
             )
             success = service.handle_request(
                 HostServiceRequest(
@@ -45,6 +51,23 @@ class BuildHostServiceIntegrationTests(unittest.TestCase):
             self.assertEqual(artifacts.kernel_elf.name, "kernel.elf")
             self.assertEqual(artifacts.iso.name, "codexos.iso")
             self.assertEqual(artifacts.source_snapshot, encode_source_snapshot(files))
+            events = activity.drain()
+            self.assertEqual(
+                [event.kind for event in events],
+                [
+                    CodexActivityKind.BUILD_STARTED,
+                    CodexActivityKind.BUILD_COMPILE_COMPLETED,
+                    CodexActivityKind.BUILD_COMPLETED,
+                ],
+            )
+            self.assertEqual(
+                events[1].data["result"],
+                "success",
+            )
+            self.assertTrue(all(event.generation == 8 for event in events))
+            self.assertTrue(
+                all(event.role is CodexActivityRole.HARNESS for event in events)
+            )
 
             broken_files = tuple(
                 SnapshotFile(entry.path, b"this is not valid C;\n")

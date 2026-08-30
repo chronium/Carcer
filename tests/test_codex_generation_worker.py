@@ -17,6 +17,9 @@ from unittest.mock import Mock
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
     TEST_HARDWARE_PROFILE,
     CodexGenerationSession,
     CodexGenerationWorker,
@@ -51,6 +54,172 @@ _TOOLS = [
 
 
 class CodexGenerationWorkerProtocolTests(unittest.TestCase):
+    def test_live_activity_captures_renderable_text_and_tool_outcomes(self) -> None:
+        source = "void changed(void) {\n  emit(\"\x1b[source\");\n}\n"
+        scenario = {
+            "visible_activity": [
+                {"kind": "agent_delta", "text": "Inspecting source."},
+                {
+                    "kind": "reasoning_summary_delta",
+                    "text": "Checking the current implementation.",
+                },
+                {
+                    "kind": "reasoning_completed",
+                    "summary": ["Checked the implementation."],
+                    "content": ["opaque reasoning must not be surfaced"],
+                },
+                {
+                    "kind": "reasoning_text_delta",
+                    "text": "private reasoning delta",
+                },
+            ],
+            "tool_calls": [
+                {
+                    "tool": "write",
+                    "arguments": {
+                        "path": "seed/new.c",
+                        "offset": 0,
+                        "data": source,
+                    },
+                },
+                {
+                    "tool": "read",
+                    "arguments": {
+                        "path": "seed/new.c",
+                        "offset": 0,
+                        "length": len(source),
+                    },
+                },
+                {
+                    "tool": "read",
+                    "arguments": {
+                        "path": "seed/new.c",
+                        "offset": -1,
+                        "length": 1,
+                    },
+                },
+            ],
+            "final_message": "Activity turn complete.",
+        }
+        with _fake_codex(scenario) as fake:
+            stream = CodexActivityStream()
+            runtime = _runtime_mock()
+            runtime.invoke_tool.side_effect = [
+                ToolResult(0, b""),
+                ToolResult(7, source.encode()),
+            ]
+
+            result = CodexGenerationWorker(
+                fake.executable,
+                fake.auth_file,
+                activity_stream=stream,
+            ).run_generation(runtime)
+
+        self.assertEqual(result.turn_status, "completed")
+        events = stream.drain()
+        self.assertEqual(
+            [event.sequence for event in events],
+            list(range(1, len(events) + 1)),
+        )
+        self.assertTrue(
+            all(event.generation == runtime.generation_number for event in events)
+        )
+        self.assertTrue(
+            all(event.role is CodexActivityRole.IMPLEMENTOR for event in events)
+        )
+        by_kind: dict[CodexActivityKind, list[object]] = {}
+        for event in events:
+            by_kind.setdefault(event.kind, []).append(event)
+        self.assertEqual(
+            by_kind[CodexActivityKind.AGENT_TEXT_DELTA][0].data["text"],
+            "Inspecting source.",
+        )
+        self.assertEqual(
+            by_kind[CodexActivityKind.AGENT_REASONING_DELTA][0].data["text"],
+            "Checking the current implementation.",
+        )
+        self.assertEqual(
+            by_kind[CodexActivityKind.AGENT_REASONING_SUMMARY][0].data["summary"],
+            ["Checked the implementation."],
+        )
+        self.assertFalse(
+            any(
+                "private reasoning" in repr(event.data)
+                or "opaque reasoning" in repr(event.data)
+                for event in events
+            )
+        )
+        tool_started = by_kind[CodexActivityKind.TOOL_STARTED]
+        self.assertEqual(tool_started[0].data["arguments"]["data"], source)
+        failed = by_kind[CodexActivityKind.TOOL_FAILED]
+        self.assertEqual(failed[0].data["result"]["status"], 7)
+        self.assertEqual(failed[0].data["result"]["output"], source.encode())
+        self.assertIn("non-negative", failed[1].data["error"])
+        self.assertEqual(
+            by_kind[CodexActivityKind.AGENT_MESSAGE][-1].data["text"],
+            "Activity turn complete.",
+        )
+        self.assertIn(CodexActivityKind.SESSION_STOPPED, by_kind)
+
+    def test_broken_activity_observer_does_not_change_turn_behavior(self) -> None:
+        class BrokenStream(CodexActivityStream):
+            def publish(self, *args, **kwargs):
+                raise RuntimeError("observer failed")
+
+        with _fake_codex(
+            {"tool_calls": [{"tool": "list", "arguments": {}}]}
+        ) as fake:
+            runtime = _runtime_mock()
+            runtime.invoke_tool.return_value = ToolResult(0, b"seed/kernel.c\n")
+
+            result = CodexGenerationWorker(
+                fake.executable,
+                fake.auth_file,
+                activity_stream=BrokenStream(),
+            ).run_generation(runtime)
+
+        self.assertEqual(result.turn_status, "completed")
+        runtime.invoke_tool.assert_called_once_with("list", [])
+        self.assertIs(runtime.state, RuntimeState.RUNNING)
+
+    def test_live_activity_payload_is_not_persisted_to_events_jsonl(self) -> None:
+        marker = "LIVE-ACTIVITY-SOURCE-MARKER"
+        scenario = {
+            "tool_calls": [
+                {
+                    "tool": "write",
+                    "arguments": {
+                        "path": "seed/private.c",
+                        "offset": 0,
+                        "data": marker,
+                    },
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            scenario
+        ) as fake:
+            stream = CodexActivityStream()
+            observability = ExperimentObservability(temporary)
+            runtime = _runtime_mock()
+            runtime.observability = observability
+            runtime.invoke_tool.return_value = ToolResult(0, b"")
+
+            CodexGenerationWorker(
+                fake.executable,
+                fake.auth_file,
+                activity_stream=stream,
+            ).run_generation(runtime)
+            observability.close()
+
+            self.assertTrue(
+                any(marker in repr(event.data) for event in stream.drain())
+            )
+            self.assertNotIn(
+                marker,
+                (Path(temporary) / "events.jsonl").read_text(encoding="utf-8"),
+            )
+
     def test_initial_prompt_states_the_behavioral_contract(self) -> None:
         runtime = _runtime_mock()
         runtime.previous_handoff = "Exact predecessor handoff."
@@ -741,10 +910,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
         }
         with _fake_codex(scenario) as fake:
             runtime = _runtime_mock()
+            activity = CodexActivityStream()
             session = CodexGenerationSession(
                 runtime,
                 fake.executable,
                 fake.auth_file,
+                activity_stream=activity,
             )
             first = session.run_initial_turn()
             first_record = fake.record()
@@ -796,10 +967,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
         }
         with _fake_codex(scenario) as fake:
             runtime = _runtime_mock()
+            activity = CodexActivityStream()
             session = CodexGenerationSession(
                 runtime,
                 fake.executable,
                 fake.auth_file,
+                activity_stream=activity,
             )
             results: list[object] = []
             turn = threading.Thread(
@@ -831,6 +1004,12 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 all(
                     item["params"]["serviceTier"] == DEFAULT_SERVICE_TIER
                     for item in turns
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.kind is CodexActivityKind.TURN_INTERRUPTED
+                    for event in activity.drain()
                 )
             )
             session.close()

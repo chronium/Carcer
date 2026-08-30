@@ -11,6 +11,9 @@ from unittest.mock import Mock, patch
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
+    CodexActivityKind,
+    CodexActivityRole,
+    CodexActivityStream,
     TEST_HARDWARE_PROFILE,
     CodexGenerationSession,
     CodexGenerationWorker,
@@ -33,6 +36,87 @@ from tests.test_codex_generation_worker import (
 
 
 class CodexReviewerProtocolTests(unittest.TestCase):
+    def test_nested_reviewer_activity_is_independent_and_read_only(self) -> None:
+        implementor_scenario = {
+            "tool_calls": [
+                {"namespace": None, "tool": "review", "arguments": {}}
+            ]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "visible_activity": [
+                {"kind": "agent_delta", "text": "Reviewing source."},
+                {
+                    "kind": "reasoning_summary_delta",
+                    "text": "Checking correctness.",
+                },
+            ],
+            "tool_calls": [{"tool": "list", "arguments": {}}],
+            "final_message": "No meaningful issues found.",
+        }
+        with _fake_codex(implementor_scenario) as implementor:
+            with _fake_codex(reviewer_scenario) as reviewer:
+                stream = CodexActivityStream()
+                runtime = _runtime_mock()
+                runtime.invoke_tool.return_value = ToolResult(
+                    0, b"seed/kernel.c\n"
+                )
+
+                result = CodexGenerationWorker(
+                    implementor.executable,
+                    implementor.auth_file,
+                    reviewer_codex_executable=reviewer.executable,
+                    reviewer_auth_file=reviewer.auth_file,
+                    activity_stream=stream,
+                ).run_generation(runtime)
+
+        self.assertEqual(result.turn_status, "completed")
+        events = stream.drain()
+        implementor_events = [
+            event
+            for event in events
+            if event.role is CodexActivityRole.IMPLEMENTOR
+        ]
+        reviewer_events = [
+            event for event in events if event.role is CodexActivityRole.REVIEWER
+        ]
+        self.assertTrue(
+            any(
+                event.kind is CodexActivityKind.TOOL_STARTED
+                and event.data["tool"] == "review"
+                for event in implementor_events
+            )
+        )
+        self.assertTrue(
+            any(event.kind is CodexActivityKind.REVIEW_STARTED for event in reviewer_events)
+        )
+        self.assertTrue(
+            any(
+                event.kind is CodexActivityKind.TOOL_STARTED
+                and event.data["tool"] == "list"
+                for event in reviewer_events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.kind is CodexActivityKind.AGENT_TEXT_DELTA
+                and event.data["text"] == "Reviewing source."
+                for event in reviewer_events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.kind is CodexActivityKind.AGENT_REASONING_DELTA
+                and event.data["text"] == "Checking correctness."
+                for event in reviewer_events
+            )
+        )
+        self.assertTrue(
+            any(event.kind is CodexActivityKind.REVIEW_COMPLETED for event in reviewer_events)
+        )
+        runtime.invoke_tool.assert_called_once_with("list", [])
+
     def test_malformed_token_usage_does_not_fail_review(self) -> None:
         implementor_scenario = {
             "tool_calls": [
