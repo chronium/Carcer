@@ -24,7 +24,8 @@ class GenerationGitRecorderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository, base = _create_repository(root / "repository")
-            run = root / "run"
+            run = root / "experiment-002"
+            handoff_zero = "Handoff λ from generation zero.\nNext line."
             snapshot_zero = _archive_completed(
                 run,
                 0,
@@ -34,6 +35,7 @@ class GenerationGitRecorderTests(unittest.TestCase):
                     SnapshotFile("seed/kernel.c", b"generation zero\n"),
                     SnapshotFile("seed/deleted.c", b"removed later\n"),
                 ],
+                handoff=handoff_zero,
             )
             snapshot_one = _archive_completed(
                 run,
@@ -78,7 +80,7 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 generation: _git(
                     repository,
                     "rev-parse",
-                    f"experiment/generation-{generation:04d}^{{commit}}",
+                    f"{_generation_tag(run, generation)}^{{commit}}",
                 ).strip()
                 for generation in (0, 1, 2, 4)
             }
@@ -130,14 +132,28 @@ class GenerationGitRecorderTests(unittest.TestCase):
                     "show-ref",
                     "--verify",
                     "--quiet",
-                    "refs/tags/experiment/generation-0003",
+                    f"refs/tags/{_generation_tag(run, 3)}",
                 ).returncode,
                 0,
             )
             self.assertEqual(
-                _git(repository, "cat-file", "-t", "experiment/generation-0000"),
-                "commit\n",
+                _git(
+                    repository,
+                    "cat-file",
+                    "-t",
+                    f"refs/tags/{_generation_tag(run, 0)}",
+                ),
+                "tag\n",
             )
+            tag_message = _tag_message(
+                repository,
+                _generation_tag(run, 0),
+            )
+            self.assertEqual(
+                tag_message,
+                _expected_tag_message(run.name, 0, None, "initial", handoff_zero),
+            )
+            self.assertTrue(tag_message.endswith(handoff_zero))
 
             second = recorder.reconcile()
             self.assertTrue(all(item.already_recorded for item in second))
@@ -163,7 +179,7 @@ class GenerationGitRecorderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository, base = _create_repository(root / "repository")
-            run = root / "run"
+            run = root / "experiment-002"
             _archive_completed(
                 run,
                 0,
@@ -176,21 +192,21 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 "tag",
                 "--no-sign",
                 "--no-annotate",
-                "experiment/generation-0000",
+                _generation_tag(run, 0),
                 base,
             )
 
             recorder = GenerationGitRecorder(repository, run, "test-base")
             with self.assertRaisesRegex(
                 GenerationGitRecorderError,
-                "conflicting ancestry",
+                "not annotated",
             ):
                 recorder.reconcile()
             self.assertEqual(
                 _git(
                     repository,
                     "rev-parse",
-                    "experiment/generation-0000^{commit}",
+                    f"{_generation_tag(run, 0)}^{{commit}}",
                 ).strip(),
                 base,
             )
@@ -199,14 +215,14 @@ class GenerationGitRecorderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository, base = _create_repository(root / "repository")
-            run = root / "run"
+            run = root / "experiment-002"
             _archive_aborted(run, 0, None, "initial")
             _git(
                 repository,
                 "tag",
                 "--no-sign",
                 "--no-annotate",
-                "experiment/generation-0000",
+                _generation_tag(run, 0),
                 base,
             )
 
@@ -219,10 +235,101 @@ class GenerationGitRecorderTests(unittest.TestCase):
                 _git(
                     repository,
                     "rev-parse",
-                    "experiment/generation-0000^{commit}",
+                    f"{_generation_tag(run, 0)}^{{commit}}",
                 ).strip(),
                 base,
             )
+
+    def test_run_namespaces_coexist_and_legacy_tag_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, base = _create_repository(root / "repository")
+            first = root / "experiment-001"
+            second = root / "experiment-002"
+            _archive_completed(
+                first,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"first run\n")],
+            )
+            _archive_completed(
+                second,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"second run\n")],
+            )
+            legacy = "experiment/generation-0000"
+            _git(
+                repository,
+                "tag",
+                "--no-sign",
+                "--no-annotate",
+                legacy,
+                base,
+            )
+
+            first_record = GenerationGitRecorder(
+                repository, first, "test-base"
+            ).reconcile()[0]
+            second_record = GenerationGitRecorder(
+                repository, second, "test-base"
+            ).reconcile()[0]
+
+            self.assertEqual(first_record.tag, _generation_tag(first, 0))
+            self.assertEqual(second_record.tag, _generation_tag(second, 0))
+            self.assertNotEqual(first_record.commit, second_record.commit)
+            self.assertEqual(
+                _git(repository, "rev-parse", f"{legacy}^{{commit}}").strip(),
+                base,
+            )
+            self.assertEqual(_git(repository, "cat-file", "-t", legacy), "commit\n")
+
+    def test_modified_annotation_is_a_provenance_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, _ = _create_repository(root / "repository")
+            run = root / "experiment-002"
+            _archive_completed(
+                run,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"generation zero\n")],
+            )
+            recorder = GenerationGitRecorder(repository, run, "test-base")
+            record = recorder.reconcile()[0]
+            _git(repository, "tag", "-d", record.tag)
+            _git(
+                repository,
+                "tag",
+                "--annotate",
+                "--no-sign",
+                "--message",
+                "modified annotation",
+                record.tag,
+                record.commit,
+            )
+
+            with self.assertRaisesRegex(
+                GenerationGitRecorderError,
+                "conflicting annotation",
+            ):
+                recorder.reconcile()
+
+    def test_invalid_run_basename_is_not_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, _ = _create_repository(root / "repository")
+            invalid_run = root / "experiment..002"
+            invalid_run.mkdir()
+
+            with self.assertRaisesRegex(
+                GenerationGitRecorderError,
+                "cannot form a Git tag namespace",
+            ):
+                GenerationGitRecorder(repository, invalid_run, "test-base")
 
 
 class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
@@ -242,7 +349,7 @@ class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
                 root / "repository",
                 source_seed=source_repository / "seed",
             )
-            run_directory = root / "run"
+            run_directory = root / "experiment-002"
             runtime = CodexOSRun(
                 run_directory,
                 qemu,
@@ -275,7 +382,7 @@ class GenerationGitRecorderQemuIntegrationTest(unittest.TestCase):
                     generation: _git(
                         repository,
                         "rev-parse",
-                        f"experiment/generation-{generation:04d}^{{commit}}",
+                        f"{_generation_tag(run_directory, generation)}^{{commit}}",
                     ).strip()
                     for generation in (0, 1, 2)
                 }
@@ -336,6 +443,8 @@ def _archive_completed(
     parent: int | None,
     transition: str,
     files: list[SnapshotFile],
+    *,
+    handoff: str | None = None,
 ) -> bytes:
     archive = run / f"generation-{generation:04d}"
     (archive / "boot").mkdir(parents=True)
@@ -359,7 +468,7 @@ def _archive_completed(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(entry.content)
     (archive / "handoff.txt").write_text(
-        f"Handoff from generation {generation}.",
+        handoff if handoff is not None else f"Handoff from generation {generation}.",
         encoding="utf-8",
     )
     (archive / "boot" / "codexos.iso").write_bytes(b"boot")
@@ -433,6 +542,35 @@ def _parent(repository: Path, commit: str) -> str:
 def _commit_message(repository: Path, commit: str) -> str:
     raw = _git_result(repository, "cat-file", "commit", commit).stdout
     return raw.split(b"\n\n", 1)[1].decode("utf-8")
+
+
+def _generation_tag(run: Path, generation: int) -> str:
+    return f"{run.name}/generation-{generation:04d}"
+
+
+def _tag_message(repository: Path, tag: str) -> str:
+    raw = _git_result(repository, "cat-file", "tag", f"refs/tags/{tag}").stdout
+    return raw.split(b"\n\n", 1)[1].decode("utf-8")
+
+
+def _expected_tag_message(
+    run: str,
+    generation: int,
+    parent: int | None,
+    transition: str,
+    handoff: str,
+) -> str:
+    parent_value = "none" if parent is None else str(parent)
+    return (
+        f"CodexOS generation {generation}\n\n"
+        f"Run: {run}\n"
+        f"Generation: {generation}\n"
+        f"Parent-Generation: {parent_value}\n"
+        f"Transition: {transition}\n"
+        "Outcome: completed\n\n"
+        "Handoff:\n"
+        f"{handoff}"
+    )
 
 
 def _archive_bytes(run: Path) -> dict[str, bytes]:
