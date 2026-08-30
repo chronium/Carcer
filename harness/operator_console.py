@@ -23,6 +23,10 @@ from .codex_generation_worker import (
 )
 from .generation_git import GenerationGitRecorder, GenerationGitRecorderError
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
+from .exit_interview_transcript import (
+    ExitInterviewArtifactStore,
+    ExitInterviewTranscriptError,
+)
 from .observability import (
     ExperimentObservability,
     ExperimentObservabilityError,
@@ -42,6 +46,7 @@ class OperatorConsole:
         reviewer_codex_executable: str = "codex",
         reviewer_auth_file: str | Path | None = None,
         git_recorder: GenerationGitRecorder | None = None,
+        interview_repository: str | Path | None = None,
         interrupt_timeout_seconds: float = DEFAULT_INTERRUPT_TIMEOUT_SECONDS,
         output_handler: Callable[[str], None] | None = None,
         confirmation_handler: Callable[[str], bool] | None = None,
@@ -55,6 +60,14 @@ class OperatorConsole:
         self._reviewer_codex_executable = reviewer_codex_executable
         self._reviewer_auth_file = reviewer_auth_file
         self._git_recorder = git_recorder
+        self._interview_store = (
+            None
+            if interview_repository is None
+            else ExitInterviewArtifactStore(
+                interview_repository,
+                runtime.run_directory,
+            )
+        )
         self._output_handler = output_handler
         self._confirmation_handler = confirmation_handler
         observed = getattr(runtime, "observability", None)
@@ -67,6 +80,7 @@ class OperatorConsole:
         self._session_generation: int | None = None
         self._agent_unavailable_generation: int | None = None
         self._interview_open = False
+        self._persisted_interview_session: CodexGenerationSession | None = None
         self._resume_agent_after_pause = False
         self._agent_lock = threading.RLock()
         self._output_lock = threading.Lock()
@@ -669,6 +683,10 @@ class OperatorConsole:
                 "can retain their original Sol thread."
             )
             return
+        if self._interview_store is None:
+            raise RuntimeError(
+                "exit interview persistence requires --git-repository"
+            )
         if turn is not None:
             raise RuntimeError("Codex turn is already active")
         session.begin_exit_interview()
@@ -728,6 +746,7 @@ class OperatorConsole:
                 self._print(f"Exit interview turn failed: {error}")
             else:
                 generation = self._runtime.generation_number
+                self._persist_exit_interview(session, "failed")
                 session.close()
                 with self._agent_lock:
                     if self._session is session:
@@ -750,7 +769,11 @@ class OperatorConsole:
         with self._agent_lock:
             if not self._interview_open:
                 raise RuntimeError("exit interview is not active")
-        self._terminate_agent_session(interrupt=True, end_interview=True)
+        self._terminate_agent_session(
+            interrupt=True,
+            end_interview=True,
+            interview_outcome="completed",
+        )
         self._print("Exit interview ended.")
 
     def _pause(self) -> None:
@@ -802,6 +825,7 @@ class OperatorConsole:
         *,
         interrupt: bool,
         end_interview: bool = False,
+        interview_outcome: str | None = None,
     ) -> None:
         with self._agent_lock:
             session = self._session
@@ -813,6 +837,12 @@ class OperatorConsole:
                 session.interrupt_turn(self._interrupt_timeout_seconds)
             except (OSError, RuntimeError, CodexGenerationWorkerError):
                 pass
+        if self._interview_open:
+            self._persist_exit_interview(
+                session,
+                interview_outcome
+                or ("interrupted" if turn is not None else "incomplete"),
+            )
         if end_interview:
             try:
                 session.end_exit_interview()
@@ -828,6 +858,31 @@ class OperatorConsole:
             self._turn_thread = None
             self._session_generation = None
             self._interview_open = False
+
+    def _persist_exit_interview(
+        self,
+        session: CodexGenerationSession,
+        outcome: str,
+    ) -> None:
+        store = self._interview_store
+        if store is None:
+            return
+        with self._agent_lock:
+            if self._persisted_interview_session is session:
+                return
+            transcript = session.exit_interview_transcript()
+            if transcript is None:
+                return
+            try:
+                artifact = store.persist(transcript, outcome)
+            except (OSError, ExitInterviewTranscriptError) as error:
+                self._print(f"Exit interview transcript error: {error}")
+                return
+            if artifact is not None:
+                self._persisted_interview_session = session
+        if artifact is not None:
+            self._print("Exit interview saved:")
+            self._print(f"  {artifact.relative_path}")
 
     def _require_no_active_agent_turn_at_gate(self) -> None:
         with self._agent_lock:
@@ -856,6 +911,7 @@ class OperatorConsole:
             self._session_generation = None
             self._agent_unavailable_generation = None
             self._interview_open = False
+            self._persisted_interview_session = None
         self._resume_agent_after_pause = False
 
     def _record_git(self) -> None:
@@ -1120,6 +1176,7 @@ def main(
                 runtime,
                 activity_stream,
                 git_recorder=recorder,
+                interview_repository=arguments.git_repository,
             )
         else:
             OperatorConsole(
@@ -1127,6 +1184,7 @@ def main(
                 input_value,
                 output,
                 git_recorder=recorder,
+                interview_repository=arguments.git_repository,
             ).run()
     finally:
         try:

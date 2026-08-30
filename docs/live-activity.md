@@ -7,11 +7,11 @@ candidate-validation threads. Producers enqueue typed semantic events; they do
 not call a renderer or wait for a consumer.
 
 The stream is non-authoritative and operator-observation only. It is not part of
-the guest protocol, is not written to `events.jsonl`, is not sent through OTLP,
-and is not persisted yet. Its contents never enter guest state, a generation
-handoff, a reviewer prompt, or a successor implementor prompt. The immutable
-generation archives and existing structured observability retain their current
-roles.
+the guest protocol, is not written to `events.jsonl`, and is not sent through
+OTLP. The general live stream is not persisted. Its contents never enter guest
+state, a generation handoff, a reviewer prompt, or a successor implementor
+prompt. The immutable generation archives and existing structured observability
+retain their current roles.
 
 Tool events preserve structured arguments and results, including source text
 and binary result bytes. The full-screen renderer safely escapes terminal
@@ -112,5 +112,15 @@ At an eligible completed-generation gate, the header advertises the optional
 same-thread exit interview and switches to an `interview>` prompt while it is
 open. Human retrospective questions appear as distinct `You` transcript rows;
 Sol answers and explicitly exposed reasoning summaries use their existing
-presentation. This conversation remains ephemeral live activity: it is not
-written to operational telemetry, an archive, a handoff, or successor context.
+presentation. On interview conclusion, the trusted operator layer writes the
+questions, explicit reasoning summaries, and final Sol answers to
+`artifacts/interviews/<run>/generation-NNNN.md` in the configured Git repository.
+The write is atomic and never overwrites conflicting research provenance. The
+artifact remains an uncommitted human worktree change until the operator records
+it separately; generation Git reconciliation does not include it.
+
+This narrow transcript artifact is separate from live-stream persistence. It is
+not written to operational telemetry, a generation archive, a handoff, guest
+state, reviewer context, or successor context. Only app-server reasoning-summary
+content already admitted by the existing visibility boundary is eligible;
+private/raw reasoning remains ignored.

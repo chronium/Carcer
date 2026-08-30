@@ -57,6 +57,15 @@ class CodexActivityEvent:
     item_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RenderableCodexActivity:
+    """One app-server item deliberately exposed as renderable text."""
+
+    kind: CodexActivityKind
+    data: Mapping[str, object]
+    item_id: str | None = None
+
+
 class CodexActivityStream:
     """An unbounded ordered queue whose producers never invoke consumers."""
 
@@ -138,87 +147,95 @@ def publish_renderable_codex_notification(
     message: Mapping[str, object],
     thread_id: str,
     turn_id: str,
-) -> None:
+) -> tuple[RenderableCodexActivity, ...]:
     """Publish only app-server content explicitly exposed as renderable text."""
-    if stream is None:
-        return
+    activities = renderable_codex_notification(message, thread_id, turn_id)
+    for activity in activities:
+        publish_activity(
+            stream,
+            generation,
+            role,
+            activity.kind,
+            activity.data,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=activity.item_id,
+        )
+    return activities
+
+
+def renderable_codex_notification(
+    message: Mapping[str, object],
+    thread_id: str,
+    turn_id: str,
+) -> tuple[RenderableCodexActivity, ...]:
+    """Return only textual activity intentionally exposed by app-server."""
     method = message.get("method")
     params = message.get("params")
     if not isinstance(params, dict):
-        return
+        return ()
     if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
-        return
+        return ()
     item_id = params.get("itemId")
     if item_id is not None and not isinstance(item_id, str):
-        return
+        return ()
 
     if method == "item/agentMessage/delta":
         delta = params.get("delta")
         if isinstance(delta, str):
-            publish_activity(
-                stream,
-                generation,
-                role,
-                CodexActivityKind.AGENT_TEXT_DELTA,
-                {"text": delta},
-                thread_id=thread_id,
-                turn_id=turn_id,
-                item_id=item_id,
+            return (
+                RenderableCodexActivity(
+                    CodexActivityKind.AGENT_TEXT_DELTA,
+                    {"text": delta},
+                    item_id,
+                ),
             )
-        return
+        return ()
     if method == "item/reasoning/summaryTextDelta":
         delta = params.get("delta")
         summary_index = params.get("summaryIndex")
         if isinstance(delta, str) and isinstance(summary_index, int):
-            publish_activity(
-                stream,
-                generation,
-                role,
-                CodexActivityKind.AGENT_REASONING_DELTA,
-                {"text": delta, "summary_index": summary_index},
-                thread_id=thread_id,
-                turn_id=turn_id,
-                item_id=item_id,
+            return (
+                RenderableCodexActivity(
+                    CodexActivityKind.AGENT_REASONING_DELTA,
+                    {"text": delta, "summary_index": summary_index},
+                    item_id,
+                ),
             )
-        return
+        return ()
     if method != "item/completed":
-        return
+        return ()
     item = params.get("item")
     if not isinstance(item, dict):
-        return
+        return ()
     completed_item_id = item.get("id")
     if isinstance(completed_item_id, str):
         item_id = completed_item_id
     if item.get("type") == "agentMessage":
         text = item.get("text")
         if not isinstance(text, str):
-            return
+            return ()
         data: dict[str, object] = {"text": text}
         phase = item.get("phase")
         if isinstance(phase, str):
             data["phase"] = phase
-        publish_activity(
-            stream,
-            generation,
-            role,
-            CodexActivityKind.AGENT_MESSAGE,
-            data,
-            thread_id=thread_id,
-            turn_id=turn_id,
-            item_id=item_id,
+        return (
+            RenderableCodexActivity(
+                CodexActivityKind.AGENT_MESSAGE,
+                data,
+                item_id,
+            ),
         )
     elif item.get("type") == "reasoning":
         summary = item.get("summary")
         if isinstance(summary, list) and all(
             isinstance(part, str) for part in summary
         ):
-            publish_activity(
-                stream,
-                generation,
-                role,
-                CodexActivityKind.AGENT_REASONING_SUMMARY,
-                {"summary": list(summary)},
-                thread_id=thread_id,
-                turn_id=turn_id,
-                item_id=item_id,
+            return (
+                RenderableCodexActivity(
+                    CodexActivityKind.AGENT_REASONING_SUMMARY,
+                    {"summary": list(summary)},
+                    item_id,
+                ),
             )
+    return ()

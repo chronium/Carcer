@@ -40,6 +40,11 @@ from .feature_requests import (
     MAX_FEATURE_DESCRIPTION_BYTES,
     MAX_FEATURE_TITLE_BYTES,
 )
+from .exit_interview_transcript import (
+    ExitInterviewMetadata,
+    ExitInterviewTranscript,
+    ExitInterviewTranscriptSnapshot,
+)
 from .generation_runtime import CodexOSRun, RuntimeState
 from .hardware import CodexOSHardwareProfile
 from .tool_protocol import ToolResult
@@ -190,6 +195,7 @@ class CodexGenerationSession:
         self._mode = CodexGenerationSessionMode.GENERATION
         self._exit_interview_started = False
         self._interview_turn_number = 0
+        self._exit_interview_transcript: ExitInterviewTranscript | None = None
 
     @property
     def active_turn(self) -> bool:
@@ -322,6 +328,17 @@ class CodexGenerationSession:
             if self._exit_interview_started:
                 raise RuntimeError("exit interview is already active")
             self._exit_interview_started = True
+            self._exit_interview_transcript = ExitInterviewTranscript(
+                ExitInterviewMetadata(
+                    Path(self._runtime.run_directory).resolve().name,
+                    self._generation_number,
+                    AGENT_CONTRACT_VERSION,
+                    self._model,
+                    self._reasoning_effort,
+                    self._reasoning_summary,
+                    self._service_tier,
+                )
+            )
         self._record(
             "exit_interview_started",
             self._serving_provenance(),
@@ -332,6 +349,13 @@ class CodexGenerationSession:
             {},
             thread_id=self._thread_id,
         )
+
+    def exit_interview_transcript(
+        self,
+    ) -> ExitInterviewTranscriptSnapshot | None:
+        with self._lock:
+            transcript = self._exit_interview_transcript
+        return None if transcript is None else transcript.snapshot()
 
     def run_exit_interview_turn(self, question: str) -> CodexGenerationResult:
         if not isinstance(question, str) or not question.strip():
@@ -437,6 +461,15 @@ class CodexGenerationSession:
             turn_id = self._turn_id
             self._turn_number += 1
             turn_number = self._turn_number
+            if interview:
+                transcript = self._exit_interview_transcript
+                if transcript is None or interview_turn_number is None:
+                    raise RuntimeError("exit interview transcript is unavailable")
+                transcript.begin_turn(
+                    interview_turn_number,
+                    interview_question or "",
+                    turn_id,
+                )
         started_at = time.monotonic()
         provenance = self._serving_provenance()
         if interview:
@@ -472,6 +505,14 @@ class CodexGenerationSession:
         )
         try:
             status, final_message = self._wait_for_turn(thread_id, turn_id)
+            if interview:
+                transcript = self._exit_interview_transcript
+                if transcript is not None:
+                    transcript.finish_turn(
+                        turn_id,
+                        response=final_message,
+                        status=status,
+                    )
             self._last_turn_status = status
             self._record(
                 f"{event_prefix}_{status}",
@@ -506,6 +547,8 @@ class CodexGenerationSession:
                 ),
             )
         except CodexAppServerError as error:
+            if interview:
+                self._finish_failed_interview_turn(turn_id)
             self._healthy = False
             self._record_turn_failure(
                 turn_number,
@@ -514,6 +557,8 @@ class CodexGenerationSession:
             )
             raise CodexGenerationWorkerError(str(error)) from error
         except CodexGenerationWorkerError:
+            if interview:
+                self._finish_failed_interview_turn(turn_id)
             if self._last_turn_status != "failed":
                 self._healthy = False
             self._record_turn_failure(
@@ -610,7 +655,7 @@ class CodexGenerationSession:
             message = server.next_notification()
             method = message.get("method")
             params = message.get("params")
-            publish_renderable_codex_notification(
+            renderable = publish_renderable_codex_notification(
                 self._activity_stream,
                 self._generation_number,
                 CodexActivityRole.IMPLEMENTOR,
@@ -618,6 +663,10 @@ class CodexGenerationSession:
                 thread_id,
                 turn_id,
             )
+            transcript = self._exit_interview_transcript
+            if transcript is not None:
+                for activity in renderable:
+                    transcript.observe(activity, turn_id)
             if method == "thread/tokenUsage/updated":
                 self._record_token_usage(params, thread_id, turn_id)
                 continue
@@ -653,6 +702,11 @@ class CodexGenerationSession:
                 )
             final_message = _final_agent_message(turn)
             return status, final_message or self._last_agent_message
+
+    def _finish_failed_interview_turn(self, turn_id: str) -> None:
+        transcript = self._exit_interview_transcript
+        if transcript is not None:
+            transcript.finish_turn(turn_id, response=None, status="failed")
 
     def _record_turn_failure(
         self,

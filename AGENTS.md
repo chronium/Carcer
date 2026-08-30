@@ -124,6 +124,14 @@ If the human operator deliberately changes guest state between generations, reco
 
 Harness changes are allowed, but harness versions must be identifiable so generations can be associated with the environment in which they ran.
 
+Exit-interview transcripts under `artifacts/interviews/` are research provenance.
+Before unrelated harness development, check for untracked or modified finalized
+transcripts and commit them separately so they are not mixed into implementation
+commits. Do not edit finalized transcript content merely for style; necessary
+corrections must be explicit and reviewable. Once a transcript commit is pushed,
+do not amend or rewrite it. Never copy transcript content into autonomous-agent
+prompts or generation handoffs.
+
 ## Feature requests
 
 The guest may request new external capabilities.

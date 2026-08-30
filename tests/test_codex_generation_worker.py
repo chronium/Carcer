@@ -43,6 +43,7 @@ from harness.codex_generation_worker import (
     _implementor_prompt,
 )
 from harness.observability import ExperimentObservability
+from harness.exit_interview_transcript import ExitInterviewArtifactStore
 
 _TOOLS = [
     "list",
@@ -1063,6 +1064,8 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             observability = ExperimentObservability(root / "run")
             runtime = _runtime_mock()
             runtime.observability = observability
+            runtime.run_directory = root / "experiment-test"
+            runtime.run_directory.mkdir()
             runtime.previous_handoff = None
             approved = FeatureRequest(
                 1, 0, "Approved external capability", "Frozen decision.", "approved"
@@ -1089,6 +1092,15 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             session.retain_for_exit_interview()
             session.begin_exit_interview()
             session.run_exit_interview_turn(marker)
+            transcript = session.exit_interview_transcript()
+            self.assertIsNotNone(transcript)
+            assert transcript is not None
+            artifact = ExitInterviewArtifactStore(
+                repository,
+                runtime.run_directory,
+            ).persist(transcript, "completed")
+            self.assertIsNotNone(artifact)
+            assert artifact is not None
             session.end_exit_interview()
             observability.close()
 
@@ -1115,6 +1127,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             )
             successor_prompt = _implementor_prompt(runtime, None)
             self.assertNotIn(marker, successor_prompt)
+            self.assertIn(marker, artifact.path.read_text(encoding="utf-8"))
             self.assertNotIn(marker, "".join(path.read_text(errors="ignore") for path in files))
             self.assertNotIn(
                 marker,
@@ -1175,9 +1188,31 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                         }
                         for tool in denied_tools
                     ],
+                    "visible_activity": [
+                        {
+                            "kind": "reasoning_completed",
+                            "summary": [
+                                "First explicit summary.",
+                                "Then another.",
+                            ],
+                            "content": ["PRIVATE-REASONING-MUST-NOT-PERSIST"],
+                        },
+                        {
+                            "kind": "reasoning_text_delta",
+                            "text": "PRIVATE-RAW-DELTA-MUST-NOT-PERSIST",
+                        },
+                    ],
                     "final_message": "Retrospective answer.",
                 },
-                {"final_message": "Second retrospective answer."},
+                {
+                    "visible_activity": [
+                        {
+                            "kind": "reasoning_completed",
+                            "summary": ["Second-turn summary."],
+                        }
+                    ],
+                    "final_message": "Second retrospective answer.",
+                },
             ]
         }
         with _fake_codex(scenario) as fake:
@@ -1215,6 +1250,26 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
 
             self.assertEqual(first.final_message, "Retrospective answer.")
             self.assertEqual(second.final_message, "Second retrospective answer.")
+            transcript = session.exit_interview_transcript()
+            self.assertIsNotNone(transcript)
+            assert transcript is not None
+            self.assertEqual(
+                [turn.question for turn in transcript.turns],
+                [marker, "Why this design?"],
+            )
+            self.assertEqual(
+                transcript.turns[0].reasoning_summaries,
+                ("First explicit summary.", "Then another."),
+            )
+            self.assertEqual(
+                transcript.turns[1].reasoning_summaries,
+                ("Second-turn summary.",),
+            )
+            self.assertEqual(
+                [turn.response for turn in transcript.turns],
+                ["Retrospective answer.", "Second retrospective answer."],
+            )
+            self.assertNotIn("PRIVATE", repr(transcript))
             self.assertEqual(session.thread_id, original_thread)
             self.assertEqual(session.process_pid, original_pid)
             runtime.invoke_tool.assert_called_once()
@@ -1709,6 +1764,7 @@ def _runtime_mock() -> Mock:
     runtime = Mock(spec=CodexOSRun)
     runtime.state = RuntimeState.RUNNING
     runtime.generation_number = 0
+    runtime.run_directory = Path("/tmp/codexos-test-run")
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
     runtime.hardware_profile = TEST_HARDWARE_PROFILE
