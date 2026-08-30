@@ -6,18 +6,124 @@ import base64
 import binascii
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
-from .codex_activity import (
-    CodexActivityEvent,
-    CodexActivityKind,
-    CodexActivityRole,
-)
+from .codex_activity import CodexActivityEvent, CodexActivityKind, CodexActivityRole
 
 
 DEFAULT_DISPLAY_BYTES = 64 * 1024
 DEFAULT_SCROLLBACK_BYTES = 2 * 1024 * 1024
 DEFAULT_SCROLLBACK_ENTRIES = 800
+SUMMARY_DISPLAY_BYTES = 1024
+
+
+class ActivityDisplayKind(StrEnum):
+    MESSAGE = "message"
+    REASONING = "reasoning"
+    TOOL = "tool"
+    FEATURE_REQUEST = "feature-request"
+    BUILD = "build"
+    OPERATOR = "operator"
+    LIFECYCLE = "lifecycle"
+    NOTICE = "notice"
+
+
+class ActivityDisplayState(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentMessagePresentation:
+    role: CodexActivityRole
+    text: str
+    finalized: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningPresentation:
+    role: CodexActivityRole
+    text: str
+    finalized: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDetailPresentation:
+    text: str
+    byte_count: int
+    line_count: int | None
+    binary: bool
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPresentation:
+    role: CodexActivityRole
+    tool: str
+    state: ActivityDisplayState
+    summary: str
+    detail: ToolDetailPresentation | None = None
+    result_note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureRequestPresentation:
+    role: CodexActivityRole
+    state: ActivityDisplayState
+    title: str
+    description: str
+    request_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BuildPhasePresentation:
+    name: str
+    state: ActivityDisplayState
+
+
+@dataclass(frozen=True, slots=True)
+class BuildPresentation:
+    state: ActivityDisplayState
+    phases: tuple[BuildPhasePresentation, ...]
+    diagnostic: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorPresentation:
+    command: str | None
+    output: str
+    finalized: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePresentation:
+    role: CodexActivityRole
+    title: str
+    detail: str
+    state: ActivityDisplayState
+
+
+@dataclass(frozen=True, slots=True)
+class NoticePresentation:
+    title: str
+    text: str
+
+
+ActivityPresentation = (
+    AgentMessagePresentation
+    | ReasoningPresentation
+    | ToolPresentation
+    | FeatureRequestPresentation
+    | BuildPresentation
+    | OperatorPresentation
+    | LifecyclePresentation
+    | NoticePresentation
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,13 +131,12 @@ class ActivityDisplayEntry:
     """One logical, safely renderable item in the TUI scrollback."""
 
     key: str
-    label: str
-    category: str
-    body: str
+    kind: ActivityDisplayKind
+    presentation: ActivityPresentation
 
     @property
     def size_bytes(self) -> int:
-        return len(self.label.encode("utf-8")) + len(self.body.encode("utf-8"))
+        return len(_presentation_text(self.presentation).encode("utf-8"))
 
 
 @dataclass(slots=True)
@@ -74,33 +179,89 @@ class OperatorActivityModel:
         self._positions: dict[str, int] = {}
         self._message_text: dict[str, str] = {}
         self._reasoning_text: dict[str, dict[int, str]] = {}
-        self._tool_data: dict[str, dict[str, object]] = {}
+        self._tool_presentations: dict[str, ToolPresentation] = {}
         self._build_number = 0
         self._active_build_key: str | None = None
-        self._build_phases: dict[str, list[str]] = {}
+        self._builds: dict[str, BuildPresentation] = {}
         self._operator_number = 0
+        self._active_operator_key: str | None = None
         self._discarded = False
         self._latest_reviewer_message: tuple[int, str] | None = None
+        self._revision = 0
 
     @property
     def entries(self) -> tuple[ActivityDisplayEntry, ...]:
         return tuple(self._entries)
 
-    def append_operator_output(self, text: str) -> None:
-        self._operator_number += 1
-        self._upsert(
-            f"operator:{self._operator_number}",
-            "Operator",
-            "operator",
-            safe_display_text(text, self._display_bytes),
-        )
+    @property
+    def revision(self) -> int:
+        return self._revision
 
-    def consume(self, event: CodexActivityEvent) -> None:
+    def begin_operator_block(self, command: str | None = None) -> str:
+        self.finish_operator_block()
+        self._operator_number += 1
+        key = f"operator:{self._operator_number}"
+        self._active_operator_key = key
+        self._upsert_entry(
+            ActivityDisplayEntry(
+                key,
+                ActivityDisplayKind.OPERATOR,
+                OperatorPresentation(
+                    None
+                    if command is None
+                    else safe_display_text(command, SUMMARY_DISPLAY_BYTES),
+                    "",
+                    False,
+                ),
+            )
+        )
+        return key
+
+    def append_operator_output(self, text: str) -> bool:
+        before = self._revision
+        key = self._active_operator_key or self.begin_operator_block()
+        entry = self._entries[self._positions[key]]
+        presentation = entry.presentation
+        if not isinstance(presentation, OperatorPresentation):
+            raise RuntimeError("active operator block has the wrong presentation")
+        rendered = safe_display_text(text, self._display_bytes)
+        separator = "\n" if presentation.output else ""
+        self._upsert_entry(
+            replace(
+                entry,
+                presentation=replace(
+                    presentation,
+                    output=safe_display_text(
+                        presentation.output + separator + rendered,
+                        self._display_bytes,
+                    ),
+                ),
+            )
+        )
+        return self._revision != before
+
+    def finish_operator_block(self) -> bool:
+        key = self._active_operator_key
+        if key is None:
+            return False
+        self._active_operator_key = None
+        position = self._positions.get(key)
+        if position is None:
+            return False
+        entry = self._entries[position]
+        presentation = entry.presentation
+        if not isinstance(presentation, OperatorPresentation):
+            return False
+        before = self._revision
+        self._upsert_entry(
+            replace(entry, presentation=replace(presentation, finalized=True))
+        )
+        return self._revision != before
+
+    def consume(self, event: CodexActivityEvent) -> bool:
+        before = self._revision
         kind = event.kind
-        if kind in {
-            CodexActivityKind.AGENT_TEXT_DELTA,
-            CodexActivityKind.AGENT_MESSAGE,
-        }:
+        if kind in {CodexActivityKind.AGENT_TEXT_DELTA, CodexActivityKind.AGENT_MESSAGE}:
             self._consume_message(event)
         elif kind in {
             CodexActivityKind.AGENT_REASONING_DELTA,
@@ -125,40 +286,41 @@ class OperatorActivityModel:
             self._consume_build(event)
         else:
             self._consume_lifecycle(event)
+        return self._revision != before
 
     def render_text(self) -> str:
-        blocks: list[str] = []
-        for entry in self._entries:
-            header = entry.label
-            if entry.body:
-                blocks.append(f"{header}\n{_indent(entry.body)}")
-            else:
-                blocks.append(header)
-        return "\n\n".join(blocks)
+        return "\n\n".join(_entry_text(entry) for entry in self._entries)
 
     def _consume_message(self, event: CodexActivityEvent) -> None:
         key = self._correlation_key(event, "message")
         text = event.data.get("text")
         if not isinstance(text, str):
             return
-        if event.kind is CodexActivityKind.AGENT_TEXT_DELTA:
+        finalized = event.kind is CodexActivityKind.AGENT_MESSAGE
+        if not finalized:
             text = self._message_text.get(key, "") + text
         self._message_text[key] = text
         if event.role is CodexActivityRole.REVIEWER:
             self._latest_reviewer_message = _text_identity(text)
-        self._upsert(
-            key,
-            self._role_name(event.role),
-            event.role.value,
-            safe_display_text(text, self._display_bytes),
+        self._upsert_entry(
+            ActivityDisplayEntry(
+                key,
+                ActivityDisplayKind.MESSAGE,
+                AgentMessagePresentation(
+                    event.role,
+                    safe_display_text(text, self._display_bytes),
+                    finalized,
+                ),
+            )
         )
-        if event.kind is CodexActivityKind.AGENT_MESSAGE:
+        if finalized:
             self._message_text.pop(key, None)
 
     def _consume_reasoning(self, event: CodexActivityEvent) -> None:
         key = self._correlation_key(event, "reasoning")
         parts = self._reasoning_text.setdefault(key, {})
-        if event.kind is CodexActivityKind.AGENT_REASONING_DELTA:
+        finalized = event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY
+        if not finalized:
             text = event.data.get("text")
             index = event.data.get("summary_index")
             if not isinstance(text, str) or not isinstance(index, int):
@@ -174,212 +336,256 @@ class OperatorActivityModel:
             parts.update(enumerate(summary))
         text = "\n".join(parts[index] for index in sorted(parts))
         if not text.strip():
-            if event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY:
+            if finalized:
                 self._reasoning_text.pop(key, None)
                 self._remove(key)
             return
-        self._upsert(
-            key,
-            f"{self._role_name(event.role)} · reasoning summary",
-            "reasoning",
-            safe_display_text(text, self._display_bytes),
+        self._upsert_entry(
+            ActivityDisplayEntry(
+                key,
+                ActivityDisplayKind.REASONING,
+                ReasoningPresentation(
+                    event.role,
+                    safe_display_text(text, self._display_bytes),
+                    finalized,
+                ),
+            )
         )
-        if event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY:
+        if finalized:
             self._reasoning_text.pop(key, None)
-
-    def _remove(self, key: str) -> None:
-        position = self._positions.get(key)
-        if position is None:
-            return
-        self._entries.pop(position)
-        self._forget(key)
-        self._positions = {
-            entry.key: index for index, entry in enumerate(self._entries)
-        }
 
     def _consume_tool(self, event: CodexActivityEvent) -> None:
         key = self._correlation_key(event, "tool")
-        state = self._tool_data.setdefault(key, {})
-        if event.kind is CodexActivityKind.TOOL_STARTED:
-            state.update(event.data)
-            state["state"] = "running"
-        else:
-            state.update(event.data)
-            state["state"] = (
-                "failed"
-                if event.kind is CodexActivityKind.TOOL_FAILED
-                else "completed"
-            )
-        tool = state.get("tool")
+        existing = self._tool_presentations.get(key)
+        tool = event.data.get("tool")
         if not isinstance(tool, str):
-            tool = "unknown"
-        body = self._format_tool(tool, state)
-        result = state.get("result")
+            tool = existing.tool if existing is not None else "unknown"
+        arguments = event.data.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        state = {
+            CodexActivityKind.TOOL_STARTED: ActivityDisplayState.RUNNING,
+            CodexActivityKind.TOOL_COMPLETED: ActivityDisplayState.COMPLETED,
+            CodexActivityKind.TOOL_FAILED: ActivityDisplayState.FAILED,
+        }[event.kind]
+        if tool == "request_feature":
+            self._consume_feature_request(key, event, arguments, state)
+            return
+        summary = _tool_summary(tool, arguments)
+        detail = self._tool_detail(tool, arguments, event.data, existing)
+        result_note = ""
+        result = event.data.get("result")
         if (
             tool == "review"
             and isinstance(result, str)
             and _text_identity(result) == self._latest_reviewer_message
         ):
-            body = self._format_tool(tool, {**state, "result": None})
-            body += "\nreview result returned to Sol"
-        self._upsert(
-            key,
-            f"{self._role_name(event.role)} · tool",
-            "tool-failed" if state.get("state") == "failed" else "tool",
-            body,
+            detail = None
+            result_note = "result returned to Sol"
+        presentation = ToolPresentation(
+            event.role, tool, state, summary, detail, result_note
         )
-        if event.kind is CodexActivityKind.TOOL_STARTED:
-            self._tool_data[key] = {"tool": tool}
-        else:
-            self._tool_data.pop(key, None)
+        self._tool_presentations[key] = presentation
+        self._upsert_entry(
+            ActivityDisplayEntry(key, ActivityDisplayKind.TOOL, presentation)
+        )
+        if event.kind is not CodexActivityKind.TOOL_STARTED:
+            self._tool_presentations.pop(key, None)
 
-    def _format_tool(self, tool: str, state: dict[str, object]) -> str:
-        arguments = state.get("arguments")
-        if not isinstance(arguments, dict):
-            arguments = {}
-        lines = [tool + _format_inline_arguments(tool, arguments)]
+    def _consume_feature_request(
+        self,
+        key: str,
+        event: CodexActivityEvent,
+        arguments: dict[str, object],
+        state: ActivityDisplayState,
+    ) -> None:
+        title = arguments.get("title")
+        description = arguments.get("description")
+        result = event.data.get("result")
+        request_id = ""
+        if not _empty_payload(result):
+            request_id = _one_line(
+                _payload_presentation(result, SUMMARY_DISPLAY_BYTES).text
+            )
+        elif not _empty_payload(event.data.get("error")):
+            request_id = _one_line(
+                _payload_presentation(
+                    event.data["error"], SUMMARY_DISPLAY_BYTES
+                ).text
+            )
+        self._upsert_entry(
+            ActivityDisplayEntry(
+                key,
+                ActivityDisplayKind.FEATURE_REQUEST,
+                FeatureRequestPresentation(
+                    event.role,
+                    state,
+                    safe_display_text(
+                        title
+                        if isinstance(title, str)
+                        else "External capability request",
+                        SUMMARY_DISPLAY_BYTES,
+                    ),
+                    safe_display_text(
+                        description if isinstance(description, str) else "",
+                        self._display_bytes,
+                    ),
+                    request_id,
+                ),
+            )
+        )
+
+    def _tool_detail(
+        self,
+        tool: str,
+        arguments: dict[str, object],
+        data: dict[str, object],
+        existing: ToolPresentation | None,
+    ) -> ToolDetailPresentation | None:
         if tool == "write":
             content = arguments.get("data", arguments.get("content"))
-            encoding = arguments.get("encoding")
             if content is not None:
-                lines.extend(("", self._format_tool_payload(content, encoding)))
-        elif tool == "request_feature":
-            title = arguments.get("title")
-            description = arguments.get("description")
-            if isinstance(title, str):
-                lines.append("Title: " + safe_display_text(title, self._display_bytes))
-            if isinstance(description, str):
-                lines.append(
-                    "Description:\n"
-                    + _indent(safe_display_text(description, self._display_bytes))
+                return _payload_presentation(
+                    content, self._display_bytes, arguments.get("encoding")
                 )
-
-        state_name = state.get("state")
-        if state_name == "running":
-            lines.append("[running]")
-        elif state_name == "failed":
-            lines.append("[failed]")
-        elif state_name == "completed":
-            lines.append("[completed]")
-
-        result = state.get("result")
-        if result is not None and result != "":
-            lines.append("Result:\n" + _indent(self._format_tool_payload(result)))
-        error = state.get("error")
-        if error is not None and error != "":
-            lines.append(
-                "Error:\n" + _indent(self._format_tool_payload(error))
-            )
-        return "\n".join(lines)
-
-    def _format_tool_payload(
-        self,
-        value: object,
-        encoding: object = None,
-    ) -> str:
-        if isinstance(value, bytes):
-            return safe_display_bytes(value, self._display_bytes)
-        if isinstance(value, str):
-            if encoding == "base64":
-                try:
-                    decoded = base64.b64decode(value, validate=True)
-                except (binascii.Error, ValueError):
-                    return safe_display_text(value, self._display_bytes)
-                return (
-                    f"binary ({len(decoded)} bytes, base64): "
-                    + safe_display_text(value, self._display_bytes)
-                )
-            return safe_display_text(value, self._display_bytes)
-        if isinstance(value, dict) and "output" in value:
-            status = value.get("status")
-            output = value.get("output")
-            rendered = f"status={safe_display_text(str(status))}"
-            if output is not None and output != b"" and output != "":
-                rendered += "\n" + self._format_tool_payload(output)
-            return rendered
-        return safe_display_text(
-            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str),
-            self._display_bytes,
-        )
+        error = data.get("error")
+        if not _empty_payload(error):
+            return _payload_presentation(error, self._display_bytes)
+        result = data.get("result")
+        if (
+            isinstance(result, dict)
+            and result.get("status") == 0
+            and _empty_payload(result.get("output"))
+        ):
+            return existing.detail if existing is not None else None
+        if not _empty_payload(result):
+            return _payload_presentation(result, self._display_bytes)
+        return existing.detail if existing is not None else None
 
     def _consume_build(self, event: CodexActivityEvent) -> None:
         if event.kind is CodexActivityKind.BUILD_STARTED:
             self._build_number += 1
             key = f"build:{event.generation}:{self._build_number}"
             self._active_build_key = key
-            phases = ["started"]
-            self._build_phases[key] = phases
+            build = BuildPresentation(
+                ActivityDisplayState.RUNNING,
+                (
+                    BuildPhasePresentation("compile/link", ActivityDisplayState.RUNNING),
+                    BuildPhasePresentation("candidate boot", ActivityDisplayState.PENDING),
+                    BuildPhasePresentation("READY", ActivityDisplayState.PENDING),
+                    BuildPhasePresentation("protocol", ActivityDisplayState.PENDING),
+                ),
+            )
         else:
             key = self._active_build_key
             if key is None:
                 self._build_number += 1
                 key = f"build:{event.generation}:{self._build_number}"
                 self._active_build_key = key
-                self._build_phases[key] = []
-            phases = self._build_phases[key]
-            result = event.data.get("result", event.data.get("status"))
-            detail = "" if result is None else f" ({safe_display_text(str(result))})"
-            phase = {
-                CodexActivityKind.BUILD_COMPILE_COMPLETED: "compile/link",
-                CodexActivityKind.BUILD_CANDIDATE_STARTED: "candidate boot",
-                CodexActivityKind.BUILD_CANDIDATE_READY: "READY",
-                CodexActivityKind.BUILD_PROTOCOL_VALIDATED: "protocol validation",
-                CodexActivityKind.BUILD_CANDIDATE_FAILED: "candidate validation",
-                CodexActivityKind.BUILD_COMPLETED: "build",
-            }[event.kind]
-            if event.kind in {
-                CodexActivityKind.BUILD_CANDIDATE_STARTED,
-            }:
-                phases.append(f"{phase} …")
-            elif event.kind is CodexActivityKind.BUILD_COMPILE_COMPLETED:
-                success = result == "success"
-                phases.append(
-                    f"{phase} {'✓' if success else '✗'}{detail}"
+                build = BuildPresentation(
+                    ActivityDisplayState.RUNNING,
+                    tuple(
+                        BuildPhasePresentation(name, ActivityDisplayState.PENDING)
+                        for name in ("compile/link", "candidate boot", "READY", "protocol")
+                    ),
                 )
-            elif event.kind in {
-                CodexActivityKind.BUILD_CANDIDATE_FAILED,
-            }:
-                phases.append(f"{phase} ✗{detail}")
-            elif event.kind is CodexActivityKind.BUILD_COMPLETED:
-                success = result in {0, "0", "success"}
-                phases.append(("success ✓" if success else "failed ✗") + detail)
-                self._active_build_key = None
             else:
-                phases.append(f"{phase} ✓{detail}")
-        self._upsert(key, "Trusted build", "build", "\n".join(phases))
+                build = self._builds[key]
+            build = self._advance_build(build, event)
+        self._builds[key] = build
+        self._upsert_entry(ActivityDisplayEntry(key, ActivityDisplayKind.BUILD, build))
+        if event.kind is CodexActivityKind.BUILD_COMPLETED:
+            self._active_build_key = None
+
+    def _advance_build(
+        self, build: BuildPresentation, event: CodexActivityEvent
+    ) -> BuildPresentation:
+        phases = list(build.phases)
+        result = event.data.get("result", event.data.get("status"))
+        diagnostic = build.diagnostic
+        state = build.state
+        if event.kind is CodexActivityKind.BUILD_COMPILE_COMPLETED:
+            success = result == "success"
+            phases[0] = replace(
+                phases[0],
+                state=ActivityDisplayState.COMPLETED
+                if success
+                else ActivityDisplayState.FAILED,
+            )
+            if not success:
+                state = ActivityDisplayState.FAILED
+                diagnostic = _build_diagnostic(event.data, self._display_bytes)
+        elif event.kind is CodexActivityKind.BUILD_CANDIDATE_STARTED:
+            phases[1] = replace(phases[1], state=ActivityDisplayState.RUNNING)
+        elif event.kind is CodexActivityKind.BUILD_CANDIDATE_READY:
+            phases[1] = replace(phases[1], state=ActivityDisplayState.COMPLETED)
+            phases[2] = replace(phases[2], state=ActivityDisplayState.COMPLETED)
+            phases[3] = replace(phases[3], state=ActivityDisplayState.RUNNING)
+        elif event.kind is CodexActivityKind.BUILD_PROTOCOL_VALIDATED:
+            phases[3] = replace(phases[3], state=ActivityDisplayState.COMPLETED)
+        elif event.kind is CodexActivityKind.BUILD_CANDIDATE_FAILED:
+            for index in (1, 2, 3):
+                if phases[index].state is not ActivityDisplayState.COMPLETED:
+                    phases[index] = replace(
+                        phases[index], state=ActivityDisplayState.FAILED
+                    )
+                    break
+            state = ActivityDisplayState.FAILED
+            diagnostic = _build_diagnostic(event.data, self._display_bytes)
+        elif event.kind is CodexActivityKind.BUILD_COMPLETED:
+            success = result in {0, "0", "success"}
+            state = (
+                ActivityDisplayState.COMPLETED
+                if success
+                else ActivityDisplayState.FAILED
+            )
+            if not success and not diagnostic:
+                diagnostic = _build_diagnostic(event.data, self._display_bytes)
+        return BuildPresentation(state, tuple(phases), diagnostic)
 
     def _consume_lifecycle(self, event: CodexActivityEvent) -> None:
-        role = self._role_name(event.role)
-        if event.kind is CodexActivityKind.REVIEW_STARTED:
-            label = "Luna · review"
-            body = "started"
-        elif event.kind is CodexActivityKind.REVIEW_COMPLETED:
-            label = "Luna · review"
-            body = "completed"
-        elif event.kind is CodexActivityKind.REVIEW_CANCELLED:
-            label = "Luna · review"
-            body = "cancelled"
-        elif event.kind is CodexActivityKind.REVIEW_FAILED:
-            label = "Luna · review"
-            body = "failed"
-        else:
-            label = role
-            body = event.kind.value
+        if event.kind in {
+            CodexActivityKind.SESSION_STARTED,
+            CodexActivityKind.SESSION_STOPPED,
+            CodexActivityKind.TURN_STARTED,
+            CodexActivityKind.TURN_COMPLETED,
+            CodexActivityKind.REVIEW_STARTED,
+            CodexActivityKind.REVIEW_COMPLETED,
+        }:
+            return
+        state = {
+            CodexActivityKind.TURN_INTERRUPTED: ActivityDisplayState.INTERRUPTED,
+            CodexActivityKind.TURN_FAILED: ActivityDisplayState.FAILED,
+            CodexActivityKind.REVIEW_CANCELLED: ActivityDisplayState.CANCELLED,
+            CodexActivityKind.REVIEW_FAILED: ActivityDisplayState.FAILED,
+        }.get(event.kind, ActivityDisplayState.FAILED)
         useful = {
             key: value
             for key, value in event.data.items()
-            if key not in {"model", "reasoning_effort", "service_tier"}
+            if key
+            not in {
+                "model",
+                "reasoning_effort",
+                "reasoning_summary",
+                "service_tier",
+                "service_tier_name",
+                "agent_contract_version",
+            }
         }
+        detail = ""
         if useful:
-            body += " " + safe_display_text(
+            detail = safe_display_text(
                 json.dumps(useful, ensure_ascii=False, sort_keys=True, default=str),
                 self._display_bytes,
             )
-        self._upsert(
-            f"lifecycle:{event.sequence}",
-            label,
-            event.role.value,
-            body,
+        self._upsert_entry(
+            ActivityDisplayEntry(
+                f"lifecycle:{event.sequence}",
+                ActivityDisplayKind.LIFECYCLE,
+                LifecyclePresentation(
+                    event.role, event.kind.value, detail, state
+                ),
+            )
         )
 
     def _correlation_key(self, event: CodexActivityEvent, suffix: str) -> str:
@@ -394,32 +600,38 @@ class OperatorActivityModel:
             )
         )
 
-    def _upsert(self, key: str, label: str, category: str, body: str) -> None:
-        entry = ActivityDisplayEntry(key, label, category, body)
+    def _upsert_entry(self, entry: ActivityDisplayEntry) -> None:
+        position = self._positions.get(entry.key)
+        if position is None:
+            self._positions[entry.key] = len(self._entries)
+            self._entries.append(entry)
+            self._revision += 1
+        elif self._entries[position] != entry:
+            self._entries[position] = entry
+            self._revision += 1
+        self._trim()
+
+    def _remove(self, key: str) -> None:
         position = self._positions.get(key)
         if position is None:
-            self._positions[key] = len(self._entries)
-            self._entries.append(entry)
-        else:
-            self._entries[position] = entry
-        self._trim()
+            return
+        self._entries.pop(position)
+        self._forget(key)
+        self._positions = {entry.key: index for index, entry in enumerate(self._entries)}
+        self._revision += 1
 
     def _trim(self) -> None:
         self._entries = [
-            entry
-            for entry in self._entries
-            if entry.key != "scrollback:discarded"
+            entry for entry in self._entries if entry.key != "scrollback:discarded"
         ]
         total = sum(entry.size_bytes for entry in self._entries)
         discarded = False
         reserve_marker = self._discarded or (
-            len(self._entries) > self._max_entries
-            or total > self._max_bytes
+            len(self._entries) > self._max_entries or total > self._max_bytes
         )
         allowed_entries = self._max_entries - (1 if reserve_marker else 0)
         while (
-            len(self._entries) > allowed_entries
-            or total > self._max_bytes
+            len(self._entries) > allowed_entries or total > self._max_bytes
         ) and len(self._entries) > 1:
             removed = self._entries.pop(0)
             total -= removed.size_bytes
@@ -427,31 +639,30 @@ class OperatorActivityModel:
             discarded = True
         if discarded:
             self._discarded = True
+            self._revision += 1
         if self._discarded:
-            marker = ActivityDisplayEntry(
-                "scrollback:discarded",
-                "Harness",
-                "harness",
-                "… older live activity discarded from UI scrollback …",
+            self._entries.insert(
+                0,
+                ActivityDisplayEntry(
+                    "scrollback:discarded",
+                    ActivityDisplayKind.NOTICE,
+                    NoticePresentation(
+                        "Harness",
+                        "… older live activity discarded from UI scrollback …",
+                    ),
+                ),
             )
-            self._entries.insert(0, marker)
-        self._positions = {
-            entry.key: index for index, entry in enumerate(self._entries)
-        }
+        self._positions = {entry.key: index for index, entry in enumerate(self._entries)}
 
     def _forget(self, key: str) -> None:
         self._message_text.pop(key, None)
         self._reasoning_text.pop(key, None)
-        self._tool_data.pop(key, None)
-        self._build_phases.pop(key, None)
-
-    @staticmethod
-    def _role_name(role: CodexActivityRole) -> str:
-        return {
-            CodexActivityRole.IMPLEMENTOR: "Sol",
-            CodexActivityRole.REVIEWER: "Luna",
-            CodexActivityRole.HARNESS: "Harness",
-        }[role]
+        self._tool_presentations.pop(key, None)
+        self._builds.pop(key, None)
+        if self._active_build_key == key:
+            self._active_build_key = None
+        if self._active_operator_key == key:
+            self._active_operator_key = None
 
 
 def safe_display_text(text: str, limit_bytes: int = DEFAULT_DISPLAY_BYTES) -> str:
@@ -498,26 +709,198 @@ def safe_display_bytes(data: bytes, limit_bytes: int = DEFAULT_DISPLAY_BYTES) ->
         return f"binary ({len(data)} bytes): {shown.hex(' ')}{suffix}"
 
 
-def _format_inline_arguments(tool: str, arguments: dict[str, object]) -> str:
-    omitted = {"data", "content", "description"}
-    parts: list[str] = []
-    for key, value in arguments.items():
-        if key in omitted:
-            continue
-        if tool == "request_feature" and key == "title":
-            continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            rendered = safe_display_text(str(value))
-        else:
-            rendered = safe_display_text(
-                json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+def _payload_presentation(
+    value: object, limit_bytes: int, encoding: object = None
+) -> ToolDetailPresentation:
+    if isinstance(value, dict) and "output" in value:
+        output = value.get("output", b"")
+        if not _empty_payload(output):
+            return _payload_presentation(output, limit_bytes)
+        value = f"status={value.get('status')}"
+    if isinstance(value, bytes):
+        try:
+            decoded = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return ToolDetailPresentation(
+                safe_display_bytes(value, limit_bytes),
+                len(value),
+                None,
+                True,
+                len(value) > max(1, limit_bytes // 2),
             )
-        parts.append(f"{safe_display_text(str(key))}={rendered}")
-    return " " + " ".join(parts) if parts else ""
+        return ToolDetailPresentation(
+            safe_display_text(decoded, limit_bytes),
+            len(value),
+            _line_count(decoded),
+            False,
+            len(value) > limit_bytes,
+        )
+    if isinstance(value, str) and encoding == "base64":
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            pass
+        else:
+            return ToolDetailPresentation(
+                f"binary ({len(decoded)} bytes, base64): "
+                + safe_display_text(value, limit_bytes),
+                len(decoded),
+                None,
+                True,
+                len(value.encode("utf-8")) > limit_bytes,
+            )
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    encoded = value.encode("utf-8", errors="backslashreplace")
+    return ToolDetailPresentation(
+        safe_display_text(value, limit_bytes),
+        len(encoded),
+        _line_count(value),
+        False,
+        len(encoded) > limit_bytes,
+    )
 
 
-def _indent(text: str) -> str:
-    return "\n".join(f"  {line}" for line in text.splitlines() or [""])
+def _tool_summary(tool: str, arguments: dict[str, object]) -> str:
+    def value(name: str) -> str | None:
+        candidate = arguments.get(name)
+        if isinstance(candidate, (str, int)):
+            return safe_display_text(str(candidate), SUMMARY_DISPLAY_BYTES)
+        return None
+
+    path = value("path")
+    if tool in {"read", "write", "remove"} and path is not None:
+        extras: list[str] = []
+        if tool in {"read", "write"}:
+            offset = value("offset")
+            if offset is not None and offset != "0":
+                extras.append(f"offset={offset}")
+        if tool == "read":
+            length = value("length")
+            if length is not None:
+                extras.append(f"length={length}")
+        return path + ("  " + " ".join(extras) if extras else "")
+    if tool == "truncate" and path is not None:
+        size = value("size") or value("length")
+        return path if size is None else f"{path} → {size} bytes"
+    if tool == "list":
+        return value("prefix") or "guest source"
+    if tool == "review":
+        return value("focus") or "independent review"
+    if tool == "finish_generation":
+        return "validated successor and handoff"
+    if tool == "build":
+        return "exact current source"
+    if arguments:
+        return safe_display_text(
+            _one_line(
+                json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+            ),
+            SUMMARY_DISPLAY_BYTES,
+        )
+    return ""
+
+
+def _build_diagnostic(data: dict[str, object], limit: int) -> str:
+    useful = {
+        key: value
+        for key, value in data.items()
+        if key != "status" or value not in {None, ""}
+    }
+    if not useful:
+        return ""
+    if set(useful) == {"result"}:
+        return safe_display_text(str(useful["result"]), limit)
+    return safe_display_text(
+        json.dumps(useful, ensure_ascii=False, sort_keys=True, default=str), limit
+    )
+
+
+def _entry_text(entry: ActivityDisplayEntry) -> str:
+    presentation = entry.presentation
+    if isinstance(presentation, AgentMessagePresentation):
+        return f"{_role_name(presentation.role)}\n{presentation.text}"
+    if isinstance(presentation, ReasoningPresentation):
+        return f"{_role_name(presentation.role)} · reasoning\n{presentation.text}"
+    if isinstance(presentation, ToolPresentation):
+        text = (
+            f"{_role_name(presentation.role)} · {presentation.tool} "
+            f"{presentation.summary}"
+        ).rstrip()
+        if presentation.detail is not None:
+            text += "\n" + presentation.detail.text
+        return text
+    if isinstance(presentation, FeatureRequestPresentation):
+        return "Feature request\n" + presentation.title + "\n" + presentation.description
+    if isinstance(presentation, BuildPresentation):
+        return "Trusted build\n" + "\n".join(
+            f"{phase.name} {phase.state.value}" for phase in presentation.phases
+        )
+    if isinstance(presentation, OperatorPresentation):
+        command = (
+            "" if presentation.command is None else f"codexos> {presentation.command}\n"
+        )
+        return "Operator\n" + command + presentation.output
+    if isinstance(presentation, LifecyclePresentation):
+        return (
+            f"{_role_name(presentation.role)} · {presentation.title}\n"
+            f"{presentation.detail}"
+        )
+    return presentation.title + ("\n" + presentation.text if presentation.text else "")
+
+
+def _presentation_text(presentation: ActivityPresentation) -> str:
+    if isinstance(presentation, (AgentMessagePresentation, ReasoningPresentation)):
+        return presentation.text
+    if isinstance(presentation, ToolPresentation):
+        return "\n".join(
+            part
+            for part in (
+                presentation.tool,
+                presentation.summary,
+                presentation.detail.text if presentation.detail else "",
+                presentation.result_note,
+            )
+            if part
+        )
+    if isinstance(presentation, FeatureRequestPresentation):
+        return "\n".join(
+            (presentation.title, presentation.description, presentation.request_id)
+        )
+    if isinstance(presentation, BuildPresentation):
+        return "\n".join(
+            [
+                *(phase.name + phase.state.value for phase in presentation.phases),
+                presentation.diagnostic,
+            ]
+        )
+    if isinstance(presentation, OperatorPresentation):
+        return "\n".join((presentation.command or "", presentation.output))
+    if isinstance(presentation, LifecyclePresentation):
+        return "\n".join((presentation.title, presentation.detail))
+    return "\n".join((presentation.title, presentation.text))
+
+
+def _role_name(role: CodexActivityRole) -> str:
+    return {
+        CodexActivityRole.IMPLEMENTOR: "Sol",
+        CodexActivityRole.REVIEWER: "Luna",
+        CodexActivityRole.HARNESS: "Harness",
+    }[role]
+
+
+def _line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _empty_payload(value: object) -> bool:
+    return value is None or value == "" or value == b""
 
 
 def _text_identity(text: str) -> tuple[int, str]:
