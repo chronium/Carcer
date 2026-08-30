@@ -706,6 +706,7 @@ def _runtime_mock() -> Mock:
     runtime.state = RuntimeState.RUNNING
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
+    runtime.hardware_profile = TEST_HARDWARE_PROFILE
     runtime.feature_requests.return_value = ()
     return runtime
 

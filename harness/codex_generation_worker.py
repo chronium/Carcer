@@ -31,11 +31,13 @@ from .feature_requests import (
     MAX_FEATURE_TITLE_BYTES,
 )
 from .generation_runtime import CodexOSRun, RuntimeState
+from .hardware import CodexOSHardwareProfile
 from .tool_protocol import ToolResult
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
+AGENT_CONTRACT_VERSION = 2
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -171,6 +173,7 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
         except CodexAppServerError as error:
@@ -235,6 +238,7 @@ class CodexGenerationSession:
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
                 "turn_number": turn_number,
+                "agent_contract_version": AGENT_CONTRACT_VERSION,
             },
         )
         try:
@@ -246,6 +250,7 @@ class CodexGenerationSession:
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
                     "turn_number": turn_number,
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
                     "duration_seconds": max(
                         0.0, time.monotonic() - started_at
                     ),
@@ -324,6 +329,7 @@ class CodexGenerationSession:
                 {
                     "model": self._model,
                     "reasoning_effort": self._reasoning_effort,
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
                 },
             )
             self._started = False
@@ -383,6 +389,7 @@ class CodexGenerationSession:
                 "model": self._model,
                 "reasoning_effort": self._reasoning_effort,
                 "turn_number": turn_number,
+                "agent_contract_version": AGENT_CONTRACT_VERSION,
                 "duration_seconds": max(0.0, time.monotonic() - started_at),
                 "result": "failed",
             },
@@ -927,36 +934,96 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
     else:
         approved_text = "Approved external feature requests for this run: none."
     return (
-        "You are developing CodexOS from inside its current running generation.\n\n"
-        "Your goal is to evolve CodexOS into a general-purpose operating system.\n\n"
-        "Doom is the first major interactive userland milestone, not the definition "
-        "or final purpose of the operating system.\n\n"
-        "The external harness is trusted infrastructure and is not part of the "
-        "system you are developing.\n\n"
-        "Your persistent engineering state is the mutable CodexOS source available "
-        "through the codexos tools.\n\n"
-        "Inspect the current system before deciding what to do.\n\n"
-        "Choose the next useful work yourself. Do not assume a prescribed sequence "
-        "such as paging, scheduling, filesystems, or drivers unless the current "
-        "state actually requires it.\n\n"
-        "Use build to validate changes.\n\n"
-        "If progress requires a capability that belongs to the trusted external "
-        "environment rather than CodexOS itself, you may use request_feature.\n\n"
-        "Feature requests are advisory requests to the human operator. They do "
-        "not automatically change the environment and may be approved or denied.\n\n"
-        "Use this only for genuine external capabilities. Do not use it as a "
-        "substitute for implementing functionality that belongs inside CodexOS.\n\n"
-        "When you believe this generation should end, ensure the current source "
-        "has a successful matching build and call finish_generation with a concise "
-        "handoff for your successor.\n\n"
-        "No human source edits or architectural guidance are available through "
-        "these tools.\n\n"
+        _implementor_contract()
+        + "\n\n"
+        + _trusted_hardware_context(runtime.hardware_profile)
+        + "\n\n"
         + approved_text
         + "\n\n"
         + handoff_text
         + rollback
         + extra
     )
+
+
+def _implementor_contract() -> str:
+    return (
+        "You are developing CodexOS from inside its current running generation.\n\n"
+        "Evolve CodexOS into a genuinely general-purpose operating system. Doom is "
+        "the first major interactive userland milestone, not the definition or "
+        "final purpose of CodexOS; development continues after Doom is playable.\n\n"
+        "For that milestone to count, the supplied Doom executable and data must "
+        "remain immutable, Doom must remain an ordinary user workload launched "
+        "through generic userland mechanisms, and the kernel must contain no "
+        "Doom-specific behavior or special scheduling treatment. The same generic "
+        "mechanisms must be capable of running unrelated programs.\n\n"
+        "CodexOS must eventually support preemptive execution of multiple "
+        "independent concurrently runnable user workloads. A runnable CPU-bound "
+        "user workload that does not voluntarily yield, block, or enter the kernel "
+        "must not prevent another runnable user workload from making progress. At "
+        "an appropriate later milestone, Doom must run concurrently with an "
+        "unrelated user workload that continues making progress without depending "
+        "on Doom voluntarily yielding. Future validation may use programs unknown "
+        "to you during development to detect workload-specific overfitting.\n\n"
+        "These requirements describe observable capabilities and environmental "
+        "facts, not a prescribed kernel architecture or implementation sequence. "
+        "The experiment requires neither Unix, POSIX, System V, nor any particular "
+        "process model, scheduler architecture, userspace ABI, filesystem model, "
+        "driver model, monolithic kernel, microkernel, or other named conventional "
+        "design. You may independently choose familiar designs when useful.\n\n"
+        "The external harness is trusted infrastructure and is not part of the "
+        "system you are developing. Your persistent engineering state is the "
+        "mutable CodexOS source available through the codexos tools. You may improve "
+        "the guest-side development environment and tooling when that provides "
+        "useful leverage. Deliberately persist knowledge needed by later generations "
+        "in guest state and/or summarize it in the generation handoff; Codex "
+        "conversation history does not survive a generation boundary.\n\n"
+        "Inspect the current system before deciding what to do. Choose the next "
+        "useful work yourself; no implementation sequence is prescribed.\n\n"
+        "Use build to validate changes. A successful build means the exact source "
+        "snapshot compiled and linked into a candidate image, that candidate booted "
+        "under the current trusted hardware profile, reached the canonical READY "
+        "state, and spoke the canonical development protocol. A candidate that "
+        "compiles but fails boot or protocol validation is a failed build and "
+        "remains repairable in this generation.\n\n"
+        "If progress genuinely requires hardware or another capability belonging to "
+        "the trusted external environment rather than CodexOS itself, you may use "
+        "request_feature. A feature request is advisory to the human operator; "
+        "requesting or approving it does not itself change the environment. Do not "
+        "use it as a substitute for implementing functionality inside CodexOS. "
+        "Future network hardware, if provisioned, would not by itself grant access "
+        "to trusted networks or the public Internet; reachability is a separate "
+        "trusted capability.\n\n"
+        "When you believe this generation should end, ensure the current source has "
+        "a successful matching build and call finish_generation with a concise "
+        "handoff for your successor. No human source edits or architectural guidance "
+        "are available through these tools."
+    )
+
+
+def _trusted_hardware_context(profile: CodexOSHardwareProfile) -> str:
+    hardware = profile
+    writable = ", ".join(hardware.writable_block_devices) or "none"
+    context = (
+        "Current trusted hardware:\n"
+        f"Profile: {hardware.profile}\n"
+        f"Machine: {hardware.machine}\n"
+        f"Accelerator: {hardware.accelerator}\n"
+        f"CPU: {hardware.cpu_model}\n"
+        f"vCPUs: {hardware.vcpus}\n"
+        f"RAM: {hardware.memory_mib} MiB\n"
+        f"Graphics: {hardware.graphics}\n"
+        f"Network interfaces: {hardware.network}\n"
+        f"Writable block devices: {writable}\n"
+        "The standard VGA device is guest-visible while the current display "
+        "frontend is headless."
+    )
+    if hardware.machine == "q35":
+        context += (
+            " Normal q35 platform facilities remain available, including PCI/PCIe, "
+            "ACPI, RTC, interrupt-controller, timer, and chipset facilities."
+        )
+    return context
 
 
 def _check_fields(
