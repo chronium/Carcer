@@ -12,7 +12,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call, patch
 
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -45,7 +45,7 @@ from harness.codex_generation_worker import (
 from harness.observability import ExperimentObservability
 from harness.exit_interview_transcript import ExitInterviewArtifactStore
 
-_TOOLS = [
+_GUEST_TOOLS = [
     "list",
     "read",
     "write",
@@ -54,6 +54,9 @@ _TOOLS = [
     "build",
     "finish_generation",
     "request_feature",
+]
+_TOOLS = [
+    *_GUEST_TOOLS,
     "list_requests",
 ]
 
@@ -837,32 +840,37 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime._current_transition = "successor"
             runtime._previous_handoff = "Project rationale without request records."
 
-            with _fake_codex(
-                {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
-            ) as first_fake:
-                CodexGenerationWorker(
-                    first_fake.executable,
-                    first_fake.auth_file,
-                ).run_generation(runtime)
-                pending = _dynamic_result_output(
-                    first_fake.record()["tool_results"][0]
-                )
+            with patch.object(
+                runtime,
+                "list_tools",
+                return_value=list(_GUEST_TOOLS),
+            ):
+                with _fake_codex(
+                    {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
+                ) as first_fake:
+                    CodexGenerationWorker(
+                        first_fake.executable,
+                        first_fake.auth_file,
+                    ).run_generation(runtime)
+                    pending = _dynamic_result_output(
+                        first_fake.record()["tool_results"][0]
+                    )
 
-            runtime._state = RuntimeState.AWAITING_NEXT_GENERATION
-            runtime.approve_feature_request(first.id)
-            runtime.deny_feature_request(second.id)
-            runtime._state = RuntimeState.RUNNING
-            runtime._generation_number = 11
+                runtime._state = RuntimeState.AWAITING_NEXT_GENERATION
+                runtime.approve_feature_request(first.id)
+                runtime.deny_feature_request(second.id)
+                runtime._state = RuntimeState.RUNNING
+                runtime._generation_number = 11
 
-            with _fake_codex(
-                {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
-            ) as successor_fake:
-                CodexGenerationWorker(
-                    successor_fake.executable,
-                    successor_fake.auth_file,
-                ).run_generation(runtime)
-                record = successor_fake.record()
-                current = _dynamic_result_output(record["tool_results"][0])
+                with _fake_codex(
+                    {"tool_calls": [{"tool": "list_requests", "arguments": {}}]}
+                ) as successor_fake:
+                    CodexGenerationWorker(
+                        successor_fake.executable,
+                        successor_fake.auth_file,
+                    ).run_generation(runtime)
+                    record = successor_fake.record()
+                    current = _dynamic_result_output(record["tool_results"][0])
 
             self.assertEqual(
                 [request["status"] for request in pending["requests"]],
@@ -942,6 +950,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
+            runtime.list_tools.return_value = list(_GUEST_TOOLS)
             runtime.invoke_tool.return_value = ToolResult(7, b"\xff\x00A")
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
@@ -1145,6 +1154,161 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertFalse(record["tool_results"][2]["result"]["success"])
             _assert_process_dead(self, record["pid"])
 
+    def test_unadvertised_registered_guest_tool_is_unavailable(self) -> None:
+        with _fake_codex(
+            {"tool_calls": [{"tool": "list_provided_assets", "arguments": {}}]}
+        ) as fake:
+            runtime = _runtime_mock()
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            record = fake.record()
+
+        names = [
+            tool["name"]
+            for tool in _request(record["messages"], "thread/start")["params"][
+                "dynamicTools"
+            ][0]["tools"]
+        ]
+        self.assertNotIn("list_provided_assets", names)
+        self.assertIn("list_requests", names)
+        self.assertFalse(record["tool_results"][0]["result"]["success"])
+        self.assertIn(
+            "guest tool is unavailable",
+            record["tool_results"][0]["result"]["contentItems"][0]["text"],
+        )
+        runtime.invoke_tool.assert_not_called()
+
+    def test_fresh_successor_discovers_registered_evolved_guest_tools(
+        self,
+    ) -> None:
+        scenario = {
+            "tool_calls": [
+                {"tool": "list_provided_assets", "arguments": {}},
+                {
+                    "tool": "read_provided_asset",
+                    "arguments": {
+                        "id": "alpha-δ",
+                        "offset": 12,
+                        "length": 34,
+                    },
+                },
+            ],
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.list_tools.return_value = [
+                *_GUEST_TOOLS,
+                "list_provided_assets",
+                "read_provided_asset",
+                "unknown_future_tool",
+            ]
+            runtime.invoke_tool.side_effect = [
+                ToolResult(0, b"alpha\tpayload.bin\t4\tdigest\n"),
+                ToolResult(0, b"bytes"),
+            ]
+
+            CodexGenerationWorker(fake.executable, fake.auth_file).run_generation(
+                runtime
+            )
+            record = fake.record()
+
+        runtime.list_tools.assert_called_once_with()
+        runtime.invoke_tool.assert_has_calls(
+            [
+                call("list_provided_assets", []),
+                call(
+                    "read_provided_asset",
+                    ["alpha-δ".encode("utf-8"), b"12", b"34"],
+                ),
+            ]
+        )
+        dynamic_tools = _request(record["messages"], "thread/start")["params"][
+            "dynamicTools"
+        ]
+        self.assertEqual(dynamic_tools[0]["name"], "codexos")
+        tools = {
+            tool["name"]: tool for tool in dynamic_tools[0]["tools"]
+        }
+        self.assertEqual(
+            list(tools),
+            [
+                *_GUEST_TOOLS,
+                "list_provided_assets",
+                "read_provided_asset",
+                "list_requests",
+            ],
+        )
+        self.assertNotIn("unknown_future_tool", tools)
+        self.assertEqual(
+            tools["list_provided_assets"]["inputSchema"],
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+        self.assertEqual(
+            tools["read_provided_asset"]["inputSchema"],
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "length": {"type": "integer", "minimum": 0},
+                },
+                "additionalProperties": False,
+                "required": ["id", "offset", "length"],
+            },
+        )
+        self.assertIn(
+            "running CodexOS guest",
+            tools["read_provided_asset"]["description"],
+        )
+        self.assertIn("direct access", tools["read_provided_asset"]["description"])
+        self.assertEqual(dynamic_tools[1]["name"], "review")
+        self.assertIsNone(dynamic_tools[1].get("namespace"))
+
+    def test_guest_tool_discovery_failure_does_not_start_app_server(self) -> None:
+        with _fake_codex({}) as fake:
+            runtime = _runtime_mock()
+            runtime.list_tools.side_effect = RuntimeError(
+                "synthetic LIST_TOOLS failure"
+            )
+
+            with self.assertRaisesRegex(
+                CodexGenerationWorkerError,
+                "could not discover running guest tools: synthetic LIST_TOOLS failure",
+            ):
+                CodexGenerationWorker(
+                    fake.executable,
+                    fake.auth_file,
+                ).run_generation(runtime)
+
+            self.assertFalse(fake.record_path.exists())
+            runtime.invoke_tool.assert_not_called()
+
+    def test_rejects_ambiguous_guest_tool_advertisements(self) -> None:
+        for advertised, message in (
+            ([*_GUEST_TOOLS, "list"], "duplicate name: list"),
+            ([*_GUEST_TOOLS, ""], "invalid name"),
+        ):
+            with self.subTest(message=message), _fake_codex({}) as fake:
+                runtime = _runtime_mock()
+                runtime.list_tools.return_value = advertised
+
+                with self.assertRaisesRegex(
+                    CodexGenerationWorkerError,
+                    message,
+                ):
+                    CodexGenerationWorker(
+                        fake.executable,
+                        fake.auth_file,
+                    ).run_generation(runtime)
+
+                self.assertFalse(fake.record_path.exists())
+
     def test_process_cleanup_on_malformed_app_server_output(self) -> None:
         with _fake_codex({"failure": "malformed_json"}) as fake:
             runtime = Mock(spec=CodexOSRun)
@@ -1153,6 +1317,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
+            runtime.list_tools.return_value = list(_GUEST_TOOLS)
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -1169,6 +1334,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
+            runtime.list_tools.return_value = list(_GUEST_TOOLS)
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -1241,6 +1407,7 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
             runtime.feature_requests.return_value = ()
+            runtime.list_tools.return_value = list(_GUEST_TOOLS)
             worker = CodexGenerationWorker(fake.executable, fake.auth_file)
 
             with self.assertRaisesRegex(
@@ -2069,6 +2236,7 @@ def _runtime_mock() -> Mock:
     runtime.current_transition = "initial"
     runtime.hardware_profile = TEST_HARDWARE_PROFILE
     runtime.feature_requests.return_value = ()
+    runtime.list_tools.return_value = list(_GUEST_TOOLS)
     return runtime
 
 

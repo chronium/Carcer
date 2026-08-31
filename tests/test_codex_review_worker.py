@@ -27,6 +27,7 @@ from harness.codex_review_worker import (
     DEFAULT_REVIEWER_SERVICE_TIER,
 )
 from tests.test_codex_generation_worker import (
+    _GUEST_TOOLS,
     _assert_process_dead,
     _build_seed,
     _fake_codex,
@@ -849,6 +850,7 @@ def _runtime_mock() -> Mock:
     runtime.current_transition = "initial"
     runtime.hardware_profile = TEST_HARDWARE_PROFILE
     runtime.feature_requests.return_value = ()
+    runtime.list_tools.return_value = list(_GUEST_TOOLS)
     return runtime
 
 

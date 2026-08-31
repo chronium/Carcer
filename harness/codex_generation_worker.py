@@ -107,6 +107,15 @@ _LIST_REQUESTS_TOOL_DESCRIPTION = (
     "denied requests are unavailable under that request. This read-only tool does "
     "not modify requests."
 )
+_LIST_PROVIDED_ASSETS_TOOL_DESCRIPTION = (
+    "Ask the running CodexOS guest to list the immutable provided assets it can "
+    "access through its advertised development tool."
+)
+_READ_PROVIDED_ASSET_TOOL_DESCRIPTION = (
+    "Ask the running CodexOS guest to read an exact byte range from a provided "
+    "asset through its advertised development tool. This does not give Codex "
+    "direct access to trusted host asset storage."
+)
 _REVIEW_TOOL_DESCRIPTION = (
     "Consult a fresh independent reviewer that inspects the current mutable "
     "CodexOS guest source through restricted read-only tools. The reviewer is "
@@ -207,6 +216,7 @@ class CodexGenerationSession:
         self._exit_interview_started = False
         self._interview_turn_number = 0
         self._exit_interview_transcript: ExitInterviewTranscript | None = None
+        self._available_guest_tools: frozenset[str] = frozenset()
 
     @property
     def active_turn(self) -> bool:
@@ -248,6 +258,16 @@ class CodexGenerationSession:
             raise RuntimeError(
                 "Codex generation session belongs to another generation"
             )
+        try:
+            guest_dynamic_tools = _advertised_guest_dynamic_tools(
+                self._runtime.list_tools()
+            )
+        except Exception as error:
+            self._healthy = False
+            raise CodexGenerationWorkerError(
+                f"could not discover running guest tools: {error}"
+            ) from error
+        self._available_guest_tools = frozenset(guest_dynamic_tools)
         server = CodexAppServer(
             executable=self._codex_executable,
             auth_file=self._auth_file,
@@ -267,7 +287,7 @@ class CodexGenerationSession:
                 service_tier=self._service_tier,
                 permission_profile=_PERMISSION_PROFILE,
                 dynamic_tools=[
-                    _dynamic_tool_namespace(),
+                    _dynamic_tool_namespace(guest_dynamic_tools),
                     _review_dynamic_function(),
                 ],
             )
@@ -1110,6 +1130,9 @@ class CodexGenerationSession:
     ) -> ToolResult:
         runtime = self._runtime
 
+        if tool != "list_requests" and tool not in self._available_guest_tools:
+            raise ValueError(f"CodexOS guest tool is unavailable: {tool}")
+
         if tool == "list":
             _check_fields(arguments, optional={"prefix"})
             if "prefix" not in arguments:
@@ -1188,6 +1211,22 @@ class CodexGenerationSession:
             return runtime.invoke_tool(
                 "request_feature",
                 [title, description],
+            )
+        if tool == "list_provided_assets":
+            _check_fields(arguments)
+            return runtime.invoke_tool("list_provided_assets", [])
+        if tool == "read_provided_asset":
+            _check_fields(
+                arguments,
+                required={"id", "offset", "length"},
+            )
+            return runtime.invoke_tool(
+                "read_provided_asset",
+                [
+                    _utf8(arguments["id"], "id"),
+                    _unsigned_decimal(arguments["offset"], "offset"),
+                    _unsigned_decimal(arguments["length"], "length"),
+                ],
             )
         if tool == "list_requests":
             _check_fields(arguments)
@@ -1328,13 +1367,11 @@ enabled = false
 """
 
 
-def _dynamic_tool_namespace() -> dict[str, object]:
+def _guest_dynamic_tool_registry() -> dict[str, dict[str, object]]:
     function = _dynamic_function
     return {
-        "type": "namespace",
-        "name": "codexos",
-        "description": "Develop the running CodexOS guest through its trusted tools.",
-        "tools": [
+        tool["name"]: tool
+        for tool in (
             function(
                 "list",
                 "List paths in the persistent mutable CodexOS guest source, "
@@ -1404,6 +1441,53 @@ def _dynamic_tool_namespace() -> dict[str, object]:
                 ["title", "description"],
             ),
             function(
+                "list_provided_assets",
+                _LIST_PROVIDED_ASSETS_TOOL_DESCRIPTION,
+                {},
+            ),
+            function(
+                "read_provided_asset",
+                _READ_PROVIDED_ASSET_TOOL_DESCRIPTION,
+                {
+                    "id": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "length": {"type": "integer", "minimum": 0},
+                },
+                ["id", "offset", "length"],
+            ),
+        )
+    }
+
+
+def _advertised_guest_dynamic_tools(
+    advertised: object,
+) -> dict[str, dict[str, object]]:
+    if not isinstance(advertised, list):
+        raise TypeError("guest tool list is not a list")
+    registry = _guest_dynamic_tool_registry()
+    selected: dict[str, dict[str, object]] = {}
+    seen: set[str] = set()
+    for name in advertised:
+        if not isinstance(name, str) or not name:
+            raise ValueError("guest tool list contains an invalid name")
+        if name in seen:
+            raise ValueError(f"guest tool list contains duplicate name: {name}")
+        seen.add(name)
+        if name in registry:
+            selected[name] = registry[name]
+    return selected
+
+
+def _dynamic_tool_namespace(
+    guest_tools: Mapping[str, dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "type": "namespace",
+        "name": "codexos",
+        "description": "Develop the running CodexOS guest through its trusted tools.",
+        "tools": [
+            *guest_tools.values(),
+            _dynamic_function(
                 "list_requests",
                 _LIST_REQUESTS_TOOL_DESCRIPTION,
                 {},
@@ -1716,7 +1800,7 @@ def _tool_metadata(
             metadata[name] = value
 
     encoded: list[bytes] = []
-    for name in ("prefix", "path", "handoff", "title", "description"):
+    for name in ("prefix", "path", "id", "handoff", "title", "description"):
         value = arguments.get(name)
         if isinstance(value, str):
             try:
