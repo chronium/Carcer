@@ -16,6 +16,11 @@ from .codex_generation_worker import (
 )
 from .codex_review_worker import CodexReviewWorker, CodexReviewWorkerError
 from .framing import Frame, FramingError, encode_frame, read_frame
+from .forensic_provenance import (
+    BuildReviewProvenance,
+    FileIdentity,
+    ForensicProvenanceError,
+)
 from .feature_requests import (
     FeatureRequest,
     FeatureRequestError,
@@ -97,6 +102,9 @@ __all__ = [
     "FeatureRequestError",
     "FeatureRequestStore",
     "FramingError",
+    "BuildReviewProvenance",
+    "FileIdentity",
+    "ForensicProvenanceError",
     "ExperimentObservability",
     "ExperimentObservabilityError",
     "HostServiceProtocolError",

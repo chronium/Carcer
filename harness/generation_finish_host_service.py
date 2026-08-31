@@ -15,6 +15,7 @@ from .feature_requests import (
     FeatureRequestStore,
 )
 from .framing import Frame
+from .forensic_provenance import BuildReviewProvenance
 from .host_service_protocol import (
     HostServiceRequest,
     create_host_service_response,
@@ -52,6 +53,7 @@ class CodexOSHostServices:
         observability: ExperimentObservability | None = None,
         activity_stream: CodexActivityStream | None = None,
         provided_assets: ProvidedAssets | None = None,
+        provenance: BuildReviewProvenance | None = None,
     ) -> None:
         if (feature_request_store is None) != (generation is None):
             raise ValueError(
@@ -62,6 +64,7 @@ class CodexOSHostServices:
             candidate_validator,
             activity_stream=activity_stream,
             generation=generation,
+            provenance=provenance,
         )
         self._pending_finish: PendingGenerationFinish | None = None
         self._feature_request_store = feature_request_store

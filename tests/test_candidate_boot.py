@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import unittest
@@ -12,14 +13,17 @@ from harness import (
     EXPERIMENT_HARDWARE_PROFILE,
     TEST_HARDWARE_PROFILE,
     BuildHostService,
+    BuildReviewProvenance,
     BuildStatus,
     CandidateBootValidator,
     CodexOSHostServices,
     HostServiceRequest,
+    FileIdentity,
     QemuProcessController,
     SerialConnection,
     SnapshotFile,
     build_source_snapshot,
+    decode_source_snapshot,
     encode_source_snapshot,
 )
 from harness.guest_startup import GuestReadyError, wait_for_ready
@@ -50,7 +54,22 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
                 generation=4,
             )
 
-            pids, result = _validate_tracking_process(validator, build.iso)
+            snapshot = encode_source_snapshot(_current_seed_files(repository))
+            evidence = BuildReviewProvenance(root / "run").begin_build(4, snapshot)
+            files = decode_source_snapshot(snapshot)
+            evidence.record_decoded(
+                len(files), sum(len(entry.content) for entry in files)
+            )
+            kernel_identity = FileIdentity.from_path(build.kernel_elf)
+            iso_identity = FileIdentity.from_path(build.iso)
+            evidence.record_artifacts(kernel_identity, iso_identity)
+
+            pids, result = _validate_tracking_process(
+                validator,
+                build.iso,
+                evidence=evidence,
+                iso_identity=iso_identity,
+            )
 
             self.assertEqual(result.status, BuildStatus.SUCCESS, result.diagnostics)
             events = activity.drain()
@@ -65,6 +84,30 @@ class CandidateBootValidationIntegrationTests(unittest.TestCase):
             self.assertTrue(all(event.generation == 4 for event in events))
             self.assertTrue(
                 all(event.role is CodexActivityRole.HARNESS for event in events)
+            )
+            self.assertTrue(
+                all(
+                    event.data["build_attempt_id"] == "build-000001"
+                    for event in events
+                )
+            )
+            manifest = json.loads(
+                (
+                    root
+                    / "run/build-review-provenance/generation-0004"
+                    / "build-000001/manifest.json"
+                ).read_text()
+            )
+            self.assertEqual(
+                manifest["candidate_validation"],
+                {
+                    "stage": "candidate_completed",
+                    "expected_iso_bytes": iso_identity.size,
+                    "expected_iso_sha256": iso_identity.sha256,
+                    "ready": True,
+                    "protocol_validated": True,
+                    "outcome": "success",
+                },
             )
             _assert_candidate_cleanup(self, root, pids)
 
@@ -329,6 +372,7 @@ def _replace_kernel(
 def _validate_tracking_process(
     validator: CandidateBootValidator,
     iso: Path | None,
+    **validation_arguments,
 ):
     if iso is None:
         raise AssertionError("trusted compilation returned no ISO")
@@ -341,7 +385,7 @@ def _validate_tracking_process(
             pids.append(controller.pid)
 
     with patch.object(QemuProcessController, "start", new=start):
-        result = validator.validate(iso)
+        result = validator.validate(iso, **validation_arguments)
     return pids, result
 
 

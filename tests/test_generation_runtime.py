@@ -11,6 +11,9 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from harness import (
+    BuildReviewProvenance,
+    FileIdentity,
+    StagedBuildArtifacts,
     TEST_HARDWARE_PROFILE,
     CodexOSRun,
     QmpError,
@@ -99,7 +102,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 archive = run_directory / "generation-0000"
                 self.assertEqual(
                     {path.name for path in run_directory.iterdir()},
-                    {"generation-0000"},
+                    {"build-review-provenance", "generation-0000"},
                 )
                 pending = runtime.pending_generation_finish
                 self.assertIsNotNone(pending)
@@ -486,6 +489,7 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     {path.name for path in run_directory.iterdir()},
                     {
+                        "build-review-provenance",
                         "generation-0000",
                         "generation-0001",
                         "generation-0002",
@@ -739,6 +743,67 @@ class GenerationRuntimeIntegrationTest(unittest.TestCase):
 
 
 class GenerationRuntimeStateTests(unittest.TestCase):
+    def test_aborted_archive_preserves_latest_success_identity_and_snapshot(
+        self,
+    ) -> None:
+        snapshot = b"\x00\x00"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = CodexOSRun(root / "run", hardware_profile=TEST_HARDWARE_PROFILE)
+            evidence = BuildReviewProvenance(root / "run").begin_build(3, snapshot)
+            evidence.record_decoded(0, 0)
+            kernel_identity = FileIdentity(
+                "1" * 64,
+                123,
+            )
+            iso_identity = FileIdentity(
+                "2" * 64,
+                456,
+            )
+            evidence.record_artifacts(kernel_identity, iso_identity)
+            evidence.record_candidate_stage(
+                "build_candidate_validation_completed",
+                "candidate_completed",
+                outcome="success",
+            )
+            evidence.record_latest_success(snapshot)
+            latest = StagedBuildArtifacts(
+                root / "kernel.elf",
+                root / "candidate.iso",
+                snapshot,
+                evidence.attempt_id,
+                evidence.source_identity,
+                kernel_identity,
+                iso_identity,
+                evidence,
+            )
+            host_services = Mock()
+            host_services.latest_successful_build = latest
+            boot = root / "boot.iso"
+            boot.write_bytes(b"boot")
+            runtime._generation_number = 3
+            runtime._current_boot_image = boot
+            runtime._current_parent_generation = 2
+            runtime._current_transition = "successor"
+            runtime._current_hardware = TEST_HARDWARE_PROFILE.manifest("synthetic")
+            runtime._host_services = host_services
+
+            staging, final = runtime._prepare_aborted_archive()
+            (staging / "qemu.stdout").write_bytes(b"")
+            (staging / "qemu.stderr").write_bytes(b"")
+            staging.rename(final)
+
+            self.assertEqual((final / "latest-success.snapshot").read_bytes(), snapshot)
+            manifest = json.loads((final / "latest-success.json").read_text())
+            self.assertEqual(manifest["build_attempt_id"], "build-000001")
+            self.assertEqual(
+                manifest["source_snapshot"],
+                evidence.source_identity.as_json(),
+            )
+            self.assertEqual(manifest["kernel"], kernel_identity.as_json())
+            self.assertEqual(manifest["iso"], iso_identity.as_json())
+            self.assertEqual(runtime.inspect_generation(3).outcome, "aborted")
+
     def test_qmp_failures_leave_runtime_conservatively_paused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = CodexOSRun(Path(temporary) / "run")
