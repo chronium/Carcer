@@ -21,6 +21,11 @@ from harness import (
 )
 from harness.codex_review_worker import _dispatch_read_only_tool
 from harness.observability import ExperimentObservability
+from harness.forensic_provenance import (
+    ForensicProvenanceError,
+    _atomic_bytes,
+    _atomic_json,
+)
 
 
 class BuildProvenanceTests(unittest.TestCase):
@@ -235,6 +240,58 @@ class BuildProvenanceTests(unittest.TestCase):
             self.assertEqual(manifest_path.read_bytes(), before)
             self.assertFalse(list(manifest_path.parent.glob(".manifest.json-*")))
 
+    def test_build_provenance_failure_is_fail_closed_and_preserves_latest(
+        self,
+    ) -> None:
+        snapshot = encode_source_snapshot(
+            (SnapshotFile("seed/kernel.c", b"source"),)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            service = BuildHostService(
+                root / "staging",
+                _SuccessfulValidator(),
+                generation=7,
+                provenance=BuildReviewProvenance(root / "run"),
+            )
+            with patch(
+                "harness.build_host_service.build_source_snapshot",
+                side_effect=_synthetic_successful_build,
+            ):
+                first = service.handle_request(
+                    HostServiceRequest(1, "build", (snapshot,))
+                )
+                latest = service.latest_successful_build
+                original_atomic_bytes = _atomic_bytes
+
+                def fail_successful_snapshot(path: Path, value: bytes) -> None:
+                    if path.name == "source.snapshot":
+                        raise ForensicProvenanceError("synthetic storage failure")
+                    original_atomic_bytes(path, value)
+
+                with patch(
+                    "harness.forensic_provenance._atomic_bytes",
+                    side_effect=fail_successful_snapshot,
+                ):
+                    second = service.handle_request(
+                        HostServiceRequest(2, "build", (snapshot,))
+                    )
+
+            self.assertEqual(int.from_bytes(first.payload[:4], "little"), 0)
+            self.assertEqual(int.from_bytes(second.payload[:4], "little"), 2)
+            self.assertIs(service.latest_successful_build, latest)
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.build_attempt_id, "build-000001")
+            second_manifest = json.loads(
+                (
+                    root
+                    / "run/build-review-provenance/generation-0007"
+                    / "build-000002/manifest.json"
+                ).read_text()
+            )
+            self.assertNotEqual(second_manifest["outcome"], "success")
+            self.assertNotIn("latest_success", second_manifest)
+
     def test_incomplete_ids_remain_reserved_and_future_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -287,7 +344,9 @@ class ReviewProvenanceTests(unittest.TestCase):
             review = root / "build-review-provenance/generation-0009/review-000001"
             manifest = json.loads((review / "manifest.json").read_text())
             self.assertEqual(manifest["review_id"], "review-000001")
-            self.assertEqual(manifest["outcome"], "completed")
+            self.assertEqual(manifest["review_outcome"], "completed")
+            self.assertEqual(manifest["capture_outcome"], "complete")
+            self.assertTrue(manifest["evidence_complete"])
             read = manifest["source_reads"][0]
             self.assertEqual(read["path"], "seed/tasks.c")
             self.assertEqual(read["offset"], 7)
@@ -305,6 +364,202 @@ class ReviewProvenanceTests(unittest.TestCase):
                     evidence,
                 )
             self.assertEqual(len(list(review.glob("read-*.bin"))), 1)
+
+    def test_failed_content_write_keeps_review_result_and_incomplete_evidence(
+        self,
+    ) -> None:
+        output = b"exact reviewer bytes"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = BuildReviewProvenance(root).begin_review(10)
+            runtime = Mock()
+            runtime.invoke_tool.return_value = ToolResult(0, output)
+            runtime.observability = None
+
+            with patch(
+                "harness.forensic_provenance._atomic_bytes",
+                side_effect=ForensicProvenanceError("synthetic byte failure"),
+            ):
+                result = _dispatch_read_only_tool(
+                    runtime,
+                    "read",
+                    {"path": "seed/tasks.c", "offset": 0, "length": len(output)},
+                    evidence,
+                )
+            evidence.complete("completed")
+
+            self.assertEqual(result, ToolResult(0, output))
+            review = root / "build-review-provenance/generation-0010/review-000001"
+            manifest = json.loads((review / "manifest.json").read_text())
+            self.assertEqual(manifest["review_outcome"], "completed")
+            self.assertEqual(manifest["capture_outcome"], "incomplete")
+            self.assertFalse(manifest["evidence_complete"])
+            self.assertEqual(manifest["source_reads"], [])
+            self.assertFalse(list(review.glob("read-*.bin")))
+
+    def test_unwritable_incomplete_marker_leaves_safe_initial_manifest(self) -> None:
+        output = b"uncaptured reviewer bytes"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = BuildReviewProvenance(root).begin_review(10)
+            runtime = Mock()
+            runtime.invoke_tool.return_value = ToolResult(0, output)
+            runtime.observability = None
+
+            with patch(
+                "harness.forensic_provenance._atomic_bytes",
+                side_effect=ForensicProvenanceError("persistent storage failure"),
+            ):
+                result = _dispatch_read_only_tool(
+                    runtime,
+                    "read",
+                    {"path": "seed/tasks.c", "offset": 0, "length": len(output)},
+                    evidence,
+                )
+                with self.assertRaisesRegex(RuntimeError, "storage failure"):
+                    evidence.complete("completed")
+
+            self.assertEqual(result, ToolResult(0, output))
+            manifest = json.loads(
+                (
+                    root
+                    / "build-review-provenance/generation-0010"
+                    / "review-000001/manifest.json"
+                ).read_text()
+            )
+            self.assertEqual(manifest["review_outcome"], "incomplete")
+            self.assertEqual(manifest["capture_outcome"], "in_progress")
+            self.assertFalse(manifest["evidence_complete"])
+            self.assertEqual(manifest["source_reads"], [])
+
+    def test_manifest_failure_recovers_only_from_verified_exact_content(self) -> None:
+        output = b"recoverable exact bytes"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = BuildReviewProvenance(root).begin_review(11)
+            runtime = Mock()
+            runtime.invoke_tool.return_value = ToolResult(0, output)
+            runtime.observability = None
+            original_atomic_json = _atomic_json
+            failed = False
+
+            def fail_first_manifest(path: Path, value: object) -> None:
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise ForensicProvenanceError("synthetic manifest failure")
+                original_atomic_json(path, value)
+
+            with patch(
+                "harness.forensic_provenance._atomic_json",
+                side_effect=fail_first_manifest,
+            ):
+                result = _dispatch_read_only_tool(
+                    runtime,
+                    "read",
+                    {"path": "seed/kernel.c", "offset": 2, "length": len(output)},
+                    evidence,
+                )
+                durable_before = json.loads(
+                    (
+                        root
+                        / "build-review-provenance/generation-0011"
+                        / "review-000001/manifest.json"
+                    ).read_text()
+                )
+                self.assertFalse(durable_before["evidence_complete"])
+                self.assertEqual(durable_before["source_reads"], [])
+                evidence.complete("completed")
+
+            self.assertEqual(result, ToolResult(0, output))
+            review = root / "build-review-provenance/generation-0011/review-000001"
+            manifest = json.loads((review / "manifest.json").read_text())
+            self.assertEqual(manifest["review_outcome"], "completed")
+            self.assertTrue(manifest["evidence_complete"])
+            self.assertEqual(manifest["capture_outcome"], "complete")
+            entry = manifest["source_reads"][0]
+            self.assertEqual((review / entry["content_file"]).read_bytes(), output)
+
+    def test_missing_or_corrupt_content_prevents_complete_evidence(self) -> None:
+        for corruption in ("missing", "size", "hash", "orphan"):
+            with self.subTest(corruption=corruption):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    evidence = BuildReviewProvenance(root).begin_review(12)
+                    evidence.record_source_read(
+                        "seed/tasks.c", 0, 5, 0, b"exact"
+                    )
+                    review = (
+                        root
+                        / "build-review-provenance/generation-0012/review-000001"
+                    )
+                    content = review / "read-000001.bin"
+                    if corruption == "missing":
+                        content.unlink()
+                    elif corruption == "size":
+                        content.write_bytes(b"different-size")
+                    elif corruption == "orphan":
+                        (review / "read-999999.bin").write_bytes(b"orphan")
+                    else:
+                        content.write_bytes(b"other")
+                    evidence.complete("completed")
+                    manifest = json.loads((review / "manifest.json").read_text())
+                    self.assertEqual(manifest["review_outcome"], "completed")
+                    self.assertFalse(manifest["evidence_complete"])
+                    self.assertEqual(manifest["capture_outcome"], "incomplete")
+
+    def test_failed_and_cancelled_review_outcomes_are_separate_from_capture(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provenance = BuildReviewProvenance(root)
+            for expected, evidence in (
+                ("failed", provenance.begin_review(13)),
+                ("cancelled", provenance.begin_review(13)),
+            ):
+                evidence.complete(expected)
+            manifests = sorted(
+                (root / "build-review-provenance/generation-0013").glob(
+                    "review-*/manifest.json"
+                )
+            )
+            self.assertEqual(len(manifests), 2)
+            for expected, path in zip(("failed", "cancelled"), manifests):
+                manifest = json.loads(path.read_text())
+                self.assertEqual(manifest["review_outcome"], expected)
+                self.assertTrue(manifest["evidence_complete"])
+                self.assertEqual(manifest["capture_outcome"], "complete")
+
+    def test_historical_manifest_without_completeness_is_not_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation = root / "build-review-provenance/generation-0014"
+            legacy = generation / "review-000001"
+            legacy.mkdir(parents=True)
+            legacy_manifest = {
+                "schema_version": 1,
+                "kind": "review",
+                "generation": 14,
+                "review_id": "review-000001",
+                "stage": "completed",
+                "outcome": "completed",
+                "source_reads": [],
+            }
+            encoded = (json.dumps(legacy_manifest, sort_keys=True) + "\n").encode()
+            (legacy / "manifest.json").write_bytes(encoded)
+
+            current = BuildReviewProvenance(root).begin_review(14)
+
+            self.assertEqual((legacy / "manifest.json").read_bytes(), encoded)
+            self.assertNotIn("evidence_complete", legacy_manifest)
+            current_manifest = json.loads(
+                (
+                    generation / "review-000002/manifest.json"
+                ).read_text()
+            )
+            self.assertFalse(current_manifest["evidence_complete"])
+            self.assertEqual(current_manifest["capture_outcome"], "in_progress")
 
 
 class _SuccessfulValidator:

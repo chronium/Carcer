@@ -88,7 +88,9 @@ class BuildReviewProvenance:
             "generation": generation,
             "review_id": review_id,
             "stage": "started",
-            "outcome": "incomplete",
+            "review_outcome": "incomplete",
+            "capture_outcome": "in_progress",
+            "evidence_complete": False,
             "source_reads": [],
         }
         _atomic_json(directory / "manifest.json", manifest)
@@ -344,6 +346,7 @@ class ReviewEvidence:
         self._directory = directory
         self._manifest = manifest
         self._observability = observability
+        self._irrecoverably_incomplete = False
 
     @property
     def review_id(self) -> str:
@@ -364,7 +367,12 @@ class ReviewEvidence:
         reads = self._manifest["source_reads"]
         sequence = len(reads) + 1
         filename = f"read-{sequence:06d}.bin"
-        _atomic_bytes(self._directory / filename, output)
+        try:
+            _atomic_bytes(self._directory / filename, output)
+        except ForensicProvenanceError:
+            self._irrecoverably_incomplete = True
+            self._mark_capture_incomplete()
+            raise
         reads.append(
             {
                 "sequence": sequence,
@@ -378,7 +386,12 @@ class ReviewEvidence:
             }
         )
         self._manifest["stage"] = "source_read"
-        _atomic_json(self._directory / "manifest.json", self._manifest)
+        try:
+            _atomic_json(self._directory / "manifest.json", self._manifest)
+        except ForensicProvenanceError:
+            # The exact content file and in-memory entry remain available for
+            # conservative verification and recovery during finalization.
+            raise
         if self._observability is not None:
             self._observability.record(
                 "review_source_read",
@@ -396,8 +409,55 @@ class ReviewEvidence:
 
     def complete(self, outcome: str) -> None:
         self._manifest["stage"] = "completed"
-        self._manifest["outcome"] = outcome
+        self._manifest["review_outcome"] = outcome
+        complete = (
+            not self._irrecoverably_incomplete
+            and self._all_source_reads_are_verifiable()
+        )
+        self._manifest["evidence_complete"] = complete
+        self._manifest["capture_outcome"] = (
+            "complete" if complete else "incomplete"
+        )
         _atomic_json(self._directory / "manifest.json", self._manifest)
+
+    def _mark_capture_incomplete(self) -> None:
+        self._manifest["capture_outcome"] = "incomplete"
+        self._manifest["evidence_complete"] = False
+        try:
+            _atomic_json(self._directory / "manifest.json", self._manifest)
+        except ForensicProvenanceError:
+            # The previously durable manifest was initialized as incomplete,
+            # so leaving it untouched is safer than claiming final capture.
+            pass
+
+    def _all_source_reads_are_verifiable(self) -> bool:
+        reads = self._manifest.get("source_reads")
+        if not isinstance(reads, list):
+            return False
+        expected_files: set[str] = set()
+        for sequence, entry in enumerate(reads, 1):
+            if not isinstance(entry, dict) or entry.get("sequence") != sequence:
+                return False
+            filename = entry.get("content_file")
+            if filename != f"read-{sequence:06d}.bin":
+                return False
+            content_path = self._directory / filename
+            expected_files.add(filename)
+            if content_path.is_symlink() or not content_path.is_file():
+                return False
+            try:
+                content = content_path.read_bytes()
+            except OSError:
+                return False
+            if (
+                entry.get("returned_bytes") != len(content)
+                or entry.get("sha256") != hashlib.sha256(content).hexdigest()
+            ):
+                return False
+        actual_files = {
+            path.name for path in self._directory.glob("read-*.bin")
+        }
+        return actual_files == expected_files
 
 
 def _atomic_json(path: Path, value: object) -> None:

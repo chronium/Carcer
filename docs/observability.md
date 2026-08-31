@@ -106,3 +106,6 @@ event data for forensic correlation only; they are never metric attributes or
 labels. Exact retained bytes and authoritative manifests remain in the private
 run-local `build-review-provenance/` tree described in
 [`validated-successors-and-provenance.md`](validated-successors-and-provenance.md).
+Build provenance storage fails closed as a trusted harness failure. Review
+capture remains non-interfering and records review outcome separately from
+durable evidence completeness.

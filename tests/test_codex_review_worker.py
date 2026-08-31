@@ -84,7 +84,9 @@ class CodexReviewerProtocolTests(unittest.TestCase):
             )
             recorded = json.loads((review / "manifest.json").read_text())
             self.assertEqual(recorded["review_id"], "review-000001")
-            self.assertEqual(recorded["outcome"], "completed")
+            self.assertEqual(recorded["review_outcome"], "completed")
+            self.assertTrue(recorded["evidence_complete"])
+            self.assertEqual(recorded["capture_outcome"], "complete")
             self.assertEqual(len(recorded["source_reads"]), 1)
             source_read = recorded["source_reads"][0]
             self.assertEqual(source_read["path"], "seed/tasks.c")

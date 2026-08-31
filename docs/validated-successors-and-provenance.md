@@ -52,12 +52,29 @@ returned bytes. This records what Luna actually received without changing its
 tools or results. It is range evidence, not an invented atomic whole-source
 snapshot, and it deliberately excludes provided-asset reads.
 
+Build evidence is mandatory and fails closed. If trusted provenance storage
+cannot allocate an attempt or durably preserve its required source/artifact
+identity, the build returns a harness failure and cannot advance or erase
+latest-success. Normal guest build acceptance remains the same: compilation,
+READY, and canonical protocol validation must still succeed. The additional
+failure case is trusted infrastructure failure, not guest build failure.
+
+Review evidence has the opposite operational policy because observation must
+not change Luna's consultation. A capture failure leaves Luna's exact tool
+result and review outcome unchanged, degrades observability, and durably marks
+`evidence_complete: false` whenever storage remains writable. The manifest
+records `review_outcome` independently from `capture_outcome`. It may claim
+complete evidence only after every referenced source-read file has been
+verified against its recorded size and SHA-256. A historical review manifest
+without these fields does not imply complete capture.
+
 Manifests and byte evidence are written atomically and remain private run-local
 infrastructure: they are not agent context, dynamic tools, metric labels,
 generation Git commits, or public release artifacts. Historical generations
 that predate this instrumentation remain reopenable but cannot be retroactively
-given evidence that was never captured. This is passive trusted instrumentation
-and does not change the Agent Contract.
+given evidence that was never captured. This is trusted observational
+instrumentation and does not change the Agent Contract or autonomous-agent
+behavior; the fail-closed build-storage policy protects the audit invariant.
 
 Local Git provenance is a derived human-readable projection of completed
 archives. Each run uses the run-directory basename as its tag namespace:
