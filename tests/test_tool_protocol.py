@@ -27,6 +27,13 @@ from harness import (
     encode_frame,
 )
 
+_WRITE_TERMINAL_PHASES = {
+    "write_completed",
+    "write_timed_out",
+    "write_failed",
+    "write_cancelled",
+}
+
 
 @contextmanager
 def connected_serial_peer():
@@ -135,6 +142,22 @@ def host_request(request_id: int, name: str, arguments: tuple[bytes, ...]) -> by
     return encode_frame(Frame(0x0003, request_id, bytes(payload)))
 
 
+def write_terminal_phases(
+    events: list[tuple[str, dict[str, object]]],
+    *,
+    request_id: int,
+    write_kind: str,
+) -> list[str]:
+    return [
+        str(data["phase"])
+        for event, data in events
+        if event == "serial_protocol_write"
+        and data["request_id"] == request_id
+        and data["write_kind"] == write_kind
+        and data["phase"] in _WRITE_TERMINAL_PHASES
+    ]
+
+
 class ToolProtocolIntegrationTest(unittest.TestCase):
     def test_large_host_response_is_duplex_pumped_and_dispatcher_remains_usable(
         self,
@@ -213,6 +236,14 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             self.assertEqual(host_write_phases[0], "write_started")
             self.assertIn("write_progress", host_write_phases)
             self.assertEqual(host_write_phases[-1], "write_completed")
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=71,
+                    write_kind="host_response",
+                ),
+                ["write_completed"],
+            )
             self.assertTrue(
                 any(
                     event == "serial_host_service_response_prepared"
@@ -262,6 +293,7 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
 
     def test_non_reading_peer_fails_boundedly_and_close_stops_reader(self) -> None:
         payload = b"x" * (1024 * 1024)
+        events = []
 
         class HostService:
             def handle_request(self, request):
@@ -278,6 +310,9 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             protocol = SerialProtocolDispatcher(
                 serial,
                 exchange_host_services=HostService(),
+                event_recorder=lambda event, data: events.append(
+                    (event, dict(data))
+                ),
             )
             protocol.start_ready()
             result = pool.submit(ToolClient(protocol).invoke_tool, "read", [])
@@ -287,9 +322,18 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
                 result.result(2)
             protocol.close()
             self.assertFalse(protocol.reader_alive)
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=74,
+                    write_kind="host_response",
+                ),
+                ["write_timed_out"],
+            )
 
     def test_close_interrupts_large_host_response_without_deadlock(self) -> None:
         payload = b"y" * (1024 * 1024)
+        events = []
 
         class HostService:
             def handle_request(self, request):
@@ -302,6 +346,9 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             protocol = SerialProtocolDispatcher(
                 serial,
                 exchange_host_services=HostService(),
+                event_recorder=lambda event, data: events.append(
+                    (event, dict(data))
+                ),
             )
             protocol.start_ready()
             result = pool.submit(ToolClient(protocol).invoke_tool, "read", [])
@@ -312,6 +359,46 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
             with self.assertRaisesRegex(SerialError, "closed"):
                 result.result(2)
             self.assertFalse(protocol.reader_alive)
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=75,
+                    write_kind="host_response",
+                ),
+                ["write_cancelled"],
+            )
+
+    def test_generic_write_failure_emits_one_terminal_phase(self) -> None:
+        events = []
+
+        class FailingSerial:
+            def pump(self, _max_read_bytes, outgoing, _timeout_seconds):
+                if outgoing:
+                    raise SerialError("synthetic write failure")
+                return None, 0
+
+            def close(self):
+                pass
+
+        protocol = SerialProtocolDispatcher(
+            FailingSerial(),
+            event_recorder=lambda event, data: events.append((event, dict(data))),
+        )
+        protocol.start_ready()
+        try:
+            with self.assertRaisesRegex(SerialError, "synthetic write failure"):
+                ToolClient(protocol).list_tools()
+        finally:
+            protocol.close()
+        self.assertFalse(protocol.reader_alive)
+        self.assertEqual(
+            write_terminal_phases(
+                events,
+                request_id=1,
+                write_kind="tool_request",
+            ),
+            ["write_failed"],
+        )
 
     def test_list_tools_decodes_utf8_names(self) -> None:
         names = ["list", "café", "工具"]

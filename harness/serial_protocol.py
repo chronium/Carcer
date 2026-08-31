@@ -38,6 +38,7 @@ class _QueuedWrite:
     next_progress: int = _WRITE_PROGRESS_BYTES
     stall_deadline: float | None = None
     complete: bool = False
+    terminal_phase: str | None = None
 
 
 class SerialProtocolDispatcher:
@@ -159,7 +160,7 @@ class SerialProtocolDispatcher:
             else:
                 self._closing = True
                 if self._writes:
-                    self._record_write_event(
+                    self._record_write_terminal(
                         self._writes[0],
                         "write_cancelled",
                     )
@@ -406,20 +407,20 @@ class SerialProtocolDispatcher:
                         self._record_write_event(queued, "write_progress")
                         queued.next_progress += _WRITE_PROGRESS_BYTES
             elif queued.stall_deadline is not None and now >= queued.stall_deadline:
-                self._record_write_event(queued, "write_timed_out")
+                self._record_write_terminal(queued, "write_timed_out")
                 raise TimeoutError("timed out writing serial protocol frame")
             if queued.offset != len(queued.data):
                 return
             self._writes.popleft()
             queued.complete = True
-            self._record_write_event(queued, "write_completed")
+            self._record_write_terminal(queued, "write_completed")
             if queued.kind == "host_response":
                 self._finish_host_service_locked()
             self._condition.notify_all()
 
     def _fail_active_write_locked(self, error: BaseException) -> None:
         if self._writes:
-            self._record_write_event(
+            self._record_write_terminal(
                 self._writes[0],
                 "write_failed",
                 error=type(error).__name__,
@@ -455,6 +456,18 @@ class SerialProtocolDispatcher:
         if error is not None:
             data["error"] = error
         self._record("serial_protocol_write", data)
+
+    def _record_write_terminal(
+        self,
+        queued: _QueuedWrite,
+        phase: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        if queued.terminal_phase is not None:
+            return
+        queued.terminal_phase = phase
+        self._record_write_event(queued, phase, error=error)
 
     def _record(self, event: str, data: Mapping[str, object]) -> None:
         recorder = self._event_recorder
