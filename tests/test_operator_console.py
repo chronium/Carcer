@@ -26,6 +26,7 @@ from harness import (
 from harness.operator_console import OperatorConsole, main
 from harness.codex_generation_worker import CodexGenerationSessionMode
 from tests.test_codex_generation_worker import (
+    _GUEST_TOOLS,
     _assert_process_dead,
     _fake_codex,
     _wait_for,
@@ -1729,6 +1730,7 @@ class _ObservedInput:
 def _mock_runtime(run_directory: Path, state: RuntimeState) -> Mock:
     runtime = Mock(spec=CodexOSRun)
     runtime.feature_requests.return_value = ()
+    runtime.list_tools.return_value = list(_GUEST_TOOLS)
     runtime.run_directory = run_directory
     runtime.state = state
     runtime.generation_number = 0

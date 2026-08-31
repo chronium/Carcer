@@ -79,6 +79,15 @@ engineering state. Knowledge needed by later generations must be persisted there
 or placed deliberately in the generation handoff; Codex conversation history is
 not carried across generations.
 
+At the start of each fresh implementor session, the harness queries the live
+guest's canonical development-tool list and exposes the intersection with its
+trusted schema and bridge registry. Trusted Codex-side tools such as
+`list_requests` and the separate reviewer remain independent of guest
+advertisement. The namespace is fixed for that implementor thread: a recognized
+tool added by generation N becomes available to the fresh generation N+1 session,
+but need not appear in generation N's already-running session. Unknown advertised
+names do not acquire schemas or trusted bridge behavior.
+
 The implementor requests `gpt-5.6-sol` with high reasoning, automatic reasoning
 summaries, and Codex Fast mode. The reviewer independently requests
 `gpt-5.6-luna` with high reasoning, automatic reasoning summaries, and Fast mode.
