@@ -19,6 +19,7 @@ from harness import (
     CandidateBootValidator,
     CodexOSHostServices,
     CodexOSRun,
+    ExperimentObservability,
     Frame,
     GenerationGitRecorder,
     HostServiceRequest,
@@ -154,6 +155,19 @@ class ProvidedAssetDerivationTests(unittest.TestCase):
 
 
 class ProvidedAssetProvenanceTests(unittest.TestCase):
+    def test_run_without_provided_assets_records_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "run"
+
+            self.assertIsNone(
+                configure_provided_assets(
+                    run,
+                    None,
+                    effective_generation=0,
+                )
+            )
+            self.assertFalse((run / PROVIDED_ASSETS_MANIFEST).exists())
+
     def test_freezes_bytes_and_writes_metadata_without_path_or_contents(self) -> None:
         marker = b"PROVIDED-ASSET-PRIVATE-MARKER-811"
         with tempfile.TemporaryDirectory() as temporary:
@@ -162,15 +176,23 @@ class ProvidedAssetProvenanceTests(unittest.TestCase):
             supplied = root / "external-one"
             source = _asset_file(supplied, "alpha", "payload.bin", marker)
 
-            snapshot = configure_provided_assets(run, supplied)
+            snapshot = configure_provided_assets(
+                run, supplied, effective_generation=0
+            )
             self.assertIsNotNone(snapshot)
             manifest = run / PROVIDED_ASSETS_MANIFEST
             encoded = manifest.read_bytes()
             self.assertNotIn(marker, encoded)
             self.assertNotIn(str(supplied).encode(), encoded)
             value = json.loads(encoded.decode("utf-8"))
-            self.assertEqual(value["schema_version"], 1)
-            self.assertEqual(value["assets"][0]["size"], len(marker))
+            self.assertEqual(value["schema_version"], 2)
+            self.assertEqual(len(value["revisions"]), 1)
+            revision = value["revisions"][0]
+            self.assertEqual(revision["revision"], 1)
+            self.assertEqual(revision["effective_generation"], 0)
+            self.assertEqual(revision["assets"][0]["size"], len(marker))
+            self.assertEqual(snapshot.provenance.revision, 1)
+            self.assertEqual(snapshot.provenance.introduced_asset_count, 1)
             self.assertEqual(
                 [path.name for path in run.iterdir()],
                 [PROVIDED_ASSETS_MANIFEST],
@@ -182,7 +204,9 @@ class ProvidedAssetProvenanceTests(unittest.TestCase):
             )
             self.assertEqual(_response(response.payload), (0, marker))
 
-    def test_reopen_requires_an_identical_explicit_set_but_not_same_path(self) -> None:
+    def test_identical_reopen_is_idempotent_but_still_requires_explicit_set(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             run = root / "run"
@@ -190,20 +214,190 @@ class ProvidedAssetProvenanceTests(unittest.TestCase):
             second = root / "second"
             _asset_file(first, "alpha", "data.bin", b"same bytes")
             _asset_file(second, "alpha", "data.bin", b"same bytes")
-            configure_provided_assets(run, first)
+            configure_provided_assets(run, first, effective_generation=0)
+            manifest = run / PROVIDED_ASSETS_MANIFEST
+            before = manifest.read_bytes()
 
-            reopened = configure_provided_assets(run, second)
+            reopened = configure_provided_assets(
+                run, second, effective_generation=1
+            )
             self.assertEqual(reopened.assets[0].data, b"same bytes")
+            self.assertFalse(reopened.provenance.created)
+            self.assertEqual(reopened.provenance.revision, 1)
+            self.assertEqual(manifest.read_bytes(), before)
             with self.assertRaisesRegex(ProvidedAssetsError, "required"):
-                configure_provided_assets(run, None)
+                configure_provided_assets(run, None, effective_generation=1)
 
             (second / "alpha" / "data.bin").write_bytes(b"changed")
-            with self.assertRaisesRegex(ProvidedAssetsError, "does not match"):
-                configure_provided_assets(run, second)
-            (second / "alpha" / "data.bin").write_bytes(b"same bytes")
-            _asset_file(second, "beta", "other", b"new")
-            with self.assertRaisesRegex(ProvidedAssetsError, "does not match"):
-                configure_provided_assets(run, second)
+            with self.assertRaisesRegex(ProvidedAssetsError, "changed"):
+                configure_provided_assets(run, second, effective_generation=1)
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_legacy_six_asset_manifest_accepts_two_append_only_additions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            original = root / "original"
+            expanded = root / "expanded"
+            for index in range(6):
+                asset_id = f"asset-{index}"
+                data = f"original-{index}".encode()
+                _asset_file(original, asset_id, f"file-{index}.bin", data)
+                _asset_file(expanded, asset_id, f"file-{index}.bin", data)
+            _asset_file(expanded, "asset-6", "new-6.bin", b"new six")
+            _asset_file(expanded, "asset-7", "new-7.bin", b"new seven")
+            legacy = _write_legacy_manifest(run, original)
+
+            configured = configure_provided_assets(
+                run,
+                expanded,
+                effective_generation=12,
+            )
+
+            self.assertEqual(len(configured.assets), 8)
+            self.assertEqual(configured.provenance.revision, 2)
+            self.assertEqual(configured.provenance.effective_generation, 12)
+            self.assertEqual(configured.provenance.introduced_asset_count, 2)
+            manifest = run / PROVIDED_ASSETS_MANIFEST
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(value["schema_version"], 2)
+            self.assertEqual(len(value["revisions"]), 2)
+            self.assertIsNone(value["revisions"][0]["effective_generation"])
+            self.assertEqual(value["revisions"][0]["assets"], legacy["assets"])
+            self.assertEqual(value["revisions"][1]["effective_generation"], 12)
+            self.assertEqual(
+                [item["id"] for item in value["revisions"][1]["assets"]],
+                [f"asset-{index}" for index in range(8)],
+            )
+
+            after_expansion = manifest.read_bytes()
+            identical = configure_provided_assets(
+                run,
+                expanded,
+                effective_generation=12,
+            )
+            self.assertFalse(identical.provenance.created)
+            self.assertEqual(manifest.read_bytes(), after_expansion)
+
+            _asset_file(expanded, "asset-8", "new-8.bin", b"new eight")
+            later = configure_provided_assets(
+                run,
+                expanded,
+                effective_generation=13,
+            )
+            self.assertEqual(later.provenance.revision, 3)
+            self.assertEqual(later.provenance.introduced_asset_count, 1)
+            revisions = json.loads(manifest.read_text())["revisions"]
+            self.assertEqual([item["revision"] for item in revisions], [1, 2, 3])
+            self.assertEqual(revisions[0]["assets"], legacy["assets"])
+            self.assertEqual(
+                revisions[1]["assets"],
+                value["revisions"][1]["assets"],
+            )
+
+    def test_identical_legacy_manifest_reopens_without_inventing_old_timing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            supplied = root / "supplied"
+            _asset_file(supplied, "alpha", "data.bin", b"unchanged")
+            legacy = _write_legacy_manifest(run, supplied)
+
+            configured = configure_provided_assets(
+                run,
+                supplied,
+                effective_generation=11,
+            )
+
+            self.assertEqual(configured.provenance.revision, 2)
+            self.assertEqual(configured.provenance.introduced_asset_count, 0)
+            value = json.loads(
+                (run / PROVIDED_ASSETS_MANIFEST).read_text(encoding="utf-8")
+            )
+            self.assertEqual(value["revisions"][0]["assets"], legacy["assets"])
+            self.assertIsNone(value["revisions"][0]["effective_generation"])
+            self.assertEqual(value["revisions"][1]["effective_generation"], 11)
+            self.assertEqual(value["revisions"][1]["assets"], legacy["assets"])
+
+    def test_existing_asset_identity_cannot_be_removed_or_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            supplied = root / "supplied"
+            _asset_file(supplied, "alpha", "alpha.bin", b"same-size-a")
+            _asset_file(supplied, "beta", "beta.bin", b"beta")
+            configure_provided_assets(run, supplied, effective_generation=0)
+            manifest = run / PROVIDED_ASSETS_MANIFEST
+            expected = manifest.read_bytes()
+
+            removed = root / "removed"
+            _asset_file(removed, "alpha", "alpha.bin", b"same-size-a")
+            changed = root / "changed"
+            _asset_file(changed, "alpha", "alpha.bin", b"same-size-b")
+            _asset_file(changed, "beta", "beta.bin", b"beta")
+            renamed = root / "renamed"
+            _asset_file(renamed, "alpha", "renamed.bin", b"same-size-a")
+            _asset_file(renamed, "beta", "beta.bin", b"beta")
+            represented = root / "represented"
+            (represented / "alpha" / "nested").mkdir(parents=True)
+            (represented / "alpha" / "nested" / "alpha.bin").write_bytes(
+                b"same-size-a"
+            )
+            _asset_file(represented, "beta", "beta.bin", b"beta")
+
+            for label, candidate, message in (
+                ("removed", removed, "omits"),
+                ("same-size replacement", changed, "changed"),
+                ("renamed", renamed, "changed"),
+                ("derived representation", represented, "changed"),
+            ):
+                with self.subTest(label=label), self.assertRaisesRegex(
+                    ProvidedAssetsError,
+                    message,
+                ):
+                    configure_provided_assets(
+                        run,
+                        candidate,
+                        effective_generation=1,
+                    )
+                self.assertEqual(manifest.read_bytes(), expected)
+
+    def test_failed_revision_write_leaves_previous_provenance_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            supplied = root / "supplied"
+            _asset_file(supplied, "alpha", "alpha.bin", b"alpha")
+            configure_provided_assets(run, supplied, effective_generation=0)
+            manifest = run / PROVIDED_ASSETS_MANIFEST
+            before = manifest.read_bytes()
+            _asset_file(supplied, "beta", "beta.bin", b"beta")
+
+            with patch(
+                "harness.provided_assets.os.replace",
+                side_effect=OSError("synthetic atomic replace failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProvidedAssetsError,
+                    "could not persist",
+                ):
+                    configure_provided_assets(
+                        run,
+                        supplied,
+                        effective_generation=1,
+                    )
+
+            self.assertEqual(manifest.read_bytes(), before)
+            recovered = configure_provided_assets(
+                run,
+                supplied,
+                effective_generation=1,
+            )
+            self.assertEqual(recovered.provenance.revision, 2)
 
     def test_existing_gate_initialization_does_not_mutate_archive(self) -> None:
         marker = b"ASSET-MUST-NOT-ENTER-ARCHIVE-971"
@@ -235,6 +429,64 @@ class ProvidedAssetProvenanceTests(unittest.TestCase):
             runtime.stop()
             with self.assertRaisesRegex(ProvidedAssetsError, "required"):
                 CodexOSRun(run).reopen_at_gate()
+
+    def test_gate_reopen_accepts_expansion_without_rewriting_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "run"
+            _archive_completed(
+                run,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"archived source\n")],
+            )
+            original = root / "original"
+            supplied = root / "supplied"
+            _asset_file(original, "alpha", "alpha.bin", b"alpha")
+            _asset_file(supplied, "alpha", "alpha.bin", b"alpha")
+            _asset_file(supplied, "beta", "beta.bin", b"beta")
+            _write_legacy_manifest(run, original)
+            archive_before = _tree_bytes(run / "generation-0000")
+            observability = ExperimentObservability(run)
+
+            runtime = CodexOSRun(
+                run,
+                hardware_profile=TEST_HARDWARE_PROFILE,
+                observability=observability,
+                provided_assets_directory=supplied,
+            )
+            runtime.reopen_at_gate()
+
+            self.assertEqual(
+                [asset.id for asset in runtime._provided_assets.assets],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(runtime._provided_assets.provenance.revision, 2)
+            self.assertEqual(
+                runtime._provided_assets.provenance.effective_generation,
+                1,
+            )
+            self.assertEqual(
+                _tree_bytes(run / "generation-0000"),
+                archive_before,
+            )
+            runtime.stop()
+            observability.close()
+            events = [
+                json.loads(line)
+                for line in (run / "events.jsonl").read_text().splitlines()
+            ]
+            accepted = next(
+                event
+                for event in events
+                if event["event"] == "provided_assets_revision_accepted"
+            )
+            self.assertEqual(accepted["generation"], 1)
+            self.assertEqual(
+                accepted["data"],
+                {"asset_count": 2, "new_asset_count": 1, "revision": 2},
+            )
 
     def test_invalid_gate_does_not_initialize_new_asset_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -447,14 +699,21 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
     def test_runtime_wires_one_snapshot_to_active_and_candidate_services(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            run = root / "run"
+            original = root / "original"
             supplied = root / "supplied"
+            _asset_file(original, "alpha", "data", b"shared frozen bytes")
             _asset_file(supplied, "alpha", "data", b"shared frozen bytes")
+            _asset_file(supplied, "beta", "data", b"new frozen bytes")
+            _write_legacy_manifest(run, original)
             image = root / "initial.iso"
             image.write_bytes(b"test image")
+            observability = Mock(spec=ExperimentObservability)
             runtime = CodexOSRun(
-                root / "run",
+                run,
                 "test-qemu",
                 hardware_profile=TEST_HARDWARE_PROFILE,
+                observability=observability,
                 provided_assets_directory=supplied,
             )
             controller = Mock()
@@ -477,6 +736,10 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                 active = runtime._host_services
                 self.assertIsNotNone(active)
                 frozen = runtime._provided_assets
+                self.assertEqual(
+                    [asset.id for asset in frozen.assets],
+                    ["alpha", "beta"],
+                )
                 self.assertIs(active._provided_assets, frozen)
                 self.assertIs(
                     active._build_service._candidate_validator._provided_assets,
@@ -487,6 +750,19 @@ class ProvidedAssetHostServiceTests(unittest.TestCase):
                 self.assertIs(protocol._startup_host_services, frozen)
                 self.assertIs(protocol._background_host_services, frozen)
                 self.assertIs(protocol._exchange_host_services, active)
+                generation_started = next(
+                    call
+                    for call in observability.record.call_args_list
+                    if call.args[0] == "generation_started"
+                )
+                self.assertEqual(
+                    generation_started.args[2]["provided_assets_revision"],
+                    2,
+                )
+                self.assertEqual(
+                    generation_started.args[2]["provided_assets_count"],
+                    2,
+                )
                 runtime.stop()
 
 
@@ -583,6 +859,19 @@ def _asset_file(root: Path, asset_id: str, filename: str, data: bytes) -> Path:
     path = directory / filename
     path.write_bytes(data)
     return path
+
+
+def _write_legacy_manifest(
+    run: Path,
+    supplied: Path,
+) -> dict[str, object]:
+    run.mkdir(parents=True, exist_ok=True)
+    value = ProvidedAssets.from_directory(supplied).manifest_object()
+    (run / PROVIDED_ASSETS_MANIFEST).write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return value
 
 
 def _nested_symlink(root: Path) -> None:

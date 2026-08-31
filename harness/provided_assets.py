@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict, cast
 
 from .framing import Frame
 from .host_service_protocol import HostServiceRequest, create_host_service_response
@@ -21,14 +22,38 @@ MAX_PROVIDED_ASSET_ID_BYTES = 64
 MAX_PROVIDED_ASSET_FILENAME_BYTES = 255
 MAX_PROVIDED_ASSET_READ_BYTES = 1024 * 1024
 
-_MANIFEST_SCHEMA_VERSION = 1
+_LEGACY_MANIFEST_SCHEMA_VERSION = 1
+_MANIFEST_SCHEMA_VERSION = 2
 _MAX_DIAGNOSTIC_BYTES = 1024
 _MAX_UINT64 = (1 << 64) - 1
 _ASSET_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
 
+class _AssetMetadata(TypedDict):
+    filename: str
+    id: str
+    sha256: str
+    size: int
+
+
+class _AssetRevision(TypedDict):
+    revision: int
+    effective_generation: int | None
+    assets: list[_AssetMetadata]
+
+
 class ProvidedAssetsError(RuntimeError):
     """Provided-asset input or persisted provenance is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProvidedAssetsProvenance:
+    """The run-level revision represented by one frozen asset snapshot."""
+
+    revision: int
+    effective_generation: int
+    introduced_asset_count: int
+    created: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +71,18 @@ class ProvidedAsset:
 class ProvidedAssets:
     """One completely frozen set of opaque named assets."""
 
-    def __init__(self, assets: tuple[ProvidedAsset, ...]) -> None:
+    def __init__(
+        self,
+        assets: tuple[ProvidedAsset, ...],
+        *,
+        provenance: ProvidedAssetsProvenance | None = None,
+    ) -> None:
         ordered = tuple(sorted(assets, key=lambda asset: asset.id))
         if len({asset.id for asset in ordered}) != len(ordered):
             raise ProvidedAssetsError("provided asset IDs are not unique")
         self._assets = ordered
         self._by_id = {asset.id: asset for asset in ordered}
+        self._provenance = provenance
 
     @classmethod
     def from_directory(cls, directory: str | Path) -> ProvidedAssets:
@@ -102,18 +133,14 @@ class ProvidedAssets:
     def assets(self) -> tuple[ProvidedAsset, ...]:
         return self._assets
 
+    @property
+    def provenance(self) -> ProvidedAssetsProvenance | None:
+        return self._provenance
+
     def manifest_object(self) -> dict[str, object]:
         return {
-            "schema_version": _MANIFEST_SCHEMA_VERSION,
-            "assets": [
-                {
-                    "filename": asset.filename,
-                    "id": asset.id,
-                    "sha256": asset.sha256,
-                    "size": asset.size,
-                }
-                for asset in self._assets
-            ],
+            "schema_version": _LEGACY_MANIFEST_SCHEMA_VERSION,
+            "assets": _asset_metadata(self._assets),
         }
 
     def descriptor_bytes(self) -> bytes:
@@ -187,8 +214,13 @@ class ProvidedAssets:
 def configure_provided_assets(
     run_directory: str | Path,
     external_directory: str | Path | None,
+    *,
+    effective_generation: int,
 ) -> ProvidedAssets | None:
-    """Freeze and verify one run's explicitly supplied asset set."""
+    """Freeze and append one run's explicitly supplied asset-set provenance."""
+
+    if type(effective_generation) is not int or effective_generation < 0:
+        raise ValueError("effective generation must be a non-negative integer")
 
     run = Path(run_directory).resolve()
     manifest_path = run / PROVIDED_ASSETS_MANIFEST
@@ -202,15 +234,83 @@ def configure_provided_assets(
     snapshot = ProvidedAssets.from_directory(external_directory)
     if manifest_path.exists() or manifest_path.is_symlink():
         recorded = _read_manifest(manifest_path)
-        expected = snapshot.manifest_object()
-        if recorded != expected:
-            raise ProvidedAssetsError(
-                "supplied provided-assets set does not match run provenance"
+        revisions = _manifest_revisions(recorded)
+        previous_assets = revisions[-1]["assets"]
+        introduced = _validate_append_only(previous_assets, snapshot)
+        if (
+            recorded["schema_version"] == _MANIFEST_SCHEMA_VERSION
+            and not introduced
+        ):
+            latest = revisions[-1]
+            latest_generation = latest["effective_generation"]
+            if latest_generation is None:
+                raise ProvidedAssetsError(
+                    "provided-assets provenance has no current activation"
+                )
+            return ProvidedAssets(
+                snapshot.assets,
+                provenance=ProvidedAssetsProvenance(
+                    revision=latest["revision"],
+                    effective_generation=latest_generation,
+                    introduced_asset_count=0,
+                    created=False,
+                ),
             )
-        return snapshot
 
-    _write_manifest_once(manifest_path, snapshot.manifest_object())
-    return snapshot
+        if recorded["schema_version"] == _LEGACY_MANIFEST_SCHEMA_VERSION:
+            revisions = [
+                {
+                    "revision": 1,
+                    "effective_generation": None,
+                    "assets": cast(list[_AssetMetadata], recorded["assets"]),
+                }
+            ]
+        latest_generation = revisions[-1]["effective_generation"]
+        if (
+            latest_generation is not None
+            and effective_generation < latest_generation
+        ):
+            raise ProvidedAssetsError(
+                "provided-assets revision cannot precede its current activation"
+            )
+        revision_number = revisions[-1]["revision"] + 1
+        revision = _revision_object(
+            revision_number,
+            effective_generation,
+            snapshot,
+        )
+        updated = {
+            "schema_version": _MANIFEST_SCHEMA_VERSION,
+            "revisions": [*revisions, revision],
+        }
+        _replace_manifest_atomically(manifest_path, updated, recorded)
+        return ProvidedAssets(
+            snapshot.assets,
+            provenance=ProvidedAssetsProvenance(
+                revision=revision_number,
+                effective_generation=effective_generation,
+                introduced_asset_count=len(introduced),
+                created=True,
+            ),
+        )
+
+    revision = _revision_object(1, effective_generation, snapshot)
+    _write_manifest_once(
+        manifest_path,
+        {
+            "schema_version": _MANIFEST_SCHEMA_VERSION,
+            "revisions": [revision],
+        },
+    )
+    return ProvidedAssets(
+        snapshot.assets,
+        provenance=ProvidedAssetsProvenance(
+            revision=1,
+            effective_generation=effective_generation,
+            introduced_asset_count=len(snapshot.assets),
+            created=True,
+        ),
+    )
 
 
 def _derive_asset(directory: Path, asset_id: str) -> tuple[str, bytes]:
@@ -370,16 +470,77 @@ def _read_manifest(path: Path) -> dict[str, object]:
 
 
 def _validate_manifest(value: object) -> None:
-    if not isinstance(value, dict) or set(value) != {"schema_version", "assets"}:
+    if not isinstance(value, dict) or "schema_version" not in value:
         raise ProvidedAssetsError("provided-assets provenance has invalid fields")
-    if (
-        type(value["schema_version"]) is not int
-        or value["schema_version"] != _MANIFEST_SCHEMA_VERSION
-    ):
+    schema_version = value["schema_version"]
+    if type(schema_version) is not int or schema_version not in {
+        _LEGACY_MANIFEST_SCHEMA_VERSION,
+        _MANIFEST_SCHEMA_VERSION,
+    }:
         raise ProvidedAssetsError(
             "provided-assets provenance has an unsupported schema"
         )
-    assets = value["assets"]
+    if schema_version == _LEGACY_MANIFEST_SCHEMA_VERSION:
+        if set(value) != {"schema_version", "assets"}:
+            raise ProvidedAssetsError(
+                "provided-assets provenance has invalid fields"
+            )
+        _validate_asset_metadata(value["assets"])
+        return
+
+    if set(value) != {"schema_version", "revisions"}:
+        raise ProvidedAssetsError("provided-assets provenance has invalid fields")
+    revisions = value["revisions"]
+    if not isinstance(revisions, list) or not revisions:
+        raise ProvidedAssetsError("provided-assets provenance has invalid revisions")
+    previous: list[_AssetMetadata] | None = None
+    previous_generation: int | None = None
+    previous_effective_generation: int | None = None
+    for index, item in enumerate(revisions, 1):
+        if not isinstance(item, dict) or set(item) != {
+            "assets",
+            "effective_generation",
+            "revision",
+        }:
+            raise ProvidedAssetsError(
+                "provided-assets provenance has invalid revision fields"
+            )
+        if type(item["revision"]) is not int or item["revision"] != index:
+            raise ProvidedAssetsError(
+                "provided-assets provenance revisions are not contiguous"
+            )
+        effective_generation = item["effective_generation"]
+        if effective_generation is None:
+            if index != 1 or len(revisions) == 1:
+                raise ProvidedAssetsError(
+                    "provided-assets provenance has invalid activation"
+                )
+        elif type(effective_generation) is not int or effective_generation < 0:
+            raise ProvidedAssetsError(
+                "provided-assets provenance has invalid activation"
+            )
+        elif (
+            previous_generation is not None
+            and effective_generation < previous_generation
+        ):
+            raise ProvidedAssetsError(
+                "provided-assets provenance activation is not ordered"
+            )
+        if effective_generation is not None:
+            previous_generation = effective_generation
+        _validate_asset_metadata(item["assets"])
+        assets = cast(list[_AssetMetadata], item["assets"])
+        if previous is not None:
+            introduced = _validate_metadata_append_only(previous, assets)
+            if not introduced and previous_effective_generation is not None:
+                raise ProvidedAssetsError(
+                    "provided-assets provenance contains a duplicate revision"
+                )
+        previous = assets
+        previous_effective_generation = effective_generation
+
+
+def _validate_asset_metadata(assets: object) -> None:
     if not isinstance(assets, list):
         raise ProvidedAssetsError("provided-assets provenance has invalid assets")
     previous_id: str | None = None
@@ -414,10 +575,76 @@ def _validate_manifest(value: object) -> None:
             raise ProvidedAssetsError("provided-assets provenance has invalid SHA-256")
 
 
+def _manifest_revisions(recorded: dict[str, object]) -> list[_AssetRevision]:
+    if recorded["schema_version"] == _LEGACY_MANIFEST_SCHEMA_VERSION:
+        return [
+            {
+                "revision": 1,
+                "effective_generation": None,
+                "assets": cast(list[_AssetMetadata], recorded["assets"]),
+            }
+        ]
+    return cast(list[_AssetRevision], recorded["revisions"])
+
+
+def _asset_metadata(assets: tuple[ProvidedAsset, ...]) -> list[_AssetMetadata]:
+    return [
+        {
+            "filename": asset.filename,
+            "id": asset.id,
+            "sha256": asset.sha256,
+            "size": asset.size,
+        }
+        for asset in assets
+    ]
+
+
+def _revision_object(
+    revision: int,
+    effective_generation: int,
+    snapshot: ProvidedAssets,
+) -> _AssetRevision:
+    return {
+        "revision": revision,
+        "effective_generation": effective_generation,
+        "assets": _asset_metadata(snapshot.assets),
+    }
+
+
+def _validate_append_only(
+    previous: list[_AssetMetadata],
+    snapshot: ProvidedAssets,
+) -> list[_AssetMetadata]:
+    return _validate_metadata_append_only(
+        previous,
+        _asset_metadata(snapshot.assets),
+    )
+
+
+def _validate_metadata_append_only(
+    previous: list[_AssetMetadata],
+    current: list[_AssetMetadata],
+) -> list[_AssetMetadata]:
+    current_by_id = {item["id"]: item for item in current}
+    previous_ids = {item["id"] for item in previous}
+    for recorded in previous:
+        supplied = current_by_id.get(recorded["id"])
+        if supplied is None:
+            raise ProvidedAssetsError(
+                "supplied provided-assets set omits previously introduced asset "
+                + repr(recorded["id"])
+            )
+        if supplied != recorded:
+            raise ProvidedAssetsError(
+                "supplied provided asset changed after introduction: "
+                + repr(recorded["id"])
+            )
+    return [item for item in current if item["id"] not in previous_ids]
+
+
 def _write_manifest_once(path: Path, value: dict[str, object]) -> None:
-    encoded = (
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    _validate_manifest(value)
+    encoded = _encode_manifest(value)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -447,6 +674,47 @@ def _write_manifest_once(path: Path, value: dict[str, object]) -> None:
         raise ProvidedAssetsError(
             f"could not persist provided-assets provenance: {error}"
         ) from error
+
+
+def _replace_manifest_atomically(
+    path: Path,
+    value: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    _validate_manifest(value)
+    encoded = _encode_manifest(value)
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        if _read_manifest(path) != expected:
+            raise ProvidedAssetsError(
+                "provided-assets provenance changed during configuration"
+            )
+        os.replace(temporary, path)
+        temporary = None
+    except ProvidedAssetsError:
+        raise
+    except OSError as error:
+        raise ProvidedAssetsError(
+            f"could not persist provided-assets provenance: {error}"
+        ) from error
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _encode_manifest(value: dict[str, object]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
 
 
 def _response(request: HostServiceRequest, status: int, output: bytes) -> Frame:

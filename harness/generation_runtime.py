@@ -206,7 +206,7 @@ class CodexOSRun:
         image = Path(initial_iso).resolve()
         if not image.is_file():
             raise FileNotFoundError(image)
-        self._configure_provided_assets()
+        self._configure_provided_assets(0)
         self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
         self._state = RuntimeState.RUNNING
@@ -235,8 +235,8 @@ class CodexOSRun:
         if not archives:
             raise RuntimeError("run has no archived generation gate")
         self._validate_archived_history(archives)
-        self._configure_provided_assets()
         latest = archives[-1]
+        self._configure_provided_assets(latest.generation + 1)
         pending: PendingGenerationFinish | None = None
         previous_handoff: str | None = None
         if latest.outcome == "completed":
@@ -675,14 +675,30 @@ class CodexOSRun:
             self._cleanup_workspace()
             raise
 
-    def _configure_provided_assets(self) -> None:
+    def _configure_provided_assets(self, effective_generation: int) -> None:
         if self._provided_assets_configured:
             return
         self._provided_assets = configure_provided_assets(
             self._run_directory,
             self._provided_assets_directory,
+            effective_generation=effective_generation,
         )
         self._provided_assets_configured = True
+        provenance = (
+            self._provided_assets.provenance
+            if self._provided_assets is not None
+            else None
+        )
+        if provenance is not None and provenance.created:
+            self._record(
+                "provided_assets_revision_accepted",
+                effective_generation,
+                {
+                    "revision": provenance.revision,
+                    "new_asset_count": provenance.introduced_asset_count,
+                    "asset_count": len(self._provided_assets.assets),
+                },
+            )
 
     def _finish_if_requested(self) -> None:
         if self._host_services is None:
@@ -896,17 +912,23 @@ class CodexOSRun:
         self._current_hardware = None
 
     def _record_generation_started(self) -> None:
+        data: dict[str, object] = {
+            "transition": self._current_transition,
+            "parent_generation": self._current_parent_generation,
+            "qemu_pid": self.active_pid,
+            "hardware_profile": self._hardware_profile.profile,
+            "vcpus": self._hardware_profile.vcpus,
+            "memory_mib": self._hardware_profile.memory_mib,
+        }
+        if self._provided_assets is not None:
+            provenance = self._provided_assets.provenance
+            if provenance is not None:
+                data["provided_assets_revision"] = provenance.revision
+                data["provided_assets_count"] = len(self._provided_assets.assets)
         self._record(
             "generation_started",
             self._generation_number,
-            {
-                "transition": self._current_transition,
-                "parent_generation": self._current_parent_generation,
-                "qemu_pid": self.active_pid,
-                "hardware_profile": self._hardware_profile.profile,
-                "vcpus": self._hardware_profile.vcpus,
-                "memory_mib": self._hardware_profile.memory_mib,
-            },
+            data,
         )
 
     def _record_generation_outcome(
