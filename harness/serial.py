@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import select
 import socket
 import time
 from os import PathLike
@@ -73,6 +74,51 @@ class SerialConnection:
             self.close()
             raise SerialError("serial connection closed")
         return data
+
+    def pump(
+        self,
+        max_read_bytes: int,
+        outgoing: memoryview | None,
+        timeout_seconds: float,
+    ) -> tuple[bytes | None, int]:
+        """Perform one bounded duplex I/O opportunity on the serial socket."""
+        if max_read_bytes <= 0:
+            raise ValueError("max_read_bytes must be positive")
+        if timeout_seconds < 0:
+            raise ValueError("serial pump timeout must not be negative")
+
+        connection = self._require_socket()
+        write_sockets = [connection] if outgoing else []
+        try:
+            readable, writable, _ = select.select(
+                [connection],
+                write_sockets,
+                [],
+                timeout_seconds,
+            )
+            incoming: bytes | None = None
+            if readable:
+                try:
+                    incoming = connection.recv(max_read_bytes, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    incoming = None
+                if incoming == b"":
+                    self.close()
+                    raise SerialError("serial connection closed")
+
+            sent = 0
+            if writable and outgoing:
+                try:
+                    sent = connection.send(outgoing, socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    sent = 0
+                if sent == 0:
+                    self.close()
+                    raise SerialError("serial connection closed")
+            return incoming, sent
+        except (ConnectionError, OSError, ValueError) as error:
+            self.close()
+            raise SerialError("serial connection closed") from error
 
     def close(self) -> None:
         connection = self._socket

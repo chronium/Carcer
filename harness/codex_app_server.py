@@ -98,11 +98,15 @@ class CodexAppServer:
         auth_file: Path,
         temporary_prefix: str,
         config_text: str,
+        server_request_observer: (
+            Callable[[Mapping[str, object]], None] | None
+        ) = None,
     ) -> None:
         self._executable = executable
         self._auth_file = auth_file
         self._temporary_prefix = temporary_prefix
         self._config_text = config_text
+        self._server_request_observer = server_request_observer
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen[str] | None = None
         self._stderr: TextIO | None = None
@@ -652,6 +656,13 @@ class CodexAppServer:
                 message = self._read_message()
                 request_id = message.get("id")
                 if request_id is not None and "method" in message:
+                    observer = self._server_request_observer
+                    if observer is not None:
+                        try:
+                            observer(message)
+                        except Exception:
+                            # Passive request observability must not affect Codex.
+                            pass
                     self._server_requests.put(message)
                 elif request_id is not None:
                     if type(request_id) is not int:

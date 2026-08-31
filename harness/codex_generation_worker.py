@@ -273,6 +273,7 @@ class CodexGenerationSession:
             auth_file=self._auth_file,
             temporary_prefix="codexos-codex-worker-",
             config_text=_implementor_config(),
+            server_request_observer=self._record_server_request_queued,
         )
         try:
             server.__enter__()
@@ -910,6 +911,19 @@ class CodexGenerationSession:
                         self._tool_calls_idle.set()
         else:
             server.reject_server_request(message)
+
+    def _record_server_request_queued(
+        self,
+        message: Mapping[str, object],
+    ) -> None:
+        if message.get("method") != "item/tool/call":
+            return
+        data = _dynamic_tool_activity_data(message.get("params"))
+        tool = data.get("tool")
+        self._record(
+            "tool_app_server_queued",
+            {"tool": tool if isinstance(tool, str) else "unknown"},
+        )
 
     def _interview_tool_denial(
         self,

@@ -916,6 +916,19 @@ class _ScriptedSerial:
     def write(self, data: bytes) -> None:
         self.writes.append(data)
 
+    def pump(self, max_bytes: int, outgoing, _timeout_seconds: float):
+        incoming = None
+        if self._incoming:
+            count = min(max_bytes, len(self._incoming))
+            incoming = bytes(self._incoming[:count])
+            del self._incoming[:count]
+        sent = 0
+        if outgoing:
+            data = bytes(outgoing)
+            self.writes.append(data)
+            sent = len(data)
+        return incoming, sent
+
     def close(self) -> None:
         pass
 

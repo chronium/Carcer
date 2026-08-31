@@ -109,3 +109,9 @@ run-local `build-review-provenance/` tree described in
 Build provenance storage fails closed as a trusted harness failure. Review
 capture remains non-interfering and records review outcome separately from
 durable evidence completeness.
+
+Serial tool dispatch records low-cardinality lifecycle evidence around the
+app-server queue, guest invocation, nested host-service receipt, response
+preparation, bounded write progress/completion, and the outer guest response.
+Byte counts and protocol request IDs are structured event data only, never
+metric labels. Host-service arguments and response contents are not recorded.

@@ -276,7 +276,25 @@ class CodexOSRun:
 
     def list_tools(self) -> list[str]:
         client = self._require_running_client()
-        result = client.list_tools()
+        self._record(
+            "tool_guest_invocation_started",
+            self._generation_number,
+            {"tool": "list_tools"},
+        )
+        try:
+            result = client.list_tools()
+        except BaseException:
+            self._record(
+                "tool_guest_invocation_failed",
+                self._generation_number,
+                {"tool": "list_tools"},
+            )
+            raise
+        self._record(
+            "tool_guest_invocation_completed",
+            self._generation_number,
+            {"tool": "list_tools"},
+        )
         self._finish_if_requested()
         return result
 
@@ -286,7 +304,29 @@ class CodexOSRun:
         arguments: Sequence[bytes],
     ) -> ToolResult:
         client = self._require_running_client()
-        result = client.invoke_tool(name, arguments)
+        self._record(
+            "tool_guest_invocation_started",
+            self._generation_number,
+            {"tool": name},
+        )
+        try:
+            result = client.invoke_tool(name, arguments)
+        except BaseException:
+            self._record(
+                "tool_guest_invocation_failed",
+                self._generation_number,
+                {"tool": name},
+            )
+            raise
+        self._record(
+            "tool_guest_invocation_completed",
+            self._generation_number,
+            {
+                "tool": name,
+                "status": result.status,
+                "output_bytes": len(result.output),
+            },
+        )
         self._finish_if_requested()
         return result
 
@@ -648,6 +688,11 @@ class CodexOSRun:
                 activity_stream=self._activity_stream,
                 generation=generation_number,
                 provided_assets=self._provided_assets,
+                serial_event_recorder=lambda event, data: self._record(
+                    event,
+                    generation_number,
+                    {"connection": "candidate", **dict(data)},
+                ),
             ),
             feature_request_store=self._feature_request_store,
             generation=generation_number,
@@ -686,6 +731,11 @@ class CodexOSRun:
                 startup_host_services=self._provided_assets,
                 background_host_services=self._provided_assets,
                 exchange_host_services=host_services,
+                event_recorder=lambda event, data: self._record(
+                    event,
+                    generation_number,
+                    {"connection": "active", **dict(data)},
+                ),
             )
             self._serial_protocol = protocol
             wait_for_ready(
