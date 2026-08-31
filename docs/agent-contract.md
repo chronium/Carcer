@@ -79,9 +79,11 @@ engineering state. Knowledge needed by later generations must be persisted there
 or placed deliberately in the generation handoff; Codex conversation history is
 not carried across generations.
 
-At the start of each fresh implementor session, the harness queries the live
-guest's canonical development-tool list and exposes the intersection with its
-trusted schema and bridge registry. Trusted Codex-side tools such as
+In the current corrected harness, each fresh implementor session queries the
+live guest's canonical development-tool list and exposes the intersection with
+its trusted schema and bridge registry. This documents current propagation
+behavior rather than claiming it occurred in earlier Contract-v6 executions.
+Trusted Codex-side tools such as
 `list_requests` and the separate reviewer remain independent of guest
 advertisement. The namespace is fixed for that implementor thread: a recognized
 tool added by generation N becomes available to the fresh generation N+1 session,
@@ -166,11 +168,12 @@ configured trusted hardware profile.
 
 The operator may explicitly configure an external asset directory with
 `--provided-assets PATH`. The harness freezes its derived opaque assets in
-memory and records only run-level IDs, exposed filenames, sizes, and SHA-256
-digests in `provided-assets.json`. Later reopens must supply a byte-identical
-derived set (the external path itself may differ), and omission or mismatch
-fails before a generation boots. Asset bytes are not copied into generation
-archives, autonomous Git provenance, or model context.
+memory and records complete metadata-only asset-set revisions in
+`provided-assets.json`. Later gate reopens must preserve every existing asset
+byte-for-byte but may add new IDs (the external path itself may differ); an
+unchanged reopen is idempotent, while omission or replacement fails before a
+generation boots. Asset bytes are not copied into generation archives,
+autonomous Git provenance, or model context.
 
 The old console must be exited before another process reopens the run. A typical
 reviewed harness update is adopted manually:

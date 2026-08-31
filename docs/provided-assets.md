@@ -13,12 +13,22 @@ uncompressed `<asset-id>.tar` without an extra wrapper directory. Generated
 archives use lexical path ordering, fixed ownership and timestamps, canonical
 permissions, and no symlinks or special files.
 
-The run records only schema version, IDs, exposed filenames, byte sizes, and
-SHA-256 digests in `provided-assets.json`. A later reopen must explicitly
-supply a set that derives to exactly that metadata; the physical source path
-may change. Omission or mismatch fails before a generation boots. Initializing
-this run-level record at a validated generation gate does not modify historical
-generation archives.
+The run records an append-only asset-set revision ledger in
+`provided-assets.json`. Every revision contains the complete effective set,
+ordered by ID, and records only its activation generation, IDs, exposed
+filenames, byte sizes, and SHA-256 digests. A later gate reopen must explicitly
+supply every previously introduced asset unchanged, but may add new IDs; the
+physical source path may change. Removing or changing an existing ID fails
+before a generation boots, while an unchanged reopen is idempotent. Existing
+schema-version-1 exact-set manifests are retained as an activation-time-unknown
+legacy revision when first adopted by the new ledger, rather than inventing
+historical timing. Initializing or extending this run-level record at a
+validated generation gate does not modify historical generation archives.
+
+Each harness process derives and freezes the accepted set once. Changes to the
+external directory after configuration cannot affect the active generation or
+its candidate-validation VMs. A later gate reopen can accept an append-only
+expansion and freezes that complete new revision for the next generation.
 
 Guest access uses the existing serial host-service framing. The precise
 `list_provided_assets` and `read_provided_asset` wire semantics are documented
