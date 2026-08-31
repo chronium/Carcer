@@ -26,6 +26,11 @@ from .codex_app_server import (
     token_usage_delta_from_notification,
 )
 from .generation_runtime import CodexOSRun, RuntimeState
+from .forensic_provenance import (
+    BuildReviewProvenance,
+    ForensicProvenanceError,
+    ReviewEvidence,
+)
 from .tool_protocol import ToolResult
 
 DEFAULT_REVIEWER_MODEL = "gpt-5.6-luna"
@@ -89,6 +94,7 @@ class CodexReviewWorker:
         started_at = time.monotonic()
         outcome = "failed"
         service_tier_name: str | None = None
+        review_evidence = self._begin_review_evidence(runtime)
         try:
             with CodexAppServer(
                 executable=self._codex_executable,
@@ -118,6 +124,7 @@ class CodexReviewWorker:
                     service_tier_name,
                     focus,
                     None,
+                    review_evidence.review_id if review_evidence else None,
                 )
                 self._publish(
                     runtime,
@@ -146,6 +153,7 @@ class CodexReviewWorker:
                         thread_id,
                         turn_ready,
                         turn_value,
+                        review_evidence,
                     )
                 )
                 try:
@@ -194,7 +202,13 @@ class CodexReviewWorker:
                 service_tier_name,
                 focus,
                 max(0.0, time.monotonic() - started_at),
+                review_evidence.review_id if review_evidence else None,
             )
+            if review_evidence is not None:
+                try:
+                    review_evidence.complete(outcome)
+                except ForensicProvenanceError as error:
+                    self._degrade_provenance(runtime, error)
             review_kind = {
                 "completed": CodexActivityKind.REVIEW_COMPLETED,
                 "cancelled": CodexActivityKind.REVIEW_CANCELLED,
@@ -351,6 +365,7 @@ class CodexReviewWorker:
         service_tier_name: str | None,
         focus: str,
         duration_seconds: float | None,
+        review_id: str | None,
     ) -> None:
         if runtime.observability is None:
             return
@@ -365,6 +380,8 @@ class CodexReviewWorker:
             data["service_tier_name"] = service_tier_name
         if duration_seconds is not None:
             data["duration_seconds"] = duration_seconds
+        if review_id is not None:
+            data["review_id"] = review_id
         runtime.observability.record(
             event,
             runtime.generation_number,
@@ -379,6 +396,7 @@ class CodexReviewWorker:
         thread_id: str,
         turn_ready: threading.Event,
         turn_value: list[str],
+        review_evidence: ReviewEvidence | None,
     ) -> None:
         turn_ready.wait()
         if not turn_value:
@@ -390,6 +408,7 @@ class CodexReviewWorker:
             message,
             thread_id,
             turn_value[0],
+            review_evidence,
         )
 
     def _handle_server_request(
@@ -399,6 +418,7 @@ class CodexReviewWorker:
         message: Mapping[str, object],
         thread_id: str,
         turn_id: str,
+        review_evidence: ReviewEvidence | None,
     ) -> None:
         if message.get("method") != "item/tool/call":
             server.reject_server_request(message)
@@ -408,6 +428,7 @@ class CodexReviewWorker:
             message.get("params"),
             thread_id,
             turn_id,
+            review_evidence,
         )
         server.write_result(message.get("id"), response)
 
@@ -417,6 +438,7 @@ class CodexReviewWorker:
         params: object,
         thread_id: str,
         turn_id: str,
+        review_evidence: ReviewEvidence | None,
     ) -> dict[str, object]:
         activity_data = _dynamic_tool_activity_data(params)
         call_id = _activity_call_id(params)
@@ -437,7 +459,12 @@ class CodexReviewWorker:
             if not isinstance(tool, str):
                 raise ValueError("reviewer dynamic tool name must be a string")
             arguments = _arguments(values.get("arguments"))
-            result = _dispatch_read_only_tool(runtime, tool, arguments)
+            result = _dispatch_read_only_tool(
+                runtime,
+                tool,
+                arguments,
+                review_evidence,
+            )
             activity_kind = (
                 CodexActivityKind.TOOL_COMPLETED
                 if result.status == 0
@@ -490,11 +517,34 @@ class CodexReviewWorker:
             )
             raise
 
+    @staticmethod
+    def _begin_review_evidence(runtime: CodexOSRun) -> ReviewEvidence | None:
+        provenance = getattr(runtime, "forensic_provenance", None)
+        generation = runtime.generation_number
+        if not isinstance(provenance, BuildReviewProvenance) or generation is None:
+            return None
+        try:
+            return provenance.begin_review(generation)
+        except ForensicProvenanceError as error:
+            CodexReviewWorker._degrade_provenance(runtime, error)
+            return None
+
+    @staticmethod
+    def _degrade_provenance(
+        runtime: CodexOSRun,
+        error: ForensicProvenanceError,
+    ) -> None:
+        if runtime.observability is not None:
+            runtime.observability.degrade(
+                f"review forensic provenance was incomplete: {error}"
+            )
+
 
 def _dispatch_read_only_tool(
     runtime: CodexOSRun,
     tool: str,
     arguments: Mapping[str, object],
+    review_evidence: ReviewEvidence | None = None,
 ) -> ToolResult:
     if tool == "list":
         _check_fields(arguments, optional={"prefix"})
@@ -506,14 +556,29 @@ def _dispatch_read_only_tool(
         return runtime.invoke_tool("list", guest_arguments)
     if tool == "read":
         _check_fields(arguments, required={"path", "offset", "length"})
-        return runtime.invoke_tool(
+        encoded_path = _utf8(arguments["path"], "path")
+        encoded_offset = _unsigned_decimal(arguments["offset"], "offset")
+        encoded_length = _unsigned_decimal(arguments["length"], "length")
+        result = runtime.invoke_tool(
             "read",
             [
-                _utf8(arguments["path"], "path"),
-                _unsigned_decimal(arguments["offset"], "offset"),
-                _unsigned_decimal(arguments["length"], "length"),
+                encoded_path,
+                encoded_offset,
+                encoded_length,
             ],
         )
+        if review_evidence is not None:
+            try:
+                review_evidence.record_source_read(
+                    encoded_path.decode("utf-8"),
+                    int(encoded_offset),
+                    int(encoded_length),
+                    result.status,
+                    result.output,
+                )
+            except ForensicProvenanceError as error:
+                CodexReviewWorker._degrade_provenance(runtime, error)
+        return result
     raise ValueError(f"unsupported reviewer CodexOS tool: {tool}")
 
 

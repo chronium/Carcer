@@ -96,3 +96,13 @@ exact resource-label spelling depends on the central Alloy/Loki configuration:
 {service_name="codexos-harness"} | json | event="generation_completed"
 {service_name="codexos-harness"} | json | event="tool_completed" | data_tool="build"
 ```
+
+Trusted build-attempt events additionally connect receipt, decoding, artifact
+identity, candidate start, READY, protocol validation, final outcome, and
+latest-success using one generation-scoped `build_attempt_id`. Reviewer
+lifecycle events carry a `review_id`, and `review_source_read` records the guest
+source range and exact returned-byte identity. Hashes and IDs are structured
+event data for forensic correlation only; they are never metric attributes or
+labels. Exact retained bytes and authoritative manifests remain in the private
+run-local `build-review-provenance/` tree described in
+[`validated-successors-and-provenance.md`](validated-successors-and-provenance.md).

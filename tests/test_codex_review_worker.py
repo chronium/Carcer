@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from unittest.mock import Mock, patch
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from harness import (
+    BuildReviewProvenance,
     CodexActivityKind,
     CodexActivityRole,
     CodexActivityStream,
@@ -40,6 +42,60 @@ from tests.test_codex_generation_worker import (
 
 
 class CodexReviewerProtocolTests(unittest.TestCase):
+    def test_review_records_exact_source_bytes_under_one_stable_review_id(self) -> None:
+        implementor_scenario = {
+            "tool_calls": [{"namespace": None, "tool": "review", "arguments": {}}]
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "tool_calls": [
+                {
+                    "tool": "read",
+                    "arguments": {
+                        "path": "seed/tasks.c",
+                        "offset": 3,
+                        "length": 5,
+                    },
+                }
+            ],
+            "final_message": "The inspected range is consistent.",
+        }
+        returned = b"a\x00b\xffc"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(implementor_scenario, root / "implementor") as implementor:
+                with _fake_codex(reviewer_scenario, root / "reviewer") as reviewer:
+                    runtime = _runtime_mock()
+                    runtime.generation_number = 12
+                    runtime.forensic_provenance = BuildReviewProvenance(root / "run")
+                    runtime.invoke_tool.return_value = ToolResult(0, returned)
+
+                    CodexGenerationWorker(
+                        implementor.executable,
+                        implementor.auth_file,
+                        reviewer_codex_executable=reviewer.executable,
+                        reviewer_auth_file=reviewer.auth_file,
+                    ).run_generation(runtime)
+
+            review = (
+                root
+                / "run/build-review-provenance/generation-0012/review-000001"
+            )
+            recorded = json.loads((review / "manifest.json").read_text())
+            self.assertEqual(recorded["review_id"], "review-000001")
+            self.assertEqual(recorded["outcome"], "completed")
+            self.assertEqual(len(recorded["source_reads"]), 1)
+            source_read = recorded["source_reads"][0]
+            self.assertEqual(source_read["path"], "seed/tasks.c")
+            self.assertEqual(
+                (review / source_read["content_file"]).read_bytes(),
+                returned,
+            )
+            runtime.invoke_tool.assert_called_once_with(
+                "read", [b"seed/tasks.c", b"3", b"5"]
+            )
+
     def test_nested_reviewer_activity_is_independent_and_read_only(self) -> None:
         implementor_scenario = {
             "tool_calls": [

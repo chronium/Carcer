@@ -15,6 +15,7 @@ from pathlib import Path
 from .candidate_boot import CandidateBootValidator
 from .codex_activity import CodexActivityStream
 from .feature_requests import FeatureRequest, FeatureRequestStore
+from .forensic_provenance import BuildReviewProvenance
 from .generation_finish_host_service import (
     CodexOSHostServices,
     PendingGenerationFinish,
@@ -76,6 +77,10 @@ class CodexOSRun:
         self._run_directory.mkdir(parents=True, exist_ok=True)
         self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._observability = observability
+        self._forensic_provenance = BuildReviewProvenance(
+            self._run_directory,
+            observability,
+        )
         self._activity_stream = activity_stream
         self._provided_assets_directory = provided_assets_directory
         self._provided_assets: ProvidedAssets | None = None
@@ -125,6 +130,10 @@ class CodexOSRun:
     @property
     def activity_stream(self) -> CodexActivityStream | None:
         return self._activity_stream
+
+    @property
+    def forensic_provenance(self) -> BuildReviewProvenance:
+        return self._forensic_provenance
 
     @property
     def hardware_profile(self) -> CodexOSHardwareProfile:
@@ -576,6 +585,22 @@ class CodexOSRun:
                 "qemu.stdout",
                 "qemu.stderr",
             }
+            forensic_manifest = archive / "latest-success.json"
+            forensic_snapshot = archive / "latest-success.snapshot"
+            if forensic_manifest.exists() or forensic_snapshot.exists():
+                for required in (forensic_manifest, forensic_snapshot):
+                    if required.is_symlink() or not required.is_file():
+                        raise ValueError(
+                            "aborted generation forensic evidence is incomplete"
+                        )
+                _validate_aborted_success_evidence(
+                    forensic_manifest,
+                    forensic_snapshot,
+                    generation_number,
+                )
+                expected_names.update(
+                    {"latest-success.json", "latest-success.snapshot"}
+                )
 
         if {path.name for path in archive.iterdir()} != expected_names:
             raise ValueError(
@@ -629,6 +654,7 @@ class CodexOSRun:
             observability=self._observability,
             activity_stream=self._activity_stream,
             provided_assets=self._provided_assets,
+            provenance=self._forensic_provenance,
         )
 
         self._workspace = workspace
@@ -853,6 +879,26 @@ class CodexOSRun:
                 self._current_hardware,
             )
             (archive_staging / "aborted.txt").write_bytes(_ABORT_MARKER)
+            host_services = self._host_services
+            latest = (
+                host_services.latest_successful_build
+                if host_services is not None
+                else None
+            )
+            if latest is not None and latest.evidence is not None:
+                (archive_staging / "latest-success.snapshot").write_bytes(
+                    latest.source_snapshot
+                )
+                (archive_staging / "latest-success.json").write_bytes(
+                    (
+                        json.dumps(
+                            latest.evidence.aborted_archive_manifest(),
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
         except BaseException:
             shutil.rmtree(archive_staging)
             raise
@@ -1015,6 +1061,54 @@ def _write_hardware_manifest(
             json.dumps(manifest.as_json_object(), indent=2, sort_keys=True)
             + "\n"
         ).encode("utf-8")
+    )
+
+
+def _validate_aborted_success_evidence(
+    manifest_path: Path,
+    snapshot_path: Path,
+    generation: int,
+) -> None:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("aborted generation forensic manifest is malformed") from error
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise ValueError("aborted generation forensic manifest is malformed")
+    if manifest.get("generation") != generation:
+        raise ValueError("aborted generation forensic generation is incorrect")
+    if (
+        manifest.get("ready") is not True
+        or manifest.get("protocol_validated") is not True
+    ):
+        raise ValueError("aborted generation forensic success is invalid")
+    attempt_id = manifest.get("build_attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id.startswith("build-"):
+        raise ValueError("aborted generation build attempt ID is invalid")
+    source = manifest.get("source_snapshot")
+    snapshot = snapshot_path.read_bytes()
+    if not isinstance(source, dict) or source != {
+        "sha256": hashlib.sha256(snapshot).hexdigest(),
+        "size": len(snapshot),
+    }:
+        raise ValueError("aborted generation source identity is invalid")
+    decode_source_snapshot(snapshot)
+    for name in ("kernel", "iso"):
+        identity = manifest.get(name)
+        if (
+            not isinstance(identity, dict)
+            or not _is_sha256(identity.get("sha256"))
+            or type(identity.get("size")) is not int
+            or identity["size"] < 0
+        ):
+            raise ValueError(f"aborted generation {name} identity is invalid")
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

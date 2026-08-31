@@ -25,6 +25,40 @@ healthy same-thread session may remain idle at the immutable gate solely for an
 optional read-only exit interview, but it is closed before the successor boots
 and cannot change archive or Git provenance.
 
+## Build and review forensic evidence
+
+Harness activity recorded after build/review provenance support was introduced
+also has a trusted run-local identity under `build-review-provenance/`. Each
+build invocation receives a generation-scoped, never-reused attempt ID before
+processing. Its manifest hashes the exact serialized snapshot bytes received by
+the builder, then connects the exact produced kernel and ISO hashes and sizes to
+candidate QEMU start, READY observation, canonical protocol validation, the
+final result, and any latest-success update. These hashes are forensic identity;
+they do not replace the exact snapshot-byte comparison required by
+`finish_generation`.
+
+The exact source snapshot of each successful attempt is retained in that
+attempt's run-local evidence. If a generation with a successful build is
+aborted, its archive also receives `latest-success.snapshot` and a compact
+`latest-success.json` identity manifest before temporary build storage is
+removed. Kernel and ISO bytes are not duplicated there; their hashes and sizes
+identify the exact artifacts validated by the attempt. An abort before any
+successful build creates no such success record.
+
+Each Luna consultation similarly receives a stable review ID. For every
+persistent guest-source `read` delivered to Luna, trusted evidence stores the
+requested path/range, result status, returned-byte hash and size, and the exact
+returned bytes. This records what Luna actually received without changing its
+tools or results. It is range evidence, not an invented atomic whole-source
+snapshot, and it deliberately excludes provided-asset reads.
+
+Manifests and byte evidence are written atomically and remain private run-local
+infrastructure: they are not agent context, dynamic tools, metric labels,
+generation Git commits, or public release artifacts. Historical generations
+that predate this instrumentation remain reopenable but cannot be retroactively
+given evidence that was never captured. This is passive trusted instrumentation
+and does not change the Agent Contract.
+
 Local Git provenance is a derived human-readable projection of completed
 archives. Each run uses the run-directory basename as its tag namespace:
 

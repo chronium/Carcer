@@ -14,6 +14,7 @@ from .codex_activity import (
     publish_activity,
 )
 from .framing import FramingError
+from .forensic_provenance import BuildAttemptEvidence, FileIdentity
 from .guest_startup import (
     GuestReadyError,
     escape_diagnostic_bytes,
@@ -65,9 +66,23 @@ class CandidateBootValidator:
         self._generation = generation
         self._provided_assets = provided_assets
 
-    def validate(self, candidate_iso: str | Path) -> CandidateBootResult:
+    def validate(
+        self,
+        candidate_iso: str | Path,
+        *,
+        evidence: BuildAttemptEvidence | None = None,
+        iso_identity: FileIdentity | None = None,
+    ) -> CandidateBootResult:
         """Return guest failure or harness failure without leaking QEMU state."""
-        self._publish(CodexActivityKind.BUILD_CANDIDATE_STARTED)
+        identity_data = _identity_data(evidence, iso_identity)
+        if evidence is not None:
+            evidence.record_candidate_stage(
+                "build_candidate_validation_started",
+                "candidate_started",
+                expected_iso_sha256=iso_identity.sha256 if iso_identity else None,
+                expected_iso_bytes=iso_identity.size if iso_identity else None,
+            )
+        self._publish(CodexActivityKind.BUILD_CANDIDATE_STARTED, identity_data)
         try:
             workspace = tempfile.TemporaryDirectory(
                 prefix="codexos-candidate-",
@@ -77,7 +92,13 @@ class CandidateBootValidator:
             result = _harness_failure(
                 f"could not create candidate workspace: {error}"
             )
-            self._publish_candidate_failure(result)
+            self._publish_candidate_failure(result, identity_data)
+            if evidence is not None:
+                evidence.record_candidate_stage(
+                    "build_candidate_validation_completed",
+                    "candidate_completed",
+                    outcome=result.status.value,
+                )
             return result
 
         result: CandidateBootResult | None = None
@@ -86,11 +107,17 @@ class CandidateBootValidator:
             result, cleanup_error = self._validate_in_workspace(
                 Path(workspace.name),
                 Path(candidate_iso),
+                evidence,
+                identity_data,
             )
         except BaseException as error:
             self._publish(
                 CodexActivityKind.BUILD_CANDIDATE_FAILED,
-                {"result": "exception", "error": type(error).__name__},
+                {
+                    "result": "exception",
+                    "error": type(error).__name__,
+                    **identity_data,
+                },
             )
             raise
         finally:
@@ -101,18 +128,32 @@ class CandidateBootValidator:
 
         if cleanup_error is not None:
             result = _harness_failure(cleanup_error)
-            self._publish_candidate_failure(result)
+            self._publish_candidate_failure(result, identity_data)
+            if evidence is not None:
+                evidence.record_candidate_stage(
+                    "build_candidate_validation_completed",
+                    "candidate_completed",
+                    outcome=result.status.value,
+                )
             return result
         if result is None:
             raise RuntimeError("candidate validator produced no result")
         if result.status is not BuildStatus.SUCCESS:
-            self._publish_candidate_failure(result)
+            self._publish_candidate_failure(result, identity_data)
+        if evidence is not None:
+            evidence.record_candidate_stage(
+                "build_candidate_validation_completed",
+                "candidate_completed",
+                outcome=result.status.value,
+            )
         return result
 
     def _validate_in_workspace(
         self,
         workspace: Path,
         candidate_iso: Path,
+        evidence: BuildAttemptEvidence | None,
+        identity_data: dict[str, object],
     ) -> tuple[CandidateBootResult, str | None]:
         qmp_path = workspace / "qmp.sock"
         serial_path = workspace / "serial.sock"
@@ -140,6 +181,11 @@ class CandidateBootValidator:
                     stdout_path=workspace / "qemu.stdout",
                     stderr_path=workspace / "qemu.stderr",
                 )
+                if evidence is not None:
+                    evidence.record_candidate_stage(
+                        "build_candidate_qemu_started",
+                        "candidate_qemu_started",
+                    )
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 result = _harness_failure(
                     f"could not start candidate QEMU: {error}"
@@ -173,7 +219,11 @@ class CandidateBootValidator:
                             background_host_services=self._provided_assets,
                             exchange_host_services=self._provided_assets,
                         )
-                        result = self._validate_guest(protocol)
+                        result = self._validate_guest(
+                            protocol,
+                            evidence,
+                            identity_data,
+                        )
         finally:
             cleanup_errors: list[str] = []
             try:
@@ -210,6 +260,8 @@ class CandidateBootValidator:
     def _validate_guest(
         self,
         protocol: SerialProtocolDispatcher,
+        evidence: BuildAttemptEvidence | None = None,
+        identity_data: dict[str, object] | None = None,
     ) -> CandidateBootResult:
         try:
             wait_for_ready(
@@ -224,8 +276,22 @@ class CandidateBootValidator:
                     + escape_diagnostic_bytes(error.serial_output)
                 )
             return _guest_failure(detail)
-        self._publish(CodexActivityKind.BUILD_CANDIDATE_READY)
+        if evidence is not None:
+            evidence.record_candidate_stage(
+                "build_candidate_ready_observed",
+                "ready_observed",
+                ready=True,
+            )
+        self._publish(
+            CodexActivityKind.BUILD_CANDIDATE_READY,
+            identity_data,
+        )
 
+        if evidence is not None:
+            evidence.record_candidate_stage(
+                "build_protocol_validation_started",
+                "protocol_validation_started",
+            )
         try:
             client = ToolClient(protocol)
             client.list_tools()
@@ -236,20 +302,43 @@ class CandidateBootValidator:
             TimeoutError,
             ToolProtocolError,
         ) as error:
+            if evidence is not None:
+                evidence.record_candidate_stage(
+                    "build_protocol_validation_completed",
+                    "protocol_validation_failed",
+                    outcome="build_failure",
+                )
             return _guest_failure(
                 "canonical list-tools exchange failed: " + str(error)
             )
         except RuntimeError as error:
+            if evidence is not None:
+                evidence.record_candidate_stage(
+                    "build_protocol_validation_completed",
+                    "protocol_validation_failed",
+                    outcome="harness_failure",
+                )
             return _harness_failure(
                 "candidate protocol validator failed internally: " + str(error)
             )
-        self._publish(CodexActivityKind.BUILD_PROTOCOL_VALIDATED)
+        if evidence is not None:
+            evidence.record_candidate_stage(
+                "build_protocol_validation_completed",
+                "protocol_validated",
+                outcome="success",
+                protocol_validated=True,
+            )
+        self._publish(CodexActivityKind.BUILD_PROTOCOL_VALIDATED, identity_data)
         return CandidateBootResult(BuildStatus.SUCCESS, "")
 
-    def _publish_candidate_failure(self, result: CandidateBootResult) -> None:
+    def _publish_candidate_failure(
+        self,
+        result: CandidateBootResult,
+        identity_data: dict[str, object] | None = None,
+    ) -> None:
         self._publish(
             CodexActivityKind.BUILD_CANDIDATE_FAILED,
-            {"result": result.status.value},
+            {"result": result.status.value, **(identity_data or {})},
         )
 
     def _publish(
@@ -291,3 +380,16 @@ def _harness_failure(detail: str) -> CandidateBootResult:
 def _bounded(value: str) -> str:
     encoded = value.encode("utf-8", errors="replace")
     return encoded[:_MAX_DIAGNOSTICS].decode("utf-8", errors="ignore")
+
+
+def _identity_data(
+    evidence: BuildAttemptEvidence | None,
+    iso_identity: FileIdentity | None,
+) -> dict[str, object]:
+    data: dict[str, object] = {}
+    if evidence is not None:
+        data["build_attempt_id"] = evidence.attempt_id
+    if iso_identity is not None:
+        data["iso_sha256"] = iso_identity.sha256
+        data["iso_bytes"] = iso_identity.size
+    return data
