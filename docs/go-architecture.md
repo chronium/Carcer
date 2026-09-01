@@ -25,7 +25,7 @@ dispatcher will own the sole read loop and all ordered writes. Callers receive
 responses through bounded per-request channels; host-service work may execute
 outside the read loop, but responses return to the dispatcher for writing.
 
-`internal/qemu` owns the hardware profile, QEMU process group, QMP connection,
+`internal/qemu` owns the hardware profile, QEMU child process, QMP connection,
 and bounded process shutdown. `internal/build` owns the fixed trusted build and
 candidate validation operation. Neither accepts a guest-provided command.
 
@@ -96,9 +96,11 @@ owners apply deadlines and cancellation around blocking I/O.
 `internal/guest` currently provides the version 1 frame, source snapshot,
 host-service, and tool payload codecs. `internal/store` provides the compatible
 feature-request ledger, including sparse imports, authoritative refreshes, and
-atomic synced record replacement. Go tests cover exact encoding, bounds,
-malformed input, fragmentation/coalescing, canonical snapshots, persistence
-failure, and cross-language loading in both directions. Black-box tests run the
-Python reference modules without importing optional production dependencies.
+atomic synced record replacement. `internal/provenance` records planning
+allocation, attempts, interruption/resumption, exact private responses, and
+public response identities in byte-compatible manifests. Go tests cover exact
+encoding, bounds, malformed input, fragmentation/coalescing, canonical
+snapshots, persistence failure, and cross-language output. Black-box tests run
+the Python reference modules without importing optional production dependencies.
 No Go code currently starts QEMU, contacts Codex, or changes the operational
 entry point.

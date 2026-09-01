@@ -10,14 +10,17 @@ snapshots, host-service requests/responses, tool lists, tool invocation requests
 and tool results. It also reads and writes the compatible feature-request store,
 including inherited sparse IDs and durable decisions. It does not yet own a
 serial connection or experiment process, and gate-only decision enforcement
-remains with the Python runtime.
+remains with the Python runtime. Planning evidence allocation, attempt history,
+exact private responses, and digest publication are implemented, but are not yet
+wired to a Go Codex session.
 
 ## Verification performed
 
 The current milestone is verified with `go test ./...`. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
-properties. Black-box conformance tests compare wire bytes and feature records
-against the Python modules and exercise Python-to-Go and Go-to-Python loading.
+properties. Black-box conformance tests compare wire bytes, feature records, and
+planning-evidence trees against the Python modules and exercise Python-to-Go and
+Go-to-Python feature loading.
 
 ## Remaining gaps and known differences
 
@@ -32,7 +35,9 @@ There are no intentional wire-format differences in the implemented codecs.
 Feature IDs and generation numbers are represented as uint64 in Go; unlike
 Python's unbounded integers, larger persisted values are rejected. Such values
 cannot describe an operable CodexOS generation, but this remains a documented
-validation difference.
+validation difference. Planning thread/turn IDs and response text must also be
+valid UTF-8 in Go; Python can represent lone Unicode surrogates in IDs, although
+the real app-server protocol supplies valid Unicode strings.
 
 ## Operational risks
 
