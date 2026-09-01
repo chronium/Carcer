@@ -15,9 +15,10 @@ socket retry, greeting and capability negotiation, status/control commands,
 event skipping, deadlines, and cancellation, but no Go component starts or owns
 a QEMU process yet. The two fixed hardware profiles, exact QEMU arguments,
 strict archived manifest codec, KVM availability check, and bounded QEMU version
-discovery are implemented. Planning evidence allocation, attempt history, exact
-private responses, and digest publication are implemented, but are not yet wired
-to a Go Codex session.
+discovery are implemented. A direct-child QEMU controller owns log descriptors,
+asynchronous reaping, and bounded TERM/KILL shutdown. Planning evidence
+allocation, attempt history, exact private responses, and digest publication are
+implemented, but are not yet wired to a Go Codex session.
 
 ## Verification performed
 
@@ -29,7 +30,10 @@ Go-to-Python feature loading. Synthetic Unix-socket peers verify exact QMP
 requests, fragmented input, asynchronous events, protocol errors, connection
 retry, and cancellation without starting QEMU. Hardware conformance compares
 exact command arguments and archived manifest bytes with the Python module;
-malformed manifest parsing also has a fuzz target.
+malformed manifest parsing also has a fuzz target. Synthetic subprocesses cover
+normal exit, duplicate start, cancellation, restart, log failures, and forced
+kill, while an optional disposable `-machine none` QEMU test exercises the real
+controller/QMP boundary without KVM or a guest image.
 
 ## Remaining gaps and known differences
 
@@ -56,6 +60,9 @@ unchanged. Go bounds a hardware manifest and captured QEMU version output at 1
 MiB and requires QEMU command paths to be valid UTF-8; Python has no explicit
 bounds and can represent surrogate-escaped paths. Operable CodexOS paths and
 normal QEMU version output remain well inside these conservative constraints.
+The Python controller reaps an exited QEMU when `is_running` or `pid` is read;
+Go uses one owned wait goroutine and may close the parent log descriptors sooner,
+while preserving the reported process state and archived log contents.
 
 ## Operational risks
 
