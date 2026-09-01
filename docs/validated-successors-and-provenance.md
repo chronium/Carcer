@@ -151,3 +151,33 @@ remote. The harness neither selects a remote nor performs network publication.
 ```console
 git push REMOTE experiment-002/lineage-0000
 ```
+
+## Cross-run continuation bootstrap
+
+A new run may explicitly continue from one cooperatively completed generation
+in another validated run by pairing `--initial-iso` with
+`--inherit-from-run` and `--inherit-from-generation`. Before creating the new
+run, the harness validates the source archive lineage, requires the selected
+generation to be the latest source archive, and requires the supplied initial
+ISO to be byte-identical to that generation's selected successor. The
+configured Git base must be that source run's annotated generation tag, so the
+new lineage cannot record an unrelated valid ref as its ancestry. The source
+ledger must not contain requests attributed to a later, unarchived generation.
+
+The destination records immutable `cross-run-bootstrap.json` provenance and an
+exact `cross-run-handoff.txt`. A canonical
+`cross-run-feature-requests.json` snapshot independently records the inherited
+ledger. The manifest binds its identity alongside the source run and
+generation, successor ISO, handoff, and exact configured Git base commit.
+Inherited requests retain their IDs, requesting generations, and text. Their
+recorded bootstrap-time state remains immutable in the bootstrap snapshot while
+normal later approval or denial transitions and new higher-numbered requests
+remain valid run state. Generation zero receives the inherited handoff through
+the ordinary `previous_handoff` path, including its neutral planning turn.
+
+Bootstrap initialization stages these records outside the destination and
+publishes them together. It imports no source archives, events, metrics,
+planning/build/review evidence, interview artifacts, VM state, or provided-asset
+provenance. Provided assets are initialized independently for the destination
+run. Later launches use the normal `--resume-at-gate` flow without inheritance
+flags and must retain the configured Git base recorded at bootstrap.

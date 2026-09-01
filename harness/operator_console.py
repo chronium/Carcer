@@ -21,6 +21,10 @@ from .codex_generation_worker import (
     CodexGenerationSessionMode,
     CodexGenerationWorkerError,
 )
+from .cross_run_bootstrap import (
+    initialize_cross_run_bootstrap,
+    load_cross_run_bootstrap,
+)
 from .generation_git import GenerationGitRecorder, GenerationGitRecorderError
 from .generation_runtime import ArchivedGeneration, CodexOSRun, RuntimeState
 from .exit_interview_transcript import (
@@ -1125,6 +1129,16 @@ def main(
     parser.add_argument("--git-repository", type=Path)
     parser.add_argument("--git-base-ref")
     parser.add_argument(
+        "--inherit-from-run",
+        type=Path,
+        help="bootstrap a fresh run from one validated source run",
+    )
+    parser.add_argument(
+        "--inherit-from-generation",
+        type=int,
+        help="completed source generation whose selected successor is inherited",
+    )
+    parser.add_argument(
         "--provided-assets",
         type=Path,
         help="freeze and expose assets from this explicit external directory",
@@ -1144,6 +1158,20 @@ def main(
     arguments = parser.parse_args(argv)
     if (arguments.git_repository is None) != (arguments.git_base_ref is None):
         parser.error("--git-repository and --git-base-ref must be supplied together")
+    inheritance_requested = (
+        arguments.inherit_from_run is not None
+        or arguments.inherit_from_generation is not None
+    )
+    if (arguments.inherit_from_run is None) != (
+        arguments.inherit_from_generation is None
+    ):
+        parser.error(
+            "--inherit-from-run and --inherit-from-generation must be supplied together"
+        )
+    if inheritance_requested and arguments.resume_at_gate:
+        parser.error("cross-run inheritance is valid only with --initial-iso")
+    if inheritance_requested and arguments.git_repository is None:
+        parser.error("cross-run inheritance requires Git provenance options")
     input_value = input_stream if input_stream is not None else sys.stdin
     output = output_stream if output_stream is not None else sys.stdout
     terminal_supported = _supports_tui(input_value, output)
@@ -1156,6 +1184,28 @@ def main(
     recorder: GenerationGitRecorder | None = None
     observability: ExperimentObservability | None = None
     try:
+        if inheritance_requested:
+            if (
+                arguments.initial_iso is None
+                or arguments.inherit_from_run is None
+                or arguments.inherit_from_generation is None
+                or arguments.git_repository is None
+                or arguments.git_base_ref is None
+            ):
+                raise RuntimeError("cross-run inheritance is incomplete")
+            initialize_cross_run_bootstrap(
+                arguments.run_directory,
+                arguments.initial_iso,
+                arguments.inherit_from_run,
+                arguments.inherit_from_generation,
+                arguments.git_repository,
+                arguments.git_base_ref,
+            )
+        bootstrap = load_cross_run_bootstrap(arguments.run_directory)
+        if bootstrap is not None and arguments.git_repository is None:
+            raise RuntimeError(
+                "cross-run continuation requires its recorded Git provenance options"
+            )
         observability = ExperimentObservability(
             arguments.run_directory,
             otlp_endpoint=arguments.otlp_endpoint,
@@ -1172,6 +1222,13 @@ def main(
                 arguments.run_directory,
                 arguments.git_base_ref,
             )
+            if bootstrap is not None and (
+                arguments.git_base_ref != bootstrap.git_base_ref
+                or recorder.base_commit != bootstrap.git_base_commit
+            ):
+                raise RuntimeError(
+                    "configured Git base does not match cross-run bootstrap provenance"
+                )
         if arguments.resume_at_gate:
             runtime.reopen_at_gate()
         else:
