@@ -73,6 +73,39 @@ class FeatureRequestStore:
         self._requests[request_id] = request
         return request
 
+    def import_requests(
+        self,
+        requests: tuple[FeatureRequest, ...],
+    ) -> None:
+        """Initialize an empty store with authoritative inherited records."""
+        self._refresh()
+        if self._requests or self._directory.exists():
+            raise FeatureRequestError(
+                "feature-request store is not empty"
+            )
+        imported: dict[int, FeatureRequest] = {}
+        for request in requests:
+            if not isinstance(request, FeatureRequest):
+                raise FeatureRequestError(
+                    "imported feature request has invalid type"
+                )
+            _validate_request_id(request.id)
+            _validate_generation(request.generation)
+            _validate_text(request.title, request.description)
+            if request.status not in _STATUSES:
+                raise FeatureRequestError(
+                    "imported feature-request status is invalid"
+                )
+            if request.id in imported:
+                raise FeatureRequestError(
+                    f"duplicate imported feature request #{request.id}"
+                )
+            imported[request.id] = request
+        for request_id in sorted(imported):
+            request = imported[request_id]
+            self._write(request, replace=False)
+            self._requests[request_id] = request
+
     def approve(self, request_id: int) -> FeatureRequest:
         return self._set_status(request_id, "approved")
 

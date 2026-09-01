@@ -14,6 +14,10 @@ from pathlib import Path
 
 from .candidate_boot import CandidateBootValidator
 from .codex_activity import CodexActivityStream
+from .cross_run_bootstrap import (
+    CrossRunBootstrap,
+    load_cross_run_bootstrap,
+)
 from .feature_requests import FeatureRequest, FeatureRequestStore
 from .forensic_provenance import BuildReviewProvenance
 from .generation_finish_host_service import (
@@ -75,6 +79,9 @@ class CodexOSRun:
     ) -> None:
         self._run_directory = Path(run_directory).resolve()
         self._run_directory.mkdir(parents=True, exist_ok=True)
+        self._cross_run_bootstrap: CrossRunBootstrap | None = (
+            load_cross_run_bootstrap(self._run_directory)
+        )
         self._feature_request_store = FeatureRequestStore(self._run_directory)
         self._observability = observability
         self._forensic_provenance = BuildReviewProvenance(
@@ -215,9 +222,14 @@ class CodexOSRun:
         image = Path(initial_iso).resolve()
         if not image.is_file():
             raise FileNotFoundError(image)
+        inherited_handoff: str | None = None
+        if self._cross_run_bootstrap is not None:
+            self._cross_run_bootstrap.verify_initial_iso(image)
+            inherited_handoff = self._cross_run_bootstrap.handoff
         self._configure_provided_assets(0)
         self._boot_generation(0, image, None, "initial")
         self._generation_number = 0
+        self._previous_handoff = inherited_handoff
         self._state = RuntimeState.RUNNING
         self._generation_started_at = time.monotonic()
         self._run_started = True

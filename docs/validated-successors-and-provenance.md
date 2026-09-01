@@ -151,3 +151,26 @@ remote. The harness neither selects a remote nor performs network publication.
 ```console
 git push REMOTE experiment-002/lineage-0000
 ```
+
+## Cross-run continuation bootstrap
+
+A new run may explicitly continue from one cooperatively completed generation
+in another validated run by pairing `--initial-iso` with
+`--inherit-from-run` and `--inherit-from-generation`. Before creating the new
+run, the harness validates the source archive lineage and requires the supplied
+initial ISO to be byte-identical to that generation's selected successor.
+
+The destination records immutable `cross-run-bootstrap.json` provenance and an
+exact `cross-run-handoff.txt`. The manifest identifies the source run and
+generation, successor ISO, handoff, inherited feature-request ledger, and exact
+configured Git base commit. Inherited requests retain their IDs, requesting
+generations, text, and status; later request allocation continues above the
+largest inherited ID. Generation zero receives the inherited handoff through
+the ordinary `previous_handoff` path, including its neutral planning turn.
+
+Bootstrap initialization stages these records outside the destination and
+publishes them together. It imports no source archives, events, metrics,
+planning/build/review evidence, interview artifacts, VM state, or provided-asset
+provenance. Provided assets are initialized independently for the destination
+run. Later launches use the normal `--resume-at-gate` flow without inheritance
+flags and must retain the configured Git base recorded at bootstrap.

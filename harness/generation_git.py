@@ -79,6 +79,11 @@ class GenerationGitRecorder:
                 )
         self._base_commit = self._resolve_commit(base_ref)
 
+    @property
+    def base_commit(self) -> str:
+        """The immutable commit selected by the configured base ref."""
+        return self._base_commit
+
     def reconcile(self) -> list[GenerationGitRecord]:
         try:
             archives = CodexOSRun(self._run_directory).archived_generations()

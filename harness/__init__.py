@@ -15,6 +15,14 @@ from .codex_generation_worker import (
     CodexGenerationWorkerError,
 )
 from .codex_review_worker import CodexReviewWorker, CodexReviewWorkerError
+from .cross_run_bootstrap import (
+    CROSS_RUN_BOOTSTRAP_HANDOFF,
+    CROSS_RUN_BOOTSTRAP_MANIFEST,
+    CrossRunBootstrap,
+    CrossRunBootstrapError,
+    initialize_cross_run_bootstrap,
+    load_cross_run_bootstrap,
+)
 from .framing import Frame, FramingError, encode_frame, read_frame
 from .forensic_provenance import (
     BuildReviewProvenance,
@@ -86,6 +94,10 @@ __all__ = [
     "CodexGenerationWorkerError",
     "CodexReviewWorker",
     "CodexReviewWorkerError",
+    "CROSS_RUN_BOOTSTRAP_HANDOFF",
+    "CROSS_RUN_BOOTSTRAP_MANIFEST",
+    "CrossRunBootstrap",
+    "CrossRunBootstrapError",
     "CodexActivityEvent",
     "CodexActivityKind",
     "CodexActivityRole",
@@ -137,5 +149,7 @@ __all__ = [
     "decode_source_snapshot",
     "encode_frame",
     "encode_source_snapshot",
+    "initialize_cross_run_bootstrap",
+    "load_cross_run_bootstrap",
     "read_frame",
 ]

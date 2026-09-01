@@ -3,11 +3,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import CodexOSRun, RuntimeState
+from harness import CodexOSRun, FeatureRequest, RuntimeState
 from harness.feature_requests import FeatureRequestError, FeatureRequestStore
 
 
 class FeatureRequestStoreTests(unittest.TestCase):
+    def test_import_preserves_sparse_identities_and_future_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = FeatureRequestStore(temporary)
+            inherited = (
+                FeatureRequest(2, 8, "Pending", "Exact text", "pending"),
+                FeatureRequest(7, 10, "Denied", "Exact denial", "denied"),
+            )
+            store.import_requests(inherited)
+            self.assertEqual(store.requests(), inherited)
+            created = store.create(0, "New run", "No collision")
+            self.assertEqual(created.id, 8)
+            with self.assertRaisesRegex(FeatureRequestError, "not empty"):
+                store.import_requests(inherited)
+
     def test_persists_monotonic_unicode_requests_and_durable_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_directory = Path(temporary) / "run"
