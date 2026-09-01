@@ -7,14 +7,17 @@ and is still the only operational entry point.
 
 The Go implementation has compatible pure codecs for serial frames, source
 snapshots, host-service requests/responses, tool lists, tool invocation requests,
-and tool results. It does not yet own a serial connection or experiment process.
+and tool results. It also reads and writes the compatible feature-request store,
+including inherited sparse IDs and durable decisions. It does not yet own a
+serial connection or experiment process, and gate-only decision enforcement
+remains with the Python runtime.
 
 ## Verification performed
 
 The current milestone is verified with `go test ./...`. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
-properties. A black-box conformance test compares frame and source-snapshot bytes
-against the Python modules.
+properties. Black-box conformance tests compare wire bytes and feature records
+against the Python modules and exercise Python-to-Go and Go-to-Python loading.
 
 ## Remaining gaps and known differences
 
@@ -26,6 +29,10 @@ five-second deadline itself; the eventual Go serial transport must preserve the
 observable timeout.
 
 There are no intentional wire-format differences in the implemented codecs.
+Feature IDs and generation numbers are represented as uint64 in Go; unlike
+Python's unbounded integers, larger persisted values are rejected. Such values
+cannot describe an operable CodexOS generation, but this remains a documented
+validation difference.
 
 ## Operational risks
 

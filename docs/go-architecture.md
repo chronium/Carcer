@@ -94,9 +94,11 @@ owners apply deadlines and cancellation around blocking I/O.
 ## Current implemented slice
 
 `internal/guest` currently provides the version 1 frame, source snapshot,
-host-service, and tool payload codecs. Go tests cover exact encoding, bounds,
-malformed input, fragmentation/coalescing, and canonical snapshots. A black-box
-test runs the Python reference modules without importing optional production
-dependencies and compares exact frame and snapshot bytes. No Go code currently
-starts QEMU, opens a run directory, contacts Codex, or changes the operational
+host-service, and tool payload codecs. `internal/store` provides the compatible
+feature-request ledger, including sparse imports, authoritative refreshes, and
+atomic synced record replacement. Go tests cover exact encoding, bounds,
+malformed input, fragmentation/coalescing, canonical snapshots, persistence
+failure, and cross-language loading in both directions. Black-box tests run the
+Python reference modules without importing optional production dependencies.
+No Go code currently starts QEMU, contacts Codex, or changes the operational
 entry point.
