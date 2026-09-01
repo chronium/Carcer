@@ -111,6 +111,36 @@ class PlanningEvidenceTests(unittest.TestCase):
             )
             self.assertNotIn("response_file", failed_manifest)
 
+    def test_retryable_failure_does_not_become_the_final_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = PlanningEvidenceStore(root).begin(8, "thread-8")
+            evidence.record_started("turn-abandoned")
+            evidence.record_retryable_failure()
+
+            manifest_path = (
+                root / "planning-evidence/generation-0008/manifest.json"
+            )
+            failed_attempt = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(failed_attempt["stage"], "awaiting_resume")
+            self.assertEqual(failed_attempt["outcome"], "incomplete")
+            self.assertEqual(failed_attempt["attempts"][0]["outcome"], "failed")
+            self.assertNotIn("response_file", failed_attempt["attempts"][0])
+
+            evidence.record_started("turn-retry")
+            evidence.complete("completed", "Exact successful plan.")
+            completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [attempt["outcome"] for attempt in completed["attempts"]],
+                ["failed", "completed"],
+            )
+            self.assertEqual(
+                (
+                    root / "planning-evidence/generation-0008/response.txt"
+                ).read_text(encoding="utf-8"),
+                "Exact successful plan.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

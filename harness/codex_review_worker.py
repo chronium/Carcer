@@ -84,6 +84,7 @@ class CodexReviewWorker:
         reasoning_effort: str = DEFAULT_REVIEWER_REASONING_EFFORT,
         reasoning_summary: str = DEFAULT_REVIEWER_REASONING_SUMMARY,
         service_tier: str = DEFAULT_REVIEWER_SERVICE_TIER,
+        origin: Mapping[str, object] | None = None,
     ) -> str:
         if runtime.state is not RuntimeState.RUNNING:
             raise CodexReviewWorkerError("CodexOS generation is not running")
@@ -125,6 +126,7 @@ class CodexReviewWorker:
                     focus,
                     None,
                     review_evidence.review_id if review_evidence else None,
+                    origin,
                 )
                 self._publish(
                     runtime,
@@ -203,6 +205,7 @@ class CodexReviewWorker:
                 focus,
                 max(0.0, time.monotonic() - started_at),
                 review_evidence.review_id if review_evidence else None,
+                origin,
             )
             if review_evidence is not None:
                 try:
@@ -366,6 +369,7 @@ class CodexReviewWorker:
         focus: str,
         duration_seconds: float | None,
         review_id: str | None,
+        origin: Mapping[str, object] | None,
     ) -> None:
         if runtime.observability is None:
             return
@@ -382,6 +386,8 @@ class CodexReviewWorker:
             data["duration_seconds"] = duration_seconds
         if review_id is not None:
             data["review_id"] = review_id
+        if origin is not None:
+            data.update(origin)
         runtime.observability.record(
             event,
             runtime.generation_number,

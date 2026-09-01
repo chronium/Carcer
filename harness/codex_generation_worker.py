@@ -156,6 +156,10 @@ class CodexGenerationWorkerError(RuntimeError):
     """The concrete Codex app-server generation worker failed."""
 
 
+class _PlanningDynamicCallLifecycleError(RuntimeError):
+    """A planning turn abandoned one or more turn-scoped tool calls."""
+
+
 class CodexGenerationSessionMode(StrEnum):
     GENERATION = "generation"
     RETAINED_AT_GATE = "retained_at_gate"
@@ -169,6 +173,19 @@ class CodexGenerationResult:
     final_message: str | None
     runtime_state: RuntimeState
     summary: str
+
+
+@dataclass(slots=True)
+class _DynamicCallRouting:
+    request_id: int | str
+    call_id: str
+    thread_id: str
+    turn_id: str
+    turn_phase: str
+    tool: str
+    result_ready: bool = False
+    response_write_attempted: bool = False
+    terminal_outcome: str | None = None
 
 
 class CodexGenerationSession:
@@ -232,6 +249,7 @@ class CodexGenerationSession:
         self._tool_calls_idle = threading.Event()
         self._tool_calls_idle.set()
         self._active_tool_calls = 0
+        self._dynamic_calls: dict[tuple[str, str, str], _DynamicCallRouting] = {}
         self._last_turn_status: str | None = None
         self._lock = threading.RLock()
         self._started = False
@@ -243,6 +261,7 @@ class CodexGenerationSession:
         self._stop_before_implementation = threading.Event()
         self._active_turn_phase: str | None = None
         self._planning_completed = False
+        self._planning_retry_required = False
         self._planning_evidence: PlanningEvidence | None = None
         self._turn_number = 0
         self._token_usage_total = CumulativeTokenUsage()
@@ -294,6 +313,11 @@ class CodexGenerationSession:
     def planning_completed(self) -> bool:
         with self._lock:
             return self._planning_completed
+
+    @property
+    def planning_retry_required(self) -> bool:
+        with self._lock:
+            return self._planning_retry_required
 
     def start(self) -> None:
         if self._started:
@@ -432,6 +456,7 @@ class CodexGenerationSession:
                 return planning
             with self._lock:
                 self._planning_completed = True
+                self._planning_retry_required = False
             if self._stop_before_implementation.is_set():
                 return CodexGenerationResult(
                     turn_status="interrupted",
@@ -597,6 +622,8 @@ class CodexGenerationSession:
                     "a previous Codex dynamic tool call is still active"
                 )
             self._active_turn_phase = turn_phase
+            if turn_phase == "planning":
+                self._planning_retry_required = False
             self._last_agent_message = None
             self._last_turn_status = None
             self._turn_done.clear()
@@ -783,6 +810,59 @@ class CodexGenerationSession:
                     else _result_summary(status, self._runtime.state)
                 ),
             )
+        except _PlanningDynamicCallLifecycleError as error:
+            evidence = self._planning_evidence
+            if evidence is None:
+                raise PlanningEvidenceError(
+                    "planning evidence is unavailable"
+                ) from error
+            try:
+                evidence.record_retryable_failure()
+            except PlanningEvidenceError as evidence_error:
+                self._healthy = False
+                self._record_turn_failure(
+                    turn_number,
+                    started_at,
+                    turn_phase=turn_phase,
+                )
+                raise CodexGenerationWorkerError(
+                    str(evidence_error)
+                ) from evidence_error
+            with self._lock:
+                self._planning_retry_required = True
+            self._last_turn_status = "failed"
+            self._record(
+                "planning_failed",
+                {
+                    **provenance,
+                    "duration_seconds": max(
+                        0.0, time.monotonic() - started_at
+                    ),
+                    "result": "failed",
+                    "failure_kind": "orphaned_dynamic_call",
+                },
+            )
+            self._publish_activity(
+                CodexActivityRole.IMPLEMENTOR,
+                CodexActivityKind.TURN_FAILED,
+                {
+                    "turn_number": turn_number,
+                    "turn_phase": turn_phase,
+                    "status": "failed",
+                    "reason": "planning tool result was not delivered",
+                },
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+            return CodexGenerationResult(
+                turn_status="failed",
+                final_message=None,
+                runtime_state=self._runtime.state,
+                summary=(
+                    "Codex planning failed because a planning tool result "
+                    "could not be delivered. Run agent to retry planning."
+                ),
+            )
         except CodexAppServerError as error:
             if interview:
                 self._finish_failed_interview_turn(turn_id)
@@ -934,10 +1014,18 @@ class CodexGenerationSession:
                 continue
             if method == "item/completed" and isinstance(params, dict):
                 item = params.get("item")
-                if isinstance(item, dict) and item.get("type") == "agentMessage":
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        self._last_agent_message = text
+                if isinstance(item, dict):
+                    if item.get("type") == "agentMessage":
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            self._last_agent_message = text
+                    elif item.get("type") == "dynamicToolCall":
+                        self._record_dynamic_call_delivery(
+                            params,
+                            item,
+                            thread_id,
+                            turn_id,
+                        )
                 continue
             if method != "turn/completed":
                 continue
@@ -956,7 +1044,37 @@ class CodexGenerationSession:
                 raise CodexGenerationWorkerError(
                     f"turn/completed has invalid status {status!r}"
                 )
+            pending_calls = self._orphan_unresolved_dynamic_calls(
+                thread_id,
+                turn_id,
+                turn_phase,
+                status,
+            )
             self._last_turn_status = status
+            if status == "completed" and turn_phase == "planning" and pending_calls:
+                self.cancel_review()
+                if not self._tool_calls_idle.wait(
+                    DEFAULT_INTERRUPT_TIMEOUT_SECONDS
+                ):
+                    raise CodexGenerationWorkerError(
+                        "planning dynamic tool calls did not quiesce after "
+                        "their app-server turn ended"
+                    )
+                raise _PlanningDynamicCallLifecycleError(
+                    "planning turn completed before its dynamic tool results "
+                    "were delivered"
+                )
+            if (
+                status == "completed"
+                and turn_phase == "planning"
+                and not self._tool_calls_idle.wait(
+                    DEFAULT_INTERRUPT_TIMEOUT_SECONDS
+                )
+            ):
+                raise CodexGenerationWorkerError(
+                    "delivered planning dynamic tool calls did not quiesce "
+                    "before implementation"
+                )
             if status == "failed":
                 error = turn.get("error")
                 raise CodexGenerationWorkerError(
@@ -1115,6 +1233,172 @@ class CodexGenerationSession:
             item_id=item_id,
         )
 
+    def _ensure_dynamic_call_routing(
+        self,
+        message: Mapping[str, object],
+    ) -> _DynamicCallRouting | None:
+        params = message.get("params")
+        request_id = message.get("id")
+        if not isinstance(params, dict) or type(request_id) not in {int, str}:
+            return None
+        call_id = params.get("callId")
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        tool = params.get("tool")
+        if not all(
+            isinstance(value, str) and value
+            for value in (call_id, thread_id, turn_id, tool)
+        ):
+            return None
+        with self._lock:
+            key = (thread_id, turn_id, call_id)
+            routing = self._dynamic_calls.get(key)
+            if routing is not None:
+                return routing
+            turn_phase = self._active_turn_phase
+            if (
+                thread_id != self._thread_id
+                or turn_id != self._turn_id
+                or turn_phase is None
+            ):
+                return None
+            routing = _DynamicCallRouting(
+                request_id=request_id,
+                call_id=call_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                turn_phase=turn_phase,
+                tool=tool,
+            )
+            self._dynamic_calls[key] = routing
+            return routing
+
+    @staticmethod
+    def _dynamic_call_identity(
+        routing: _DynamicCallRouting,
+    ) -> dict[str, object]:
+        return {
+            "request_id": routing.request_id,
+            "call_id": routing.call_id,
+            "thread_id": routing.thread_id,
+            "turn_id": routing.turn_id,
+            "turn_phase": routing.turn_phase,
+            "tool": routing.tool,
+        }
+
+    def _record_dynamic_call_result_ready(
+        self,
+        routing: _DynamicCallRouting,
+    ) -> None:
+        with self._lock:
+            if routing.result_ready:
+                return
+            routing.result_ready = True
+        self._record(
+            "tool_result_ready",
+            self._dynamic_call_identity(routing),
+        )
+
+    def _record_dynamic_call_write_attempt(
+        self,
+        routing: _DynamicCallRouting,
+    ) -> None:
+        with self._lock:
+            if routing.response_write_attempted:
+                return
+            routing.response_write_attempted = True
+        self._record(
+            "tool_response_write_attempted",
+            self._dynamic_call_identity(routing),
+        )
+
+    def _finish_dynamic_call_routing(
+        self,
+        routing: _DynamicCallRouting,
+        outcome: str,
+        *,
+        item_status: str | None = None,
+    ) -> bool:
+        if outcome not in {"delivered", "rejected", "orphaned"}:
+            raise ValueError("invalid dynamic-call routing outcome")
+        with self._lock:
+            if routing.terminal_outcome is not None:
+                return False
+            routing.terminal_outcome = outcome
+        data = self._dynamic_call_identity(routing)
+        if item_status is not None:
+            data["item_status"] = item_status
+        self._record(f"tool_result_{outcome}", data)
+        return True
+
+    def _record_dynamic_call_delivery(
+        self,
+        params: Mapping[str, object],
+        item: Mapping[str, object],
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        call_id = item.get("id")
+        if (
+            params.get("threadId") != thread_id
+            or params.get("turnId") != turn_id
+            or not isinstance(call_id, str)
+        ):
+            return
+        with self._lock:
+            routing = self._dynamic_calls.get((thread_id, turn_id, call_id))
+        if routing is None:
+            return
+        status = item.get("status")
+        self._finish_dynamic_call_routing(
+            routing,
+            "delivered",
+            item_status=status if isinstance(status, str) else None,
+        )
+
+    def _orphan_unresolved_dynamic_calls(
+        self,
+        thread_id: str,
+        turn_id: str,
+        turn_phase: str,
+        turn_status: str,
+    ) -> tuple[_DynamicCallRouting, ...]:
+        with self._lock:
+            calls = tuple(
+                routing
+                for routing in self._dynamic_calls.values()
+                if routing.thread_id == thread_id
+                and routing.turn_id == turn_id
+            )
+            pending = tuple(
+                routing
+                for routing in calls
+                if routing.terminal_outcome is None
+            )
+            orphaned = pending if turn_status != "interrupted" else ()
+            for routing in orphaned:
+                routing.terminal_outcome = "orphaned"
+        self._record(
+            "turn_dynamic_calls_terminal",
+            {
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "turn_phase": turn_phase,
+                "turn_status": turn_status,
+                "dynamic_call_count": len(calls),
+                "pending_dynamic_call_count": len(pending),
+                "pending_dynamic_call_ids": [
+                    routing.call_id for routing in pending
+                ],
+            },
+        )
+        for routing in orphaned:
+            self._record(
+                "tool_result_orphaned",
+                self._dynamic_call_identity(routing),
+            )
+        return pending
+
     def _handle_server_request(
         self,
         message: Mapping[str, object],
@@ -1124,6 +1408,7 @@ class CodexGenerationSession:
             raise CodexGenerationWorkerError("Codex app-server is not running")
         method = message.get("method")
         if method == "item/tool/call":
+            routing = self._ensure_dynamic_call_routing(message)
             with self._lock:
                 thread_id = self._thread_id
                 turn_id = self._turn_id
@@ -1132,8 +1417,28 @@ class CodexGenerationSession:
                 )
                 planning_turn = self._active_turn_phase == "planning"
             if thread_id is None or turn_id is None:
+                if routing is not None:
+                    if routing.terminal_outcome is not None:
+                        return
+                    self._finish_dynamic_call_routing(routing, "rejected")
                 server.reject_server_request(message)
                 return
+            if routing is not None:
+                with self._lock:
+                    stale = (
+                        routing.terminal_outcome is not None
+                        or routing.thread_id != thread_id
+                        or routing.turn_id != turn_id
+                        or routing.turn_phase != self._active_turn_phase
+                    )
+                if stale:
+                    if routing.terminal_outcome is None:
+                        self._finish_dynamic_call_routing(
+                            routing,
+                            "rejected",
+                        )
+                        server.reject_server_request(message)
+                    return
             with self._lock:
                 self._active_tool_calls += 1
                 self._tool_calls_idle.clear()
@@ -1150,9 +1455,34 @@ class CodexGenerationSession:
                         thread_id,
                         turn_id,
                         planning=planning_turn,
+                        routing=routing,
                     )
                 )
-                server.write_result(message.get("id"), response)
+                if routing is not None:
+                    self._record_dynamic_call_result_ready(routing)
+                    with self._lock:
+                        interrupted_response = (
+                            routing.terminal_outcome is None
+                            and self._last_turn_status == "interrupted"
+                        )
+                        may_write = (
+                            routing.terminal_outcome is None
+                            and self._turn_id == routing.turn_id
+                            and self._thread_id == routing.thread_id
+                            and self._active_turn_phase == routing.turn_phase
+                        ) or interrupted_response
+                    if not may_write:
+                        self._finish_dynamic_call_routing(routing, "orphaned")
+                        return
+                    self._record_dynamic_call_write_attempt(routing)
+                try:
+                    server.write_result(message.get("id"), response)
+                except CodexAppServerError:
+                    if routing is not None:
+                        self._finish_dynamic_call_routing(routing, "rejected")
+                    raise
+                if routing is not None and interrupted_response:
+                    self._finish_dynamic_call_routing(routing, "rejected")
             finally:
                 with self._lock:
                     self._active_tool_calls -= 1
@@ -1169,6 +1499,7 @@ class CodexGenerationSession:
             return
         data = _dynamic_tool_activity_data(message.get("params"))
         tool = data.get("tool")
+        routing = self._ensure_dynamic_call_routing(message)
         with self._lock:
             turn_phase = self._active_turn_phase
         phase_data = (
@@ -1179,6 +1510,11 @@ class CodexGenerationSession:
             {
                 "tool": tool if isinstance(tool, str) else "unknown",
                 **phase_data,
+                **(
+                    self._dynamic_call_identity(routing)
+                    if routing is not None
+                    else {}
+                ),
             },
         )
 
@@ -1219,6 +1555,7 @@ class CodexGenerationSession:
         turn_id: str,
         *,
         planning: bool = False,
+        routing: _DynamicCallRouting | None = None,
     ) -> dict[str, object]:
         activity_data = _dynamic_tool_activity_data(params)
         if planning:
@@ -1253,7 +1590,7 @@ class CodexGenerationSession:
                     "begin with the implementation turn"
                 )
             if namespace is None and tool == "review":
-                review = self._run_review(arguments)
+                review = self._run_review(arguments, routing=routing)
                 self._publish_activity(
                     CodexActivityRole.IMPLEMENTOR,
                     CodexActivityKind.TOOL_COMPLETED,
@@ -1374,7 +1711,12 @@ class CodexGenerationSession:
             )
             raise
 
-    def _run_review(self, arguments: Mapping[str, object]) -> str:
+    def _run_review(
+        self,
+        arguments: Mapping[str, object],
+        *,
+        routing: _DynamicCallRouting | None = None,
+    ) -> str:
         _check_fields(arguments, optional={"request", "focus"})
         focus = arguments.get("focus", "general")
         if not isinstance(focus, str) or focus not in _REVIEW_FOCUSES:
@@ -1411,6 +1753,11 @@ class CodexGenerationSession:
                 reasoning_effort=self._reviewer_reasoning_effort,
                 reasoning_summary=self._reviewer_reasoning_summary,
                 service_tier=self._reviewer_service_tier,
+                origin=(
+                    self._dynamic_call_identity(routing)
+                    if routing is not None
+                    else None
+                ),
             )
         finally:
             with self._lock:
