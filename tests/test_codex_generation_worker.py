@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -39,8 +40,10 @@ from harness.codex_generation_worker import (
     AGENT_CONTRACT_VERSION,
     DEFAULT_REASONING_SUMMARY,
     DEFAULT_SERVICE_TIER,
+    IMPLEMENTATION_PROMPT,
     CodexGenerationSessionMode,
     _implementor_prompt,
+    _planning_prompt,
 )
 from harness.observability import ExperimentObservability
 from harness.exit_interview_transcript import ExitInterviewArtifactStore
@@ -355,8 +358,296 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             self.assertNotIn(steering, prompt)
         self.assertNotIn("every workaround", prompt.lower())
 
-    def test_agent_contract_version_is_six(self) -> None:
-        self.assertEqual(AGENT_CONTRACT_VERSION, 6)
+    def test_agent_contract_version_is_seven(self) -> None:
+        self.assertEqual(AGENT_CONTRACT_VERSION, 7)
+
+    def test_initial_agent_runs_neutral_plan_then_implementation_on_same_thread(
+        self,
+    ) -> None:
+        plan = "PLAN-EVIDENCE-SECRET-71\nInspect, then choose independently."
+        scenario = {
+            "planning_turn": {"final_message": plan},
+            "turns": [
+                {"final_message": "Implementation turn complete."},
+                {"final_message": "Continuation complete."},
+            ],
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            activity = CodexActivityStream()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+                activity_stream=activity,
+            )
+
+            result = session.run_initial_turn()
+            record = fake.record()
+
+            self.assertEqual(result.final_message, "Implementation turn complete.")
+            turns = [
+                message["params"]
+                for message in record["messages"]
+                if message.get("method") == "turn/start"
+            ]
+            self.assertEqual(len(turns), 2)
+            self.assertEqual(turns[0]["threadId"], turns[1]["threadId"])
+            self.assertEqual(turns[0]["permissions"], "codexos-planning")
+            self.assertEqual(turns[0]["runtimeWorkspaceRoots"], [])
+            self.assertEqual(turns[1]["permissions"], "codexos-implementor")
+            self.assertNotIn("runtimeWorkspaceRoots", turns[1])
+            self.assertIn("This first turn is a planning phase", turns[0]["input"][0]["text"])
+            self.assertEqual(turns[1]["input"][0]["text"], IMPLEMENTATION_PROMPT)
+            self.assertNotIn(plan, turns[1]["input"][0]["text"])
+
+            evidence = (
+                runtime.run_directory
+                / "planning-evidence/generation-0000/response.txt"
+            )
+            manifest = json.loads(
+                evidence.with_name("manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(evidence.read_text(encoding="utf-8"), plan)
+            self.assertEqual(manifest["outcome"], "completed")
+            self.assertEqual(manifest["thread_id"], record["thread_id"])
+            self.assertEqual(manifest["turn_id"], record["turn_ids"][0])
+            events = activity.drain()
+            planning_messages = [
+                event
+                for event in events
+                if event.kind is CodexActivityKind.AGENT_MESSAGE
+                and event.data.get("turn_phase") == "planning"
+            ]
+            self.assertEqual(
+                [event.data["text"] for event in planning_messages],
+                [plan],
+            )
+
+            continuation = session.run_continuation_turn()
+            self.assertEqual(continuation.turn_status, "completed")
+            record = fake.record()
+            self.assertEqual(
+                sum(
+                    message.get("method") == "turn/start"
+                    for message in record["messages"]
+                ),
+                3,
+            )
+            self.assertEqual(
+                len(
+                    list(
+                        (runtime.run_directory / "planning-evidence").glob(
+                            "generation-*"
+                        )
+                    )
+                ),
+                1,
+            )
+            session.close()
+
+    def test_planning_tool_policy_denies_mutation_before_runtime_dispatch(
+        self,
+    ) -> None:
+        allowed = [
+            ("list", {}),
+            ("read", {"path": "seed/kernel.c", "offset": 0, "length": 1}),
+            ("build", {}),
+            (
+                "request_feature",
+                {"title": "External input", "description": "Advisory only."},
+            ),
+            ("list_requests", {}),
+            ("list_provided_assets", {}),
+            (
+                "read_provided_asset",
+                {"id": "alpha", "offset": 0, "length": 1},
+            ),
+        ]
+        denied = [
+            ("write", {"path": "seed/kernel.c", "offset": 0, "data": "x"}),
+            ("truncate", {"path": "seed/kernel.c", "size": 0}),
+            ("remove", {"path": "seed/kernel.c"}),
+            ("finish_generation", {"handoff": "must not finish"}),
+            ("import", {}),
+            ("run", {}),
+        ]
+        scenario = {
+            "planning_turn": {
+                "tool_calls": [
+                    *(
+                        {"tool": tool, "arguments": arguments}
+                        for tool, arguments in allowed + denied
+                    ),
+                    {
+                        "namespace": None,
+                        "tool": "review",
+                        "arguments": {"focus": "design"},
+                    },
+                ],
+                "final_message": "Planning complete.",
+            },
+            "tool_calls": [
+                {
+                    "tool": "write",
+                    "arguments": {
+                        "path": "seed/kernel.c",
+                        "offset": 0,
+                        "data": "x",
+                    },
+                }
+            ],
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            runtime.list_tools.return_value = [
+                *_GUEST_TOOLS,
+                "list_provided_assets",
+                "read_provided_asset",
+            ]
+            runtime.invoke_tool.return_value = ToolResult(0, b"")
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            with patch.object(
+                session,
+                "_run_review",
+                return_value="Independent review.",
+            ) as review:
+                result = session.run_initial_turn()
+
+            self.assertEqual(result.turn_status, "completed")
+            results = fake.record()["tool_results"]
+            allowed_count = len(allowed)
+            self.assertTrue(all(item["result"]["success"] for item in results[:allowed_count]))
+            self.assertTrue(
+                all(
+                    not item["result"]["success"]
+                    and "unavailable during the planning phase"
+                    in item["result"]["contentItems"][0]["text"]
+                    for item in results[allowed_count : allowed_count + len(denied)]
+                )
+            )
+            self.assertTrue(results[allowed_count + len(denied)]["result"]["success"])
+            self.assertTrue(results[-1]["result"]["success"])
+            review.assert_called_once_with({"focus": "design"})
+            invoked_names = [call.args[0] for call in runtime.invoke_tool.call_args_list]
+            self.assertEqual(
+                invoked_names,
+                [
+                    "list",
+                    "read",
+                    "build",
+                    "request_feature",
+                    "list_provided_assets",
+                    "read_provided_asset",
+                    "write",
+                ],
+            )
+            for denied_name in {
+                "truncate",
+                "remove",
+                "finish_generation",
+                "import",
+                "run",
+            }:
+                self.assertNotIn(denied_name, invoked_names)
+            session.close()
+
+    def test_failed_or_interrupted_planning_does_not_start_implementation(
+        self,
+    ) -> None:
+        cases = (
+            (
+                {"turn_status": "failed", "turn_error": {"message": "failed"}},
+                CodexGenerationWorkerError,
+                "failed",
+            ),
+            ({"turn_status": "interrupted"}, None, "interrupted"),
+        )
+        for planning_turn, expected_error, outcome in cases:
+            with self.subTest(outcome=outcome), _fake_codex(
+                {
+                    "planning_turn": planning_turn,
+                    "final_message": "implementation must not start",
+                }
+            ) as fake:
+                runtime = _runtime_mock()
+                session = CodexGenerationSession(
+                    runtime,
+                    fake.executable,
+                    fake.auth_file,
+                )
+                if expected_error is None:
+                    result = session.run_initial_turn()
+                    self.assertEqual(result.turn_status, "interrupted")
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "planning did not complete",
+                    ):
+                        session.run_continuation_turn()
+                else:
+                    with self.assertRaises(expected_error):
+                        session.run_initial_turn()
+                record = fake.record()
+                self.assertEqual(
+                    sum(
+                        message.get("method") == "turn/start"
+                        for message in record["messages"]
+                    ),
+                    1,
+                )
+                manifest = json.loads(
+                    (
+                        runtime.run_directory
+                        / "planning-evidence/generation-0000/manifest.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(manifest["outcome"], outcome)
+                session.close()
+
+    def test_plan_text_is_private_evidence_not_operational_telemetry(self) -> None:
+        secret = "PRIVATE-PLAN-TEXT-83f1"
+        with tempfile.TemporaryDirectory() as temporary, _fake_codex(
+            {
+                "planning_turn": {"final_message": secret},
+                "final_message": "Implementation complete.",
+            }
+        ) as fake:
+            run = Path(temporary) / "run"
+            observability = ExperimentObservability(run)
+            runtime = _runtime_mock()
+            runtime.run_directory = run
+            runtime.observability = observability
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            session.run_initial_turn()
+            session.close()
+            observability.close()
+
+            serialized = (run / "events.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn(secret, serialized)
+            events = [json.loads(line) for line in serialized.splitlines()]
+            completed = next(
+                event for event in events if event["event"] == "planning_completed"
+            )
+            self.assertEqual(completed["data"]["response_bytes"], len(secret))
+            self.assertEqual(
+                completed["data"]["response_sha256"],
+                hashlib.sha256(secret.encode()).hexdigest(),
+            )
+            self.assertEqual(
+                (
+                    run
+                    / "planning-evidence/generation-0000/response.txt"
+                ).read_text(encoding="utf-8"),
+                secret,
+            )
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (
@@ -390,6 +681,39 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             ):
                 self.assertIn(expected, prompt)
         self.assertNotEqual(prompts[0], prompts[1])
+
+    def test_planning_prompt_reuses_authoritative_context_without_steering(self) -> None:
+        runtime = _runtime_mock()
+        runtime.previous_handoff = "Exact inherited handoff."
+        objective = "Exact trusted objective."
+        ordinary = _implementor_prompt(runtime, objective)
+        planning = _planning_prompt(runtime, objective)
+
+        self.assertTrue(planning.startswith(ordinary))
+        addition = planning[len(ordinary) :]
+        for expected in (
+            "first turn is a planning phase",
+            "Persistent guest and runtime changes",
+            "implementation follows automatically",
+            "same session and thread",
+            "not an approval gate or enforced commitment",
+        ):
+            self.assertIn(expected, addition)
+        for steering in (
+            "source capacity",
+            "compaction",
+            "Doom",
+            "supplied assets",
+            "G13",
+            "G14",
+            "G15",
+            "milestone selection",
+            "prerequisite ordering",
+            "should request",
+            "checklist",
+            "acceptance criteria",
+        ):
+            self.assertNotIn(steering.lower(), addition.lower())
 
     def test_malformed_token_usage_degrades_observability_not_session(self) -> None:
         accepted = _token_usage(100, 30, 40, 10)
@@ -946,6 +1270,10 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
         with _fake_codex(scenario) as fake:
             runtime = Mock(spec=CodexOSRun)
             runtime.state = RuntimeState.RUNNING
+            runtime.generation_number = 0
+            runtime.run_directory = Path(
+                tempfile.mkdtemp(prefix="codexos-test-run-")
+            )
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
@@ -1313,6 +1641,10 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
         with _fake_codex({"failure": "malformed_json"}) as fake:
             runtime = Mock(spec=CodexOSRun)
             runtime.state = RuntimeState.RUNNING
+            runtime.generation_number = 0
+            runtime.run_directory = Path(
+                tempfile.mkdtemp(prefix="codexos-test-run-")
+            )
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
@@ -1403,6 +1735,10 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
         with _fake_codex(scenario) as fake:
             runtime = Mock(spec=CodexOSRun)
             runtime.state = RuntimeState.RUNNING
+            runtime.generation_number = 0
+            runtime.run_directory = Path(
+                tempfile.mkdtemp(prefix="codexos-test-run-")
+            )
             runtime.previous_handoff = None
             runtime.current_transition = "initial"
             runtime.hardware_profile = TEST_HARDWARE_PROFILE
@@ -1741,8 +2077,8 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 for message in record["messages"]
                 if message.get("method") == "turn/start"
             ]
-            self.assertEqual(len(turns), 3)
-            for turn in turns[1:]:
+            self.assertEqual(len(turns), 4)
+            for turn in turns[2:]:
                 self.assertEqual(turn["threadId"], original_thread)
                 self.assertEqual(turn["model"], "gpt-5.6-sol")
                 self.assertEqual(turn["effort"], "high")
@@ -1750,10 +2086,10 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 self.assertEqual(turn["serviceTier"], "priority")
                 self.assertEqual(turn["permissions"], "codexos-interview")
                 self.assertEqual(turn["runtimeWorkspaceRoots"], [])
-            prompt = turns[1]["input"][0]["text"]
+            prompt = turns[2]["input"][0]["text"]
             self.assertIn("read-only exit interview", prompt)
             self.assertIn("Operator question:\n" + marker, prompt)
-            self.assertNotIn("dynamicTools", turns[1])
+            self.assertNotIn("dynamicTools", turns[2])
             self.assertTrue(
                 all(not response["result"]["success"] for response in record["server_responses"][-len(denied_tools):])
             )
@@ -1793,7 +2129,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                     item.get("method") == "turn/start"
                     for item in first_record["messages"]
                 ),
-                1,
+                2,
             )
             pid = session.process_pid
             thread_id = session.thread_id
@@ -1805,7 +2141,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             self.assertEqual(session.thread_id, thread_id)
             methods = [item.get("method") for item in record["messages"]]
             self.assertEqual(methods.count("thread/start"), 1)
-            self.assertEqual(methods.count("turn/start"), 2)
+            self.assertEqual(methods.count("turn/start"), 3)
             self.assertNotIn("thread/resume", methods)
             self.assertNotIn("thread/fork", methods)
             turns = [
@@ -1814,7 +2150,7 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 if item.get("method") == "turn/start"
             ]
             self.assertEqual(
-                turns[1]["params"]["input"][0]["text"],
+                turns[2]["params"]["input"][0]["text"],
                 "Continue working on the current CodexOS generation.",
             )
             self.assertTrue(
@@ -2231,7 +2567,7 @@ def _runtime_mock() -> Mock:
     runtime = Mock(spec=CodexOSRun)
     runtime.state = RuntimeState.RUNNING
     runtime.generation_number = 0
-    runtime.run_directory = Path("/tmp/codexos-test-run")
+    runtime.run_directory = Path(tempfile.mkdtemp(prefix="codexos-test-run-"))
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
     runtime.hardware_profile = TEST_HARDWARE_PROFILE

@@ -109,6 +109,35 @@ class OperatorActivityModelTests(unittest.TestCase):
         self.assertIsInstance(reviewer, AgentMessagePresentation)
         self.assertEqual(reviewer.role, CodexActivityRole.REVIEWER)
 
+    def test_planning_messages_and_reasoning_are_explicitly_attributed(self) -> None:
+        model = OperatorActivityModel()
+        model.consume(
+            _event(
+                1,
+                CodexActivityKind.AGENT_MESSAGE,
+                {"text": "Inspect first.", "turn_phase": "planning"},
+                item_id="plan-message",
+            )
+        )
+        model.consume(
+            _event(
+                2,
+                CodexActivityKind.AGENT_REASONING_SUMMARY,
+                {
+                    "summary": ["Check the inherited interfaces."],
+                    "turn_phase": "planning",
+                },
+                item_id="plan-reasoning",
+            )
+        )
+
+        message = model.entries[0].presentation
+        reasoning = model.entries[1].presentation
+        self.assertIsInstance(message, AgentMessagePresentation)
+        self.assertIsInstance(reasoning, ReasoningPresentation)
+        self.assertEqual(message.turn_phase, "planning")
+        self.assertEqual(reasoning.turn_phase, "planning")
+
     def test_reasoning_items_are_distinct_and_empty_summaries_are_suppressed(self) -> None:
         model = OperatorActivityModel()
         model.consume(

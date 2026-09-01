@@ -68,6 +68,7 @@ class CodexReviewerProtocolTests(unittest.TestCase):
                 with _fake_codex(reviewer_scenario, root / "reviewer") as reviewer:
                     runtime = _runtime_mock()
                     runtime.generation_number = 12
+                    runtime.run_directory = root / "run"
                     runtime.forensic_provenance = BuildReviewProvenance(root / "run")
                     runtime.invoke_tool.return_value = ToolResult(0, returned)
 
@@ -904,6 +905,8 @@ class RealCodexReviewerSmokeTest(unittest.TestCase):
 def _runtime_mock() -> Mock:
     runtime = Mock(spec=CodexOSRun)
     runtime.state = RuntimeState.RUNNING
+    runtime.generation_number = 0
+    runtime.run_directory = Path(tempfile.mkdtemp(prefix="codexos-review-run-"))
     runtime.previous_handoff = None
     runtime.current_transition = "initial"
     runtime.hardware_profile = TEST_HARDWARE_PROFILE

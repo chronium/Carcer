@@ -434,7 +434,7 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
             _activity_event(
                 1,
                 CodexActivityKind.AGENT_TEXT_DELTA,
-                {"text": "Streaming **plain**"},
+                {"text": "Streaming **plain**", "turn_phase": "planning"},
                 item_id="message",
             )
         )
@@ -447,12 +447,19 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
             row = transcript.rows[1]
             self.assertIsInstance(row, AgentMessageRow)
             self.assertFalse(row.renders_markdown)
+            self.assertEqual(
+                row._Static__content.renderables[0].plain,
+                "Sol · planning",
+            )
 
             model.consume(
                 _activity_event(
                     2,
                     CodexActivityKind.AGENT_MESSAGE,
-                    {"text": "Final **Markdown** message.\x1b[2J"},
+                    {
+                        "text": "Final **Markdown** message.\x1b[2J",
+                        "turn_phase": "planning",
+                    },
                     item_id="message",
                 )
             )
