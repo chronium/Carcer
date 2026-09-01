@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +54,9 @@ class CandidateBootValidator:
         activity_stream: CodexActivityStream | None = None,
         generation: int | None = None,
         provided_assets: ProvidedAssets | None = None,
+        serial_event_recorder: (
+            Callable[[str, Mapping[str, object]], None] | None
+        ) = None,
     ) -> None:
         if ready_timeout_seconds <= 0:
             raise ValueError("candidate readiness timeout must be positive")
@@ -65,6 +69,7 @@ class CandidateBootValidator:
         self._activity_stream = activity_stream
         self._generation = generation
         self._provided_assets = provided_assets
+        self._serial_event_recorder = serial_event_recorder
 
     def validate(
         self,
@@ -218,6 +223,7 @@ class CandidateBootValidator:
                             startup_host_services=self._provided_assets,
                             background_host_services=self._provided_assets,
                             exchange_host_services=self._provided_assets,
+                            event_recorder=self._serial_event_recorder,
                         )
                         result = self._validate_guest(
                             protocol,

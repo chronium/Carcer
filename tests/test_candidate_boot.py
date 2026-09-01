@@ -300,14 +300,14 @@ class GuestReadinessDiagnosticsTests(unittest.TestCase):
         serial = Mock(spec=SerialConnection)
         calls = 0
 
-        def read(_size: int, _timeout: float) -> bytes:
+        def pump(_size: int, _outgoing, _timeout: float):
             nonlocal calls
             calls += 1
             if calls == 1:
-                return b"PRE-READY\n\x1b[2J\x00"
-            raise TimeoutError
+                return b"PRE-READY\n\x1b[2J\x00", 0
+            return None, 0
 
-        serial.read.side_effect = read
+        serial.pump.side_effect = pump
         protocol = SerialProtocolDispatcher(serial)
         try:
             with self.assertRaises(GuestReadyError) as caught:

@@ -39,6 +39,10 @@ requests are serviced before and after READY without waiting for unrelated
 development-tool traffic. Other trusted development host services retain their
 existing scope inside a harness-initiated development-tool exchange; making
 provided assets continuously available does not expose those services to idle
-guest code. Asset bytes are not Codex dynamic-tool results and do not enter
-source snapshots, generation archives, autonomous Git commits, prompts,
-handoffs, interview artifacts, or operational telemetry.
+guest code. The sole dispatcher is a bounded duplex pump: it emits large host
+responses incrementally while continuing to drain guest frames, preserves frame
+ordering, and fails a response whose socket write stops making progress. This
+allows the documented 1 MiB read while retaining one authoritative serial
+reader and bounded shutdown. Asset bytes are not Codex dynamic-tool results and
+do not enter source snapshots, generation archives, autonomous Git commits,
+prompts, handoffs, interview artifacts, or operational telemetry.

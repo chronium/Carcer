@@ -27,6 +27,13 @@ from harness import (
     encode_frame,
 )
 
+_WRITE_TERMINAL_PHASES = {
+    "write_completed",
+    "write_timed_out",
+    "write_failed",
+    "write_cancelled",
+}
+
 
 @contextmanager
 def connected_serial_peer():
@@ -46,12 +53,14 @@ def connected_protocol(
     exchange_host_services=None,
     *,
     background_host_services=None,
+    event_recorder=None,
 ):
     with connected_serial_peer() as (serial, peer):
         protocol = SerialProtocolDispatcher(
             serial,
             background_host_services=background_host_services,
             exchange_host_services=exchange_host_services,
+            event_recorder=event_recorder,
         )
         protocol.start_ready()
         try:
@@ -80,6 +89,49 @@ def receive_exact(peer: socket.socket, size: int) -> bytes:
     return bytes(data)
 
 
+def relay_host_response_as_tool_response(
+    peer: socket.socket,
+    tool_request_id: int,
+    *,
+    byte_at_a_time: bool,
+    delay_seconds: float = 0.0,
+) -> bytes:
+    """Model the G13 nested host-response relay without buffering its payload."""
+    header = receive_exact(peer, 16)
+    magic, version, message_type, host_request_id, payload_length = struct.unpack(
+        "<4sHHII", header
+    )
+    if (magic, version, message_type) != (b"CXOS", 1, 0x8003):
+        raise AssertionError("dispatcher sent an invalid host-service response")
+    status = receive_exact(peer, 4)
+    peer.sendall(
+        struct.pack(
+            "<4sHHII",
+            b"CXOS",
+            1,
+            0x8002,
+            tool_request_id,
+            payload_length,
+        )
+        + status
+    )
+    output = bytearray()
+    remaining = payload_length - len(status)
+    read_size = 1 if byte_at_a_time else 257
+    while remaining:
+        chunk = peer.recv(min(read_size, remaining))
+        if not chunk:
+            raise AssertionError("dispatcher closed during host-response relay")
+        output.extend(chunk)
+        peer.sendall(chunk)
+        remaining -= len(chunk)
+        if delay_seconds:
+            time.sleep(delay_seconds)
+    if host_request_id == 0:
+        raise AssertionError("host-service response used request ID zero")
+    return bytes(output)
+
+
 def host_request(request_id: int, name: str, arguments: tuple[bytes, ...]) -> bytes:
     encoded_name = name.encode("utf-8")
     payload = bytearray(struct.pack("<H", len(encoded_name)) + encoded_name)
@@ -90,7 +142,264 @@ def host_request(request_id: int, name: str, arguments: tuple[bytes, ...]) -> by
     return encode_frame(Frame(0x0003, request_id, bytes(payload)))
 
 
+def write_terminal_phases(
+    events: list[tuple[str, dict[str, object]]],
+    *,
+    request_id: int,
+    write_kind: str,
+) -> list[str]:
+    return [
+        str(data["phase"])
+        for event, data in events
+        if event == "serial_protocol_write"
+        and data["request_id"] == request_id
+        and data["write_kind"] == write_kind
+        and data["phase"] in _WRITE_TERMINAL_PHASES
+    ]
+
+
 class ToolProtocolIntegrationTest(unittest.TestCase):
+    def test_large_host_response_is_duplex_pumped_and_dispatcher_remains_usable(
+        self,
+    ) -> None:
+        payload = bytes(range(256)) * 4096
+
+        class HostServices:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def handle_request(self, request):
+                self.requests.append(request.service_name)
+                output = (
+                    payload
+                    if request.service_name == "read_provided_asset"
+                    else b"ok"
+                )
+                return create_host_service_response(request.request_id, 0, output)
+
+        services = HostServices()
+        events = []
+        with (
+            connected_protocol(
+                services,
+                event_recorder=lambda event, data: events.append(
+                    (event, dict(data))
+                ),
+            ) as (protocol, peer),
+            ThreadPoolExecutor() as pool,
+        ):
+            client = ToolClient(protocol)
+            large = pool.submit(client.invoke_tool, "read_provided_asset", [])
+            large_request = receive_peer_frame(peer)
+            peer.sendall(host_request(71, "read_provided_asset", ()))
+            relayed = relay_host_response_as_tool_response(
+                peer,
+                large_request.request_id,
+                byte_at_a_time=True,
+            )
+            self.assertEqual(len(relayed), 1024 * 1024)
+            self.assertEqual(relayed, payload)
+            self.assertEqual(large.result(10), ToolResult(0, payload))
+
+            ordinary = pool.submit(client.list_tools)
+            ordinary_request = receive_peer_frame(peer)
+            peer.sendall(
+                encode_frame(
+                    Frame(0x8001, ordinary_request.request_id, struct.pack("<H", 0))
+                )
+            )
+            self.assertEqual(ordinary.result(2), [])
+
+            build = pool.submit(client.invoke_tool, "build", [])
+            build_request = receive_peer_frame(peer)
+            peer.sendall(host_request(72, "build", ()))
+            build_host_response = receive_peer_frame(peer)
+            self.assertEqual(build_host_response.request_id, 72)
+            peer.sendall(
+                encode_frame(
+                    Frame(
+                        0x8002,
+                        build_request.request_id,
+                        struct.pack("<I", 0) + b"built",
+                    )
+                )
+            )
+            self.assertEqual(build.result(2), ToolResult(0, b"built"))
+            self.assertEqual(services.requests, ["read_provided_asset", "build"])
+            host_write_phases = [
+                data["phase"]
+                for event, data in events
+                if event == "serial_protocol_write"
+                and data["write_kind"] == "host_response"
+                and data["request_id"] == 71
+            ]
+            self.assertEqual(host_write_phases[0], "write_started")
+            self.assertIn("write_progress", host_write_phases)
+            self.assertEqual(host_write_phases[-1], "write_completed")
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=71,
+                    write_kind="host_response",
+                ),
+                ["write_completed"],
+            )
+            self.assertTrue(
+                any(
+                    event == "serial_host_service_response_prepared"
+                    and data["response_bytes"] == len(payload) + 20
+                    for event, data in events
+                )
+            )
+            self.assertTrue(
+                any(event == "serial_tool_response_received" for event, _ in events)
+            )
+            self.assertFalse(any("payload" in data for _, data in events))
+
+    def test_duplex_pump_handles_small_buffers_and_slow_peer(self) -> None:
+        payload = bytes(range(251)) * 2089
+
+        class HostService:
+            def handle_request(self, request):
+                return create_host_service_response(request.request_id, 0, payload)
+
+        with (
+            connected_serial_peer() as (serial, peer),
+            ThreadPoolExecutor() as pool,
+        ):
+            connection = serial._require_socket()
+            for endpoint in (connection, peer):
+                endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            protocol = SerialProtocolDispatcher(
+                serial,
+                exchange_host_services=HostService(),
+            )
+            protocol.start_ready()
+            try:
+                result = pool.submit(ToolClient(protocol).invoke_tool, "read", [])
+                request = receive_peer_frame(peer)
+                peer.sendall(host_request(73, "read_provided_asset", ()))
+                relayed = relay_host_response_as_tool_response(
+                    peer,
+                    request.request_id,
+                    byte_at_a_time=False,
+                    delay_seconds=0.0001,
+                )
+                self.assertEqual(relayed, payload)
+                self.assertEqual(result.result(10), ToolResult(0, payload))
+            finally:
+                protocol.close()
+
+    def test_non_reading_peer_fails_boundedly_and_close_stops_reader(self) -> None:
+        payload = b"x" * (1024 * 1024)
+        events = []
+
+        class HostService:
+            def handle_request(self, request):
+                return create_host_service_response(request.request_id, 0, payload)
+
+        with (
+            connected_serial_peer() as (serial, peer),
+            ThreadPoolExecutor() as pool,
+            patch("harness.serial_protocol._WRITE_STALL_TIMEOUT_SECONDS", 0.05),
+        ):
+            connection = serial._require_socket()
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            protocol = SerialProtocolDispatcher(
+                serial,
+                exchange_host_services=HostService(),
+                event_recorder=lambda event, data: events.append(
+                    (event, dict(data))
+                ),
+            )
+            protocol.start_ready()
+            result = pool.submit(ToolClient(protocol).invoke_tool, "read", [])
+            receive_peer_frame(peer)
+            peer.sendall(host_request(74, "read_provided_asset", ()))
+            with self.assertRaisesRegex(TimeoutError, "writing serial protocol"):
+                result.result(2)
+            protocol.close()
+            self.assertFalse(protocol.reader_alive)
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=74,
+                    write_kind="host_response",
+                ),
+                ["write_timed_out"],
+            )
+
+    def test_close_interrupts_large_host_response_without_deadlock(self) -> None:
+        payload = b"y" * (1024 * 1024)
+        events = []
+
+        class HostService:
+            def handle_request(self, request):
+                return create_host_service_response(request.request_id, 0, payload)
+
+        with connected_serial_peer() as (serial, peer), ThreadPoolExecutor() as pool:
+            connection = serial._require_socket()
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            protocol = SerialProtocolDispatcher(
+                serial,
+                exchange_host_services=HostService(),
+                event_recorder=lambda event, data: events.append(
+                    (event, dict(data))
+                ),
+            )
+            protocol.start_ready()
+            result = pool.submit(ToolClient(protocol).invoke_tool, "read", [])
+            receive_peer_frame(peer)
+            peer.sendall(host_request(75, "read_provided_asset", ()))
+            time.sleep(0.05)
+            protocol.close()
+            with self.assertRaisesRegex(SerialError, "closed"):
+                result.result(2)
+            self.assertFalse(protocol.reader_alive)
+            self.assertEqual(
+                write_terminal_phases(
+                    events,
+                    request_id=75,
+                    write_kind="host_response",
+                ),
+                ["write_cancelled"],
+            )
+
+    def test_generic_write_failure_emits_one_terminal_phase(self) -> None:
+        events = []
+
+        class FailingSerial:
+            def pump(self, _max_read_bytes, outgoing, _timeout_seconds):
+                if outgoing:
+                    raise SerialError("synthetic write failure")
+                return None, 0
+
+            def close(self):
+                pass
+
+        protocol = SerialProtocolDispatcher(
+            FailingSerial(),
+            event_recorder=lambda event, data: events.append((event, dict(data))),
+        )
+        protocol.start_ready()
+        try:
+            with self.assertRaisesRegex(SerialError, "synthetic write failure"):
+                ToolClient(protocol).list_tools()
+        finally:
+            protocol.close()
+        self.assertFalse(protocol.reader_alive)
+        self.assertEqual(
+            write_terminal_phases(
+                events,
+                request_id=1,
+                write_kind="tool_request",
+            ),
+            ["write_failed"],
+        )
+
     def test_list_tools_decodes_utf8_names(self) -> None:
         names = ["list", "café", "工具"]
         payload = struct.pack("<H", len(names)) + b"".join(
@@ -476,13 +785,13 @@ class ToolProtocolIntegrationTest(unittest.TestCase):
     def test_dispatcher_is_the_only_serial_reader_and_stops_boundedly(self) -> None:
         with connected_serial_peer() as (serial, peer):
             reader_threads: set[int] = set()
-            original_read = serial.read
+            original_pump = serial.pump
 
-            def tracked_read(max_bytes: int, timeout_seconds: float) -> bytes:
+            def tracked_pump(max_read_bytes, outgoing, timeout_seconds):
                 reader_threads.add(threading.get_ident())
-                return original_read(max_bytes, timeout_seconds)
+                return original_pump(max_read_bytes, outgoing, timeout_seconds)
 
-            serial.read = tracked_read  # type: ignore[method-assign]
+            serial.pump = tracked_pump  # type: ignore[method-assign]
             protocol = SerialProtocolDispatcher(serial)
             protocol.start_ready()
             try:

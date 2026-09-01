@@ -448,6 +448,13 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
                 "generation_started",
                 "codex_session_started",
                 "codex_turn_started",
+                "tool_app_server_queued",
+                "tool_guest_invocation_started",
+                "serial_host_service_request_received",
+                "serial_host_service_response_prepared",
+                "serial_protocol_write",
+                "serial_tool_response_received",
+                "tool_guest_invocation_completed",
                 "review_started",
                 "review_completed",
                 "build_completed",
@@ -473,6 +480,15 @@ class ExperimentObservabilityQemuIntegrationTest(unittest.TestCase):
                 "finish_generation",
             ):
                 self.assertIn(tool, completed_tools)
+            serial_events = [
+                event
+                for event in events
+                if event["event"].startswith("serial_")
+            ]
+            self.assertTrue(serial_events)
+            self.assertFalse(
+                any("payload" in event["data"] for event in serial_events)
+            )
             self.assertLess(
                 names.index("generation_started"),
                 names.index("generation_completed"),
