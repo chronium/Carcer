@@ -6,6 +6,8 @@ loads any valid CXE privately: a nonempty, at-most-511-page RWX image at
 `0x400000`, with an in-image entry and a zeroed stack page ending at
 `0x600000`. Exit reclaims all task pages. The PIT preempts user code;
 independent CPU-bound ring-3 tasks make progress without voluntary yields.
+User CPU exceptions terminate only the faulting task with status UINT64_MAX;
+the scheduler reclaims its pages and continues other workloads.
 
 Ring 3 uses `int 0x80`: RAX is the call; arguments are RDI, RSI, RDX, RCX,
 R8. Failure or an unknown call returns `UINT64_MAX`.
