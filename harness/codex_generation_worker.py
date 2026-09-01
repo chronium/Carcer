@@ -186,6 +186,8 @@ class _DynamicCallRouting:
     result_ready: bool = False
     response_write_attempted: bool = False
     terminal_outcome: str | None = None
+    turn_terminal_recorded: bool = False
+    handler_finished: bool = False
 
 
 class CodexGenerationSession:
@@ -1350,11 +1352,56 @@ class CodexGenerationSession:
         if routing is None:
             return
         status = item.get("status")
+        tool = item.get("tool")
+        with self._lock:
+            failures = []
+            if not routing.result_ready:
+                failures.append("result_not_ready")
+            if not routing.response_write_attempted:
+                failures.append("response_not_attempted")
+            if not isinstance(status, str) or status not in {
+                "completed",
+                "failed",
+            }:
+                failures.append("invalid_status")
+            if tool != routing.tool:
+                failures.append("tool_mismatch")
+        if failures:
+            self._record(
+                "tool_delivery_notification_rejected",
+                {
+                    **self._dynamic_call_identity(routing),
+                    "validation_failures": failures,
+                },
+            )
+            return
         self._finish_dynamic_call_routing(
             routing,
             "delivered",
-            item_status=status if isinstance(status, str) else None,
+            item_status=status,
         )
+
+    def _finish_dynamic_call_handler(
+        self,
+        routing: _DynamicCallRouting | None,
+    ) -> None:
+        if routing is None:
+            return
+        with self._lock:
+            routing.handler_finished = True
+        self._prune_dynamic_calls()
+
+    def _prune_dynamic_calls(self) -> None:
+        with self._lock:
+            removable = [
+                key
+                for key, routing in self._dynamic_calls.items()
+                if routing.terminal_outcome is not None
+                and routing.turn_terminal_recorded
+                and routing.handler_finished
+            ]
+            for key in removable:
+                del self._dynamic_calls[key]
 
     def _orphan_unresolved_dynamic_calls(
         self,
@@ -1378,6 +1425,8 @@ class CodexGenerationSession:
             orphaned = pending if turn_status != "interrupted" else ()
             for routing in orphaned:
                 routing.terminal_outcome = "orphaned"
+            for routing in calls:
+                routing.turn_terminal_recorded = True
         self._record(
             "turn_dynamic_calls_terminal",
             {
@@ -1397,6 +1446,7 @@ class CodexGenerationSession:
                 "tool_result_orphaned",
                 self._dynamic_call_identity(routing),
             )
+        self._prune_dynamic_calls()
         return pending
 
     def _handle_server_request(
@@ -1419,9 +1469,11 @@ class CodexGenerationSession:
             if thread_id is None or turn_id is None:
                 if routing is not None:
                     if routing.terminal_outcome is not None:
+                        self._finish_dynamic_call_handler(routing)
                         return
                     self._finish_dynamic_call_routing(routing, "rejected")
                 server.reject_server_request(message)
+                self._finish_dynamic_call_handler(routing)
                 return
             if routing is not None:
                 with self._lock:
@@ -1438,6 +1490,7 @@ class CodexGenerationSession:
                             "rejected",
                         )
                         server.reject_server_request(message)
+                    self._finish_dynamic_call_handler(routing)
                     return
             with self._lock:
                 self._active_tool_calls += 1
@@ -1488,6 +1541,7 @@ class CodexGenerationSession:
                     self._active_tool_calls -= 1
                     if self._active_tool_calls == 0:
                         self._tool_calls_idle.set()
+                self._finish_dynamic_call_handler(routing)
         else:
             server.reject_server_request(message)
 

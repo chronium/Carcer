@@ -892,7 +892,157 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                         ),
                         2,
                     )
+                    self.assertEqual(session._dynamic_calls, {})
                     session.close()
+
+    def test_premature_mismatched_review_completion_fails_planning_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            response_written_path = root / "response-written"
+            scenario = {
+                "planning_turn": {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {"focus": "design"},
+                            "call_id": "premature-review",
+                            "abandon_response": True,
+                            "completion_before_response": {
+                                "tool": "list",
+                                "status": "inProgress",
+                            },
+                        }
+                    ],
+                    "wait_for_path_before_completion": str(
+                        response_written_path
+                    ),
+                    "consume_abandoned_responses_before_completion": True,
+                    "final_message": "Plan with invalid delivery evidence.",
+                },
+                "turns": [
+                    {"final_message": "Recovered final plan."},
+                    {"final_message": "Implementation started once."},
+                ],
+            }
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _runtime_mock()
+                runtime.run_directory = root / "run"
+                session = CodexGenerationSession(
+                    runtime,
+                    fake.executable,
+                    fake.auth_file,
+                )
+                session.start()
+                server = session._server
+                self.assertIsNotNone(server)
+                assert server is not None
+                rejected = threading.Event()
+                original_record = session._record
+                original_write_result = server.write_result
+
+                def record(
+                    event: str,
+                    data: object,
+                ) -> None:
+                    original_record(event, data)
+                    if event == "tool_delivery_notification_rejected":
+                        rejected.set()
+
+                def review(
+                    _arguments: object,
+                    *,
+                    routing: object,
+                ) -> str:
+                    self.assertIsNotNone(routing)
+                    self.assertTrue(rejected.wait(2.0))
+                    return "Review completed after invalid notification."
+
+                def write_result(
+                    request_id: object,
+                    response: object,
+                ) -> None:
+                    original_write_result(request_id, response)
+                    response_written_path.write_text(
+                        "written",
+                        encoding="utf-8",
+                    )
+
+                with patch.object(
+                    session,
+                    "_record",
+                    side_effect=record,
+                ), patch.object(
+                    session,
+                    "_run_review",
+                    side_effect=review,
+                ), patch.object(
+                    server,
+                    "write_result",
+                    side_effect=write_result,
+                ):
+                    planning = session.run_initial_turn()
+                    self.assertEqual(planning.turn_status, "failed")
+                    self.assertFalse(session.planning_completed)
+                    self.assertTrue(session.planning_retry_required)
+                    self.assertEqual(session._dynamic_calls, {})
+
+                    implementation = session.run_planning_continuation_turn()
+
+                self.assertEqual(implementation.turn_status, "completed")
+                self.assertEqual(
+                    implementation.final_message,
+                    "Implementation started once.",
+                )
+                events = [
+                    call.args
+                    for call in runtime.observability.record.call_args_list
+                ]
+                notification = next(
+                    data
+                    for event, _generation, data in events
+                    if event == "tool_delivery_notification_rejected"
+                )
+                self.assertEqual(
+                    set(notification["validation_failures"]),
+                    {
+                        "result_not_ready",
+                        "response_not_attempted",
+                        "invalid_status",
+                        "tool_mismatch",
+                    },
+                )
+                self.assertFalse(
+                    any(
+                        event == "tool_result_delivered"
+                        and data["call_id"] == "premature-review"
+                        for event, _generation, data in events
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        event == "tool_result_orphaned"
+                        and data["call_id"] == "premature-review"
+                        for event, _generation, data in events
+                    )
+                )
+                turns = [
+                    message["params"]
+                    for message in fake.record()["messages"]
+                    if message.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 3)
+                self.assertEqual(
+                    [turn["permissions"] for turn in turns],
+                    [
+                        "codexos-planning",
+                        "codexos-planning",
+                        "codexos-implementor",
+                    ],
+                )
+                session.close()
 
     def test_implementation_waits_for_delayed_planning_review_delivery(
         self,

@@ -45,6 +45,39 @@ def send_client_request(method: str, params: object) -> str:
     return request_id
 
 
+def send_tool_completion(
+    params: dict[str, object],
+    result: object,
+    overrides: dict[str, object] | None = None,
+) -> None:
+    success = isinstance(result, dict) and result.get("success") is True
+    item = {
+        "id": params.get("callId"),
+        "type": "dynamicToolCall",
+        "namespace": params.get("namespace"),
+        "tool": params.get("tool"),
+        "arguments": params.get("arguments"),
+        "status": "completed" if success else "failed",
+        "success": success,
+        "contentItems": (
+            result.get("contentItems")
+            if isinstance(result, dict)
+            else None
+        ),
+    }
+    item.update(overrides or {})
+    send(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": params.get("threadId"),
+                "turnId": params.get("turnId"),
+                "item": item,
+            },
+        }
+    )
+
+
 def request_client(method: str, params: object) -> dict[str, object]:
     request_id = send_client_request(method, params)
     while True:
@@ -72,30 +105,7 @@ def request_client(method: str, params: object) -> dict[str, object]:
     server_responses.append(response)
     if method == "item/tool/call" and isinstance(params, dict):
         result = response.get("result")
-        success = isinstance(result, dict) and result.get("success") is True
-        send(
-            {
-                "method": "item/completed",
-                "params": {
-                    "threadId": params.get("threadId"),
-                    "turnId": params.get("turnId"),
-                    "item": {
-                        "id": params.get("callId"),
-                        "type": "dynamicToolCall",
-                        "namespace": params.get("namespace"),
-                        "tool": params.get("tool"),
-                        "arguments": params.get("arguments"),
-                        "status": "completed" if success else "failed",
-                        "success": success,
-                        "contentItems": (
-                            result.get("contentItems")
-                            if isinstance(result, dict)
-                            else None
-                        ),
-                    },
-                },
-            }
-        )
+        send_tool_completion(params, result)
     return response
 
 
@@ -262,6 +272,7 @@ if permission_profile == "codexos-implementor" and scenario.get(
     turns = [planning_turn, *turns]
 
 for turn_index, turn_scenario in enumerate(turns, 1):
+    abandoned_start = len(abandoned_requests)
     turn_id = f"turn-{pid}-{turn_index}"
     current_turn_id = turn_id
     turn_ids.append(turn_id)
@@ -354,6 +365,9 @@ for turn_index, turn_scenario in enumerate(turns, 1):
             abandoned_requests.append(
                 {"id": request_id, "params": call_params}
             )
+            completion = call.get("completion_before_response")
+            if isinstance(completion, dict):
+                send_tool_completion(call_params, None, completion)
         else:
             response = request_client("item/tool/call", call_params)
             tool_results.append(response)
@@ -380,6 +394,15 @@ for turn_index, turn_scenario in enumerate(turns, 1):
             if time.monotonic() >= deadline:
                 raise SystemExit(f"timed out waiting for {wait_path}")
             time.sleep(0.005)
+
+    if turn_scenario.get("consume_abandoned_responses_before_completion"):
+        for abandoned in abandoned_requests[abandoned_start:]:
+            response = read_message()
+            if response.get("id") != abandoned["id"]:
+                raise SystemExit(
+                    f"wrong abandoned client response ID: {response}"
+                )
+            server_responses.append(response)
 
     token_usage = turn_scenario.get("token_usage")
     if isinstance(token_usage, dict):
