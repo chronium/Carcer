@@ -10,9 +10,12 @@ snapshots, host-service requests/responses, tool lists, tool invocation requests
 and tool results. It also reads and writes the compatible feature-request store,
 including inherited sparse IDs and durable decisions. It does not yet own a
 serial connection or experiment process, and gate-only decision enforcement
-remains with the Python runtime. Planning evidence allocation, attempt history,
-exact private responses, and digest publication are implemented, but are not yet
-wired to a Go Codex session.
+remains with the Python runtime. The synchronous QMP client implements Unix
+socket retry, greeting and capability negotiation, status/control commands,
+event skipping, deadlines, and cancellation, but no Go component starts or owns
+a QEMU process yet. Planning evidence allocation, attempt history, exact private
+responses, and digest publication are implemented, but are not yet wired to a Go
+Codex session.
 
 ## Verification performed
 
@@ -20,7 +23,9 @@ The current milestone is verified with `go test ./...`. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning-evidence trees against the Python modules and exercise Python-to-Go and
-Go-to-Python feature loading.
+Go-to-Python feature loading. Synthetic Unix-socket peers verify exact QMP
+requests, fragmented input, asynchronous events, protocol errors, connection
+retry, and cancellation without starting QEMU.
 
 ## Remaining gaps and known differences
 
@@ -37,7 +42,13 @@ Python's unbounded integers, larger persisted values are rejected. Such values
 cannot describe an operable CodexOS generation, but this remains a documented
 validation difference. Planning thread/turn IDs and response text must also be
 valid UTF-8 in Go; Python can represent lone Unicode surrogates in IDs, although
-the real app-server protocol supplies valid Unicode strings.
+the real app-server protocol supplies valid Unicode strings. The Go QMP client
+rejects an individual message larger than 1 MiB; the Python reader has no
+explicit message bound. Normal QEMU greetings, events, and replies are far below
+that defensive limit. Go also requires response IDs to be unsigned JSON integer
+tokens; Python's general value equality would accept unusual equivalents such as
+`1.0` or `true`. QEMU emits integer request IDs, so compliant traffic is
+unchanged.
 
 ## Operational risks
 

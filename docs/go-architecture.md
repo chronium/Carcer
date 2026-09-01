@@ -98,9 +98,11 @@ host-service, and tool payload codecs. `internal/store` provides the compatible
 feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and
-public response identities in byte-compatible manifests. Go tests cover exact
+public response identities in byte-compatible manifests. `internal/qemu`
+provides the synchronous, context-aware QMP client with bounded message reads;
+QEMU process ownership is not yet implemented. Go tests cover exact
 encoding, bounds, malformed input, fragmentation/coalescing, canonical
 snapshots, persistence failure, and cross-language output. Black-box tests run
 the Python reference modules without importing optional production dependencies.
-No Go code currently starts QEMU, contacts Codex, or changes the operational
-entry point.
+Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
+currently starts QEMU, contacts Codex, or changes the operational entry point.
