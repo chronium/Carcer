@@ -45,6 +45,11 @@ only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bound
 diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
 without overwriting an existing result. The guest build service and candidate
 boot proof remain unwired.
+The process-free lifecycle core writes and reloads immutable completed and
+aborted generation archives, rejects partial or inconsistent histories, restores
+an archived gate without booting, and requires an explicit successor or rollback
+selection. It does not yet perform the selected QEMU boot or create the required
+fresh Codex session.
 
 ## Verification performed
 
@@ -117,6 +122,11 @@ already bounded and ordinary ref/status output is substantially smaller.
 Cross-run loading bounds each provenance file at 16 MiB and each Git verification
 command at 1 MiB of combined output. Python does not impose those explicit
 limits; valid handoffs, ledgers, manifests, and Git identities are much smaller.
+Generation archive loading similarly bounds metadata at 64 KiB, hardware and
+forensic manifests at 1 MiB, handoffs at 16 KiB, and source snapshots at 1 MiB.
+It also rejects symlinks anywhere under archived boot, source, or successor
+trees, whereas Python checks their roots and named required files. Valid archives
+produced by either harness contain no such symlinks and remain compatible.
 
 ## Operational risks
 

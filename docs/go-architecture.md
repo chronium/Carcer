@@ -138,3 +138,8 @@ toolchain, runs guest compilation and ISO construction under bubblewrap without
 interpreting guest commands, bounds diagnostics, kills cancelled process groups,
 and publishes only non-colliding artifacts. Candidate boot validation and the
 guest-facing build service remain separate slices.
+`internal/experiment` can also publish and load immutable completed or aborted
+generation archives, validate their ancestry and exact contents, and reopen a
+stopped run at a gate without starting any process. Successor continuation and
+rollback selection require an explicit call and currently advance only the
+process-free decision model; QEMU and fresh-session startup are not yet wired.
