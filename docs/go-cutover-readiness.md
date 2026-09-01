@@ -35,6 +35,11 @@ normal exit, duplicate start, cancellation, restart, log failures, and forced
 kill, while an optional disposable `-machine none` QEMU test exercises the real
 controller/QMP boundary without KVM or a guest image.
 
+The raw guest serial transport now implements Unix-socket retry, full writes,
+bounded reads, active cancellation, fail-closed peer handling, and canonical
+4 KiB escaped startup diagnostics. The duplex pump and sole-reader dispatcher
+are not yet implemented, so this transport is not wired into a guest lifecycle.
+
 ## Remaining gaps and known differences
 
 All process, persistence, lifecycle, Codex session, observability, CLI, operator,

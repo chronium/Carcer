@@ -94,7 +94,9 @@ owners apply deadlines and cancellation around blocking I/O.
 ## Current implemented slice
 
 `internal/guest` currently provides the version 1 frame, source snapshot,
-host-service, and tool payload codecs. `internal/store` provides the compatible
+host-service, and tool payload codecs plus the raw serial connection and bounded
+startup-diagnostic renderer. The future duplex dispatcher remains the sole
+owner of framed reads and ordered writes. `internal/store` provides the compatible
 feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and
