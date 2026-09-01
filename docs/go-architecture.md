@@ -99,8 +99,9 @@ feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and
 public response identities in byte-compatible manifests. `internal/qemu`
-provides the synchronous, context-aware QMP client with bounded message reads;
-QEMU process ownership is not yet implemented. Go tests cover exact
+provides the fixed hardware profiles and archived manifest codec plus the
+synchronous, context-aware QMP client with bounded message reads; QEMU process
+ownership is not yet implemented. Go tests cover exact
 encoding, bounds, malformed input, fragmentation/coalescing, canonical
 snapshots, persistence failure, and cross-language output. Black-box tests run
 the Python reference modules without importing optional production dependencies.

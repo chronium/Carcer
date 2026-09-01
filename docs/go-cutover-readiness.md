@@ -13,9 +13,11 @@ serial connection or experiment process, and gate-only decision enforcement
 remains with the Python runtime. The synchronous QMP client implements Unix
 socket retry, greeting and capability negotiation, status/control commands,
 event skipping, deadlines, and cancellation, but no Go component starts or owns
-a QEMU process yet. Planning evidence allocation, attempt history, exact private
-responses, and digest publication are implemented, but are not yet wired to a Go
-Codex session.
+a QEMU process yet. The two fixed hardware profiles, exact QEMU arguments,
+strict archived manifest codec, KVM availability check, and bounded QEMU version
+discovery are implemented. Planning evidence allocation, attempt history, exact
+private responses, and digest publication are implemented, but are not yet wired
+to a Go Codex session.
 
 ## Verification performed
 
@@ -25,7 +27,9 @@ properties. Black-box conformance tests compare wire bytes, feature records, and
 planning-evidence trees against the Python modules and exercise Python-to-Go and
 Go-to-Python feature loading. Synthetic Unix-socket peers verify exact QMP
 requests, fragmented input, asynchronous events, protocol errors, connection
-retry, and cancellation without starting QEMU.
+retry, and cancellation without starting QEMU. Hardware conformance compares
+exact command arguments and archived manifest bytes with the Python module;
+malformed manifest parsing also has a fuzz target.
 
 ## Remaining gaps and known differences
 
@@ -48,7 +52,10 @@ explicit message bound. Normal QEMU greetings, events, and replies are far below
 that defensive limit. Go also requires response IDs to be unsigned JSON integer
 tokens; Python's general value equality would accept unusual equivalents such as
 `1.0` or `true`. QEMU emits integer request IDs, so compliant traffic is
-unchanged.
+unchanged. Go bounds a hardware manifest and captured QEMU version output at 1
+MiB and requires QEMU command paths to be valid UTF-8; Python has no explicit
+bounds and can represent surrogate-escaped paths. Operable CodexOS paths and
+normal QEMU version output remain well inside these conservative constraints.
 
 ## Operational risks
 
