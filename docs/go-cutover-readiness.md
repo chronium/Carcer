@@ -35,8 +35,10 @@ thread/turn policy validation, interrupts, bounded diagnostics/queues, and
 TERM/KILL reaping. Agent-session orchestration remains unimplemented. The local
 observability slice validates and appends sequenced JSONL events without allowing
 recording failures to control the experiment. Its bounded activity stream
-preserves concurrent ordering and excludes raw reasoning; metrics and OTLP export
-remain unimplemented.
+preserves concurrent ordering and excludes raw reasoning. The fixed
+OpenTelemetry metric set preserves Python names, units, and public attributes,
+and an explicitly configured OTLP/HTTP exporter has bounded export and shutdown
+deadlines.
 Cross-run bootstrap can initialize and reload a fresh run from a validated latest
 completed generation, preserving exact successor-ISO, handoff, feature-ledger,
 and annotated Git-base identities. Generation lifecycle wiring remains separate.
@@ -127,6 +129,11 @@ forensic manifests at 1 MiB, handoffs at 16 KiB, and source snapshots at 1 MiB.
 It also rejects symlinks anywhere under archived boot, source, or successor
 trees, whereas Python checks their roots and named required files. Valid archives
 produced by either harness contain no such symlinks and remain compatible.
+Go bounds metric label values at 128 UTF-8 bytes and maps unknown reviewer
+focuses, operator actions, and token roles to fixed fallback values. Python
+passes those trusted strings through unchanged. Current harness catalogs and
+event producers use the preserved values; normalization prevents malformed
+telemetry from creating unbounded label cardinality.
 
 ## Operational risks
 

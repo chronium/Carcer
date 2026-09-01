@@ -124,7 +124,9 @@ snapshots, persistence failure, and cross-language output. Black-box tests run
 the Python reference modules without importing optional production dependencies.
 `internal/observability` owns a validated append-only event log with sequence
 recovery and a bounded in-memory activity stream that exposes only explicitly
-renderable app-server text; metrics and OTLP export remain unimplemented.
+renderable app-server text. Its OpenTelemetry owner records the fixed metric
+set with bounded low-cardinality attributes and optionally adds a bounded
+OTLP/HTTP exporter; telemetry failures never control the experiment.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
 currently starts QEMU, contacts Codex, or changes the operational entry point.
 `internal/codexapp` owns an isolated one-shot app-server process, sole JSONL
