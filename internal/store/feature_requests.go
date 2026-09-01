@@ -352,8 +352,11 @@ func (s *FeatureRequestStore) write(request FeatureRequest, replace bool) error 
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
-	if _, err := temporary.Write(encoded); err != nil {
+	if written, err := temporary.Write(encoded); err != nil || written != len(encoded) {
 		temporary.Close()
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return persistFeatureError(request.ID, err)
 	}
 	if err := temporary.Sync(); err != nil {
