@@ -46,7 +46,10 @@ The trusted build operation validates and materializes a source snapshot, uses
 only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bounds
 diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
 without overwriting an existing result. The guest build service and candidate
-boot proof remain unwired.
+boot proof are not yet joined by the guest-facing build service. The standalone
+candidate validator boots only in a fresh workspace, establishes QMP and serial
+before continuing execution, proves READY and list-tools behavior, records
+forensic stages, and reaps the disposable QEMU on every tested outcome.
 The process-free lifecycle core writes and reloads immutable completed and
 aborted generation archives, rejects partial or inconsistent histories, restores
 an archived gate without booting, and requires an explicit successor or rollback
@@ -78,8 +81,8 @@ lifecycle.
 
 ## Remaining gaps and known differences
 
-Generation orchestration, guest build/finish services, candidate validation,
-Codex sessions, metrics, CLI, operator, and TUI capabilities remain to be
+Generation orchestration, guest build/finish services, Codex sessions, CLI,
+operator, and TUI capabilities remain to be
 implemented. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
