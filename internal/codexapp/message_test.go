@@ -28,6 +28,12 @@ func TestMessageCodecUsesCompactUnescapedUTF8JSONL(t *testing.T) {
 }
 
 func TestDecodeMessageRejectsMalformedNonobjectTrailingAndOversizedInput(t *testing.T) {
+	if _, err := EncodeMessage(nil); err == nil {
+		t.Fatal("EncodeMessage accepted nil")
+	}
+	if _, err := EncodeMessage(map[string]any{"invalid": make(chan int)}); err == nil {
+		t.Fatal("EncodeMessage accepted an unsupported value")
+	}
 	for _, encoded := range [][]byte{
 		[]byte("{"),
 		[]byte("[]\n"),

@@ -14,6 +14,9 @@ const (
 )
 
 func EncodeMessage(message map[string]any) ([]byte, error) {
+	if message == nil {
+		return nil, &Error{Reason: "Codex app-server message is not an object"}
+	}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
