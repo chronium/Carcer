@@ -155,7 +155,7 @@ class FeatureRequestStore:
                 raise FeatureRequestError(
                     f"malformed feature-request record: {path.name}"
                 ) from error
-            request = _decode_request(value)
+            request = decode_feature_request(value)
             if request.id != request_id or request.id in requests:
                 raise FeatureRequestError(
                     f"conflicting feature-request record: {path.name}"
@@ -234,7 +234,8 @@ def _request_id_from_name(name: str) -> int:
     return request_id
 
 
-def _decode_request(value: object) -> FeatureRequest:
+def decode_feature_request(value: object) -> FeatureRequest:
+    """Decode one authoritative persisted feature-request record."""
     if not isinstance(value, dict) or set(value) != {
         "id",
         "generation",

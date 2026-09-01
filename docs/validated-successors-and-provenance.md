@@ -161,7 +161,8 @@ run, the harness validates the source archive lineage, requires the selected
 generation to be the latest source archive, and requires the supplied initial
 ISO to be byte-identical to that generation's selected successor. The
 configured Git base must be that source run's annotated generation tag, so the
-new lineage cannot record an unrelated valid ref as its ancestry.
+new lineage cannot record an unrelated valid ref as its ancestry. The source
+ledger must not contain requests attributed to a later, unarchived generation.
 
 The destination records immutable `cross-run-bootstrap.json` provenance and an
 exact `cross-run-handoff.txt`. A canonical

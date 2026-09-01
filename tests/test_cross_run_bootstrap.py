@@ -275,6 +275,82 @@ class CrossRunBootstrapTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
 
+    def test_rejects_requests_from_an_unarchived_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "experiment-002"
+            files = [SnapshotFile("seed/kernel.c", b"source\n")]
+            for generation in range(16):
+                _archive_completed(
+                    source,
+                    generation,
+                    generation - 1 if generation else None,
+                    "successor" if generation else "initial",
+                    files,
+                    handoff=f"G{generation}",
+                )
+            FeatureRequestStore(source).create(
+                16,
+                "Unarchived successor request",
+                "Created while the next generation was active.",
+            )
+            repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[-1]
+            destination = root / "experiment-003"
+
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "newer than the inherited generation"
+            ):
+                initialize_cross_run_bootstrap(
+                    destination,
+                    source / "generation-0015" / "successor" / "codexos.iso",
+                    source,
+                    15,
+                    repository,
+                    source_record.tag,
+                )
+
+            self.assertFalse(destination.exists())
+
+    def test_empty_feature_request_description_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            _archive_completed(
+                source,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"source\n")],
+                handoff="source",
+            )
+            request = FeatureRequestStore(source).create(0, "Title only", "")
+            repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
+            destination = root / "destination"
+
+            initialize_cross_run_bootstrap(
+                destination,
+                source / "generation-0000" / "successor" / "codexos.iso",
+                source,
+                0,
+                repository,
+                source_record.tag,
+            )
+
+            self.assertEqual(
+                load_cross_run_bootstrap(destination).inherited_request_ids,
+                (request.id,),
+            )
+            self.assertEqual(
+                FeatureRequestStore(destination).request(request.id).description,
+                "",
+            )
+
     def test_validates_immutable_inherited_feature_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -343,6 +419,44 @@ class CrossRunBootstrapTests(unittest.TestCase):
                 CrossRunBootstrapError, "feature ledger"
             ):
                 load_cross_run_bootstrap(ledger_changed)
+
+            invalid_status = root / "invalid-status"
+            initialize_cross_run_bootstrap(
+                invalid_status, image, source, 0, repository, source_record.tag
+            )
+            invalid_ledger_path = (
+                invalid_status / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER
+            )
+            invalid_ledger = json.loads(invalid_ledger_path.read_bytes())
+            invalid_ledger["requests"][0]["status"] = []
+            invalid_ledger_bytes = (
+                json.dumps(
+                    invalid_ledger,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            invalid_ledger_path.write_bytes(invalid_ledger_bytes)
+            invalid_manifest_path = (
+                invalid_status / CROSS_RUN_BOOTSTRAP_MANIFEST
+            )
+            invalid_manifest = json.loads(invalid_manifest_path.read_bytes())
+            invalid_manifest["feature_requests"]["sha256"] = hashlib.sha256(
+                invalid_ledger_bytes
+            ).hexdigest()
+            invalid_manifest["feature_requests"]["size"] = len(
+                invalid_ledger_bytes
+            )
+            invalid_manifest_path.write_text(
+                json.dumps(invalid_manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "ledger record is invalid"
+            ):
+                load_cross_run_bootstrap(invalid_status)
 
             evolved = root / "evolved"
             initialize_cross_run_bootstrap(

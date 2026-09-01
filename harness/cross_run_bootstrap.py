@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .feature_requests import (
-    MAX_FEATURE_DESCRIPTION_BYTES,
-    MAX_FEATURE_TITLE_BYTES,
     FeatureRequest,
+    FeatureRequestError,
     FeatureRequestStore,
+    decode_feature_request,
 )
 
 CROSS_RUN_BOOTSTRAP_MANIFEST = "cross-run-bootstrap.json"
@@ -101,6 +101,13 @@ def initialize_cross_run_bootstrap(
                 "initial ISO is not byte-identical to the inherited successor"
             )
         requests = FeatureRequestStore(source).requests()
+        if any(
+            request.generation > source_generation for request in requests
+        ):
+            raise CrossRunBootstrapError(
+                "source feature-request ledger contains a request from a "
+                "generation newer than the inherited generation"
+            )
     except CrossRunBootstrapError:
         raise
     except (OSError, RuntimeError, ValueError) as error:
@@ -444,46 +451,12 @@ def _decode_feature_ledger(contents: bytes) -> tuple[FeatureRequest, ...]:
             raise CrossRunBootstrapError(
                 "cross-run bootstrap feature ledger record is invalid"
             )
-        request_id = record["id"]
-        generation = record["generation"]
-        title = record["title"]
-        description = record["description"]
-        status = record["status"]
-        if (
-            type(request_id) is not int
-            or request_id <= 0
-            or type(generation) is not int
-            or generation < 0
-            or not isinstance(title, str)
-            or not isinstance(description, str)
-            or status not in {"pending", "approved", "denied"}
-        ):
+        try:
+            request = decode_feature_request(record)
+        except FeatureRequestError as error:
             raise CrossRunBootstrapError(
                 "cross-run bootstrap feature ledger record is invalid"
-            )
-        try:
-            encoded_title = title.encode("utf-8")
-            encoded_description = description.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise CrossRunBootstrapError(
-                "cross-run bootstrap feature ledger text is invalid"
             ) from error
-        if (
-            not encoded_title
-            or len(encoded_title) > MAX_FEATURE_TITLE_BYTES
-            or not encoded_description
-            or len(encoded_description) > MAX_FEATURE_DESCRIPTION_BYTES
-        ):
-            raise CrossRunBootstrapError(
-                "cross-run bootstrap feature ledger text is invalid"
-            )
-        request = FeatureRequest(
-            request_id,
-            generation,
-            title,
-            description,
-            status,
-        )
         requests.append(request)
     decoded = tuple(requests)
     if (
