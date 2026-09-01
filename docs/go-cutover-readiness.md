@@ -14,9 +14,11 @@ implements discovery, invocation, request-ID rollover, and response validation.
 These components are not yet wired into candidate boot or a generation runtime.
 Go also reads and writes the compatible feature-request store, including inherited
 sparse IDs and durable decisions; gate-only decision enforcement remains with the
-Python runtime. The synchronous QMP client implements Unix-socket retry, greeting
-and capability negotiation, status/control commands, event skipping, deadlines,
-and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
+Python runtime. Provided-assets snapshots, deterministic PAX archives, append-only
+activation manifests, and bounded guest list/read handling are implemented;
+operator and generation routing remain unwired. The synchronous QMP client
+implements Unix-socket retry, greeting and capability negotiation, status/control
+commands, event skipping, deadlines, and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
 and direct-child QEMU controller are implemented. Planning evidence allocation,
 attempt history, exact private responses, digest publication, filtered
@@ -35,7 +37,8 @@ The current milestone is verified with `go test ./...`. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
-exercise Python-to-Go and Go-to-Python feature loading. Synthetic Unix-socket
+provided-assets bytes and manifests against Python, and exercise Python-to-Go
+and Go-to-Python feature loading. Synthetic Unix-socket
 peers verify exact QMP requests, fragmented input, asynchronous events, protocol
 errors, connection retry, and cancellation without starting QEMU. Hardware conformance compares
 exact command arguments and archived manifest bytes with the Python module;

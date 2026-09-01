@@ -100,9 +100,11 @@ The dispatcher bounds queued output and write stalls, preserves read-first neste
 host-service handling, and owns all framed reads and ordered writes.
 `internal/store` provides the compatible
 feature-request ledger, including sparse imports, authoritative refreshes, and
-atomic synced record replacement. `internal/provenance` records planning
-allocation, attempts, interruption/resumption, exact private responses, and
-public response identities in byte-compatible manifests. It also captures the
+atomic synced record replacement. It also freezes provided assets into exact
+single-file or deterministic PAX-tar bytes, maintains append-only activation
+revisions, and serves bounded descriptor/read requests. `internal/provenance`
+records planning allocation, attempts, interruption/resumption, exact private
+responses, and public response identities in byte-compatible manifests. It also captures the
 filtered exit-interview transcript and atomically publishes one immutable,
 run-scoped Markdown artifact. Build and review evidence records exact source and
 artifact identities, preserves incomplete attempts, and publishes only validated
