@@ -21,9 +21,9 @@ operations. It does not hide them behind general provider or service layers.
 
 `internal/guest` owns byte-level framing, source snapshot and tool/host-service
 protocols, the serial transport, and the single-reader duplex dispatcher. The
-dispatcher will own the sole read loop and all ordered writes. Callers receive
-responses through bounded per-request channels; host-service work may execute
-outside the read loop, but responses return to the dispatcher for writing.
+dispatcher owns the sole read loop and all ordered writes. One serialized tool
+exchange waits on dispatcher state, while host-service work runs synchronously on
+the read loop so its response is queued before later frames are handled.
 
 `internal/qemu` owns the hardware profile, QEMU child process, QMP connection,
 and bounded process shutdown. `internal/build` owns the fixed trusted build and
@@ -94,9 +94,11 @@ owners apply deadlines and cancellation around blocking I/O.
 ## Current implemented slice
 
 `internal/guest` currently provides the version 1 frame, source snapshot,
-host-service, and tool payload codecs plus the raw serial connection and bounded
-startup-diagnostic renderer. The future duplex dispatcher remains the sole
-owner of framed reads and ordered writes. `internal/store` provides the compatible
+host-service, and tool payload codecs, the raw serial connection, the sole-reader
+duplex dispatcher, canonical READY handling, and the request-matching tool client.
+The dispatcher bounds queued output and write stalls, preserves read-first nested
+host-service handling, and owns all framed reads and ordered writes.
+`internal/store` provides the compatible
 feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and

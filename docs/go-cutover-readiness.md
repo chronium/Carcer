@@ -5,20 +5,22 @@ and is still the only operational entry point.
 
 ## Completed capabilities
 
-The Go implementation has compatible pure codecs for serial frames, source
-snapshots, host-service requests/responses, tool lists, tool invocation requests,
-and tool results. It also reads and writes the compatible feature-request store,
-including inherited sparse IDs and durable decisions. It does not yet own a
-serial connection or experiment process, and gate-only decision enforcement
-remains with the Python runtime. The synchronous QMP client implements Unix
-socket retry, greeting and capability negotiation, status/control commands,
-event skipping, deadlines, and cancellation, but no Go component starts or owns
-a QEMU process yet. The two fixed hardware profiles, exact QEMU arguments,
-strict archived manifest codec, KVM availability check, and bounded QEMU version
-discovery are implemented. A direct-child QEMU controller owns log descriptors,
-asynchronous reaping, and bounded TERM/KILL shutdown. Planning evidence
-allocation, attempt history, exact private responses, and digest publication are
-implemented, but are not yet wired to a Go Codex session.
+The Go implementation has compatible codecs for serial frames, source snapshots,
+host-service requests/responses, tool lists, tool invocation requests, and tool
+results. Its sole-reader serial dispatcher owns canonical READY detection,
+read-first duplex pumping, ordered partial writes, nested host-service routing,
+tool response matching, and bounded write/shutdown deadlines. The tool client
+implements discovery, invocation, request-ID rollover, and response validation.
+These components are not yet wired into candidate boot or a generation runtime.
+Go also reads and writes the compatible feature-request store, including inherited
+sparse IDs and durable decisions; gate-only decision enforcement remains with the
+Python runtime. The synchronous QMP client implements Unix-socket retry, greeting
+and capability negotiation, status/control commands, event skipping, deadlines,
+and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
+archived manifest codec, KVM availability check, bounded QEMU version discovery,
+and direct-child QEMU controller are implemented. Planning evidence allocation,
+attempt history, exact private responses, and digest publication are implemented,
+but are not yet wired to a Go Codex session.
 
 ## Verification performed
 
@@ -35,19 +37,20 @@ normal exit, duplicate start, cancellation, restart, log failures, and forced
 kill, while an optional disposable `-machine none` QEMU test exercises the real
 controller/QMP boundary without KVM or a guest image.
 
-The raw guest serial transport now implements Unix-socket retry, full writes,
-bounded reads, active cancellation, fail-closed peer handling, and canonical
-4 KiB escaped startup diagnostics. The duplex pump and sole-reader dispatcher
-are not yet implemented, so this transport is not wired into a guest lifecycle.
+Serial verification includes fragmented READY and frames, read-before-write
+ordering, forced partial writes, nested host requests, response-timeout suspension,
+scope routing, malformed-request recovery, cancellation, peer closure, write
+stall/failure, callback reentrancy, large host responses, progress events, and
+bounded shutdown. The dispatcher and tool client are not yet wired into a guest
+lifecycle.
 
 ## Remaining gaps and known differences
 
-All process, persistence, lifecycle, Codex session, observability, CLI, operator,
-and TUI capabilities remain to be implemented. Tool request-ID allocation and
-response matching await the serial dispatcher. Go `ReadFrame` relies on its
-transport owner for deadlines, while Python's public helper currently applies a
-five-second deadline itself; the eventual Go serial transport must preserve the
-observable timeout.
+Most persistence and all generation lifecycle, Codex session, observability, CLI,
+operator, and TUI capabilities remain to be implemented. Go `ReadFrame` relies on
+its transport owner for deadlines, while Python's public helper currently applies
+a five-second deadline itself; the dispatcher provides the bounded production
+transport path.
 
 There are no intentional wire-format differences in the implemented codecs.
 Feature IDs and generation numbers are represented as uint64 in Go; unlike
@@ -68,6 +71,10 @@ normal QEMU version output remain well inside these conservative constraints.
 The Python controller reaps an exited QEMU when `is_running` or `pid` is read;
 Go uses one owned wait goroutine and may close the parent log descriptors sooner,
 while preserving the reported process state and archived log contents.
+Python's serial dispatcher uses an unbounded write deque. Go instead fails closed
+when more than 8 writes or approximately 32 MiB are queued, preventing a trusted
+host-service burst from growing memory without bound; ordinary traffic remains
+well below both limits.
 
 ## Operational risks
 
