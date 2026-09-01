@@ -36,6 +36,9 @@ unimplemented. The local observability slice validates and appends sequenced
 JSONL events without allowing recording failures to control the experiment. Its
 bounded activity stream preserves concurrent ordering and excludes raw reasoning;
 metrics and OTLP export remain unimplemented.
+Cross-run bootstrap can initialize and reload a fresh run from a validated latest
+completed generation, preserving exact successor-ISO, handoff, feature-ledger,
+and annotated Git-base identities. Generation lifecycle wiring remains separate.
 
 ## Verification performed
 
@@ -101,6 +104,9 @@ events remain far below these limits, and live observation remains non-controlli
 Go bounds combined stdout/stderr from each Git plumbing command at 32 MiB;
 Python captures command output without an explicit limit. Valid snapshots are
 already bounded and ordinary ref/status output is substantially smaller.
+Cross-run loading bounds each provenance file at 16 MiB and each Git verification
+command at 1 MiB of combined output. Python does not impose those explicit
+limits; valid handoffs, ledgers, manifests, and Git identities are much smaller.
 
 ## Operational risks
 

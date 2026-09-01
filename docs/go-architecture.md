@@ -102,7 +102,10 @@ host-service handling, and owns all framed reads and ordered writes.
 feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. It also freezes provided assets into exact
 single-file or deterministic PAX-tar bytes, maintains append-only activation
-revisions, and serves bounded descriptor/read requests. `internal/provenance`
+revisions, and serves bounded descriptor/read requests. Cross-run bootstrap
+validates an immutable completed source generation, successor ISO, annotated Git
+base, handoff, and feature ledger before atomically publishing a fresh run.
+`internal/provenance`
 records planning allocation, attempts, interruption/resumption, exact private
 responses, and public response identities in byte-compatible manifests. It also captures the
 filtered exit-interview transcript and atomically publishes one immutable,
