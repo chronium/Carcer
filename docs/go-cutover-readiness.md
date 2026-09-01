@@ -26,7 +26,10 @@ exit-interview capture, and immutable Markdown publication are implemented.
 Build and review evidence includes immutable sequence allocation, exact byte
 identities, incomplete-attempt preservation, source-read capture, and
 fail-closed latest-success publication. These provenance components are not yet
-wired to Go build or Codex sessions. The app-server slice provides a
+wired to Go build or Codex sessions. Generation Git reconciliation preserves the
+configured base commit, exact source trees/messages/annotations, rollback
+lineages, immutable conflicts, and the developer worktree; operator integration
+remains unwired. The app-server slice provides a
 bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
 derives exact non-duplicating deltas; process and session ownership remain
 unimplemented. The local observability slice validates and appends sequenced
@@ -95,6 +98,9 @@ smaller; the bound prevents malformed output from exhausting harness memory.
 Go also bounds an individual durable event at 16 MiB and queues at most 4096
 live activity events. Python leaves both paths unbounded; normal metadata-only
 events remain far below these limits, and live observation remains non-controlling.
+Go bounds combined stdout/stderr from each Git plumbing command at 32 MiB;
+Python captures command output without an explicit limit. Valid snapshots are
+already bounded and ordinary ref/status output is substantially smaller.
 
 ## Operational risks
 
