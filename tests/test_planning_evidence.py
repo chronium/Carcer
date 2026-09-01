@@ -30,6 +30,10 @@ class PlanningEvidenceTests(unittest.TestCase):
             self.assertEqual(manifest["outcome"], "completed")
             self.assertEqual(manifest["thread_id"], "thread-sol")
             self.assertEqual(manifest["turn_id"], "turn-plan")
+            self.assertEqual(
+                [attempt["outcome"] for attempt in manifest["attempts"]],
+                ["completed"],
+            )
             self.assertEqual(manifest["response_bytes"], len(encoded))
             self.assertEqual(
                 manifest["response_sha256"],
@@ -43,12 +47,38 @@ class PlanningEvidenceTests(unittest.TestCase):
             root = Path(temporary)
             interrupted = PlanningEvidenceStore(root).begin(4, "thread-4")
             interrupted.record_started("turn-4")
-            interrupted.complete("interrupted", None)
+            interrupted.complete("interrupted", "Partial plan.")
+            interrupted_manifest = json.loads(
+                (
+                    root
+                    / "planning-evidence/generation-0004/manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(interrupted_manifest["outcome"], "incomplete")
+            self.assertEqual(interrupted_manifest["stage"], "awaiting_resume")
+            self.assertEqual(
+                interrupted_manifest["attempts"][0]["outcome"],
+                "interrupted",
+            )
+            self.assertFalse(
+                (root / "planning-evidence/generation-0004/response.txt").exists()
+            )
+            self.assertEqual(
+                (
+                    root
+                    / "planning-evidence/generation-0004"
+                    / interrupted_manifest["attempts"][0]["response_file"]
+                ).read_text(encoding="utf-8"),
+                "Partial plan.",
+            )
+
+            interrupted.record_started("turn-5")
+            interrupted.complete("completed", "Final successful plan.")
             failed = PlanningEvidenceStore(root).begin(5, "thread-5")
             failed.record_started("turn-5")
             failed.fail()
 
-            interrupted_manifest = json.loads(
+            completed_manifest = json.loads(
                 (
                     root
                     / "planning-evidence/generation-0004/manifest.json"
@@ -60,9 +90,25 @@ class PlanningEvidenceTests(unittest.TestCase):
                     / "planning-evidence/generation-0005/manifest.json"
                 ).read_text(encoding="utf-8")
             )
-            self.assertEqual(interrupted_manifest["outcome"], "interrupted")
-            self.assertFalse(interrupted_manifest["response_present"])
+            self.assertEqual(completed_manifest["outcome"], "completed")
+            self.assertEqual(
+                [
+                    attempt["outcome"]
+                    for attempt in completed_manifest["attempts"]
+                ],
+                ["interrupted", "completed"],
+            )
+            self.assertEqual(
+                (
+                    root / "planning-evidence/generation-0004/response.txt"
+                ).read_text(encoding="utf-8"),
+                "Final successful plan.",
+            )
             self.assertEqual(failed_manifest["outcome"], "failed")
+            self.assertEqual(
+                failed_manifest["attempts"][0]["outcome"],
+                "failed",
+            )
             self.assertNotIn("response_file", failed_manifest)
 
 

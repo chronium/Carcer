@@ -96,6 +96,12 @@ IMPLEMENTATION_PROMPT = (
     "implementation work. The preceding plan remains available in the conversation "
     "context; use your own judgment and revise it whenever appropriate."
 )
+PLANNING_CONTINUE_PROMPT = (
+    "Continue the planning phase after the operator pause. Persistent guest and "
+    "runtime changes and generation completion remain unavailable. When planning "
+    "is complete, provide the final plan; implementation will then follow "
+    "automatically in this same session and thread."
+)
 
 _BUILD_TOOL_DESCRIPTION = (
     "Compile and link the exact current persistent mutable CodexOS guest source, "
@@ -395,13 +401,28 @@ class CodexGenerationSession:
                 },
             )
             raise CodexGenerationWorkerError(str(error)) from error
+        return self._run_planning_sequence(
+            _planning_prompt(self._runtime, self._objective)
+        )
+
+    def run_planning_continuation_turn(
+        self,
+        prompt: str = PLANNING_CONTINUE_PROMPT,
+    ) -> CodexGenerationResult:
+        if not self._initial_turn_started or self._planning_evidence is None:
+            raise RuntimeError("initial planning has not started")
+        if self.planning_completed:
+            raise RuntimeError("planning has already completed")
+        return self._run_planning_sequence(prompt)
+
+    def _run_planning_sequence(self, prompt: str) -> CodexGenerationResult:
         with self._lock:
             self._initial_sequence_active = True
             self._initial_sequence_done.clear()
             self._stop_before_implementation.clear()
         try:
             planning = self._run_turn(
-                _planning_prompt(self._runtime, self._objective),
+                prompt,
                 turn_phase="planning",
             )
             if (
@@ -784,7 +805,7 @@ class CodexGenerationSession:
         except CodexGenerationWorkerError:
             if interview:
                 self._finish_failed_interview_turn(turn_id)
-            if self._last_turn_status != "failed":
+            if turn_phase == "planning" or self._last_turn_status != "failed":
                 self._healthy = False
             self._record_turn_failure(
                 turn_number,

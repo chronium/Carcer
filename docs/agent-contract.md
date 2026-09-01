@@ -26,7 +26,9 @@ validation; and record an advisory external feature request. Persistent source
 mutation and generation completion are denied by the trusted bridge until the
 implementation turn. The planning turn also uses a read-only, no-network Codex
 permission profile. A failed or interrupted plan does not automatically start
-implementation.
+implementation. If an operator pause interrupts planning, resume continues
+planning on the same app-server thread with the same restrictions; implementation
+starts only after a planning attempt completes successfully.
 
 Contract version 6 retained the version 5 behavioral contract and added the
 generic provided-asset host-service interface. When that trusted capability is
@@ -125,9 +127,11 @@ provenance only. Model-token metric labels remain exactly `model` and `role`.
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
 Generation 10 ran under contract version 4. No autonomous generation ran under
 contract version 5 before it was superseded. Generations 11 through 15 ran under
-contract version 6. Generation 16 onward runs under contract version 7. Other
-runs record the contract version actually used in
-their implementor provenance; historical events are not backfilled.
+contract version 6, and experiment 2 ends at Generation 15. Contract version 7
+planning mode begins with experiment 3, forked from experiment 2 Generation 15;
+this document does not invent experiment 3's initial generation number. Other
+runs record the contract version actually used in their implementor provenance;
+historical events are not backfilled.
 
 ## Post-generation exit interviews
 

@@ -605,7 +605,11 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                         / "planning-evidence/generation-0000/manifest.json"
                     ).read_text(encoding="utf-8")
                 )
-                self.assertEqual(manifest["outcome"], outcome)
+                self.assertEqual(
+                    manifest["outcome"],
+                    "incomplete" if outcome == "interrupted" else outcome,
+                )
+                self.assertEqual(manifest["attempts"][0]["outcome"], outcome)
                 session.close()
 
     def test_plan_text_is_private_evidence_not_operational_telemetry(self) -> None:
@@ -648,6 +652,52 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 ).read_text(encoding="utf-8"),
                 secret,
             )
+
+    def test_failed_resumed_planning_remains_fail_closed(self) -> None:
+        with _fake_codex(
+            {
+                "planning_turn": {"turn_status": "interrupted"},
+                "turns": [
+                    {
+                        "turn_status": "failed",
+                        "turn_error": {"message": "planning failed"},
+                    },
+                    {"final_message": "implementation must not start"},
+                ],
+            }
+        ) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            first = session.run_initial_turn()
+            self.assertEqual(first.turn_status, "interrupted")
+            with self.assertRaises(CodexGenerationWorkerError):
+                session.run_planning_continuation_turn()
+
+            record = fake.record()
+            self.assertEqual(
+                sum(
+                    message.get("method") == "turn/start"
+                    for message in record["messages"]
+                ),
+                2,
+            )
+            self.assertFalse(session.healthy)
+            manifest = json.loads(
+                (
+                    runtime.run_directory
+                    / "planning-evidence/generation-0000/manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["outcome"], "failed")
+            self.assertEqual(
+                [attempt["outcome"] for attempt in manifest["attempts"]],
+                ["interrupted", "failed"],
+            )
+            session.close()
 
     def test_initial_prompt_hardware_is_derived_from_profile(self) -> None:
         profiles = (

@@ -24,7 +24,10 @@ from harness import (
     ToolResult,
 )
 from harness.operator_console import OperatorConsole, main
-from harness.codex_generation_worker import CodexGenerationSessionMode
+from harness.codex_generation_worker import (
+    PLANNING_CONTINUE_PROMPT,
+    CodexGenerationSessionMode,
+)
 from tests.test_codex_generation_worker import (
     _GUEST_TOOLS,
     _assert_process_dead,
@@ -462,10 +465,13 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 self.assertIn("same session", output.getvalue())
                 console._terminate_agent_session(interrupt=False)
 
-    def test_pause_during_planning_never_starts_implementation(self) -> None:
+    def test_pause_resume_continues_planning_before_implementation(self) -> None:
         scenario = {
             "planning_turn": {"hold_for_interrupt": True},
-            "final_message": "Implementation must not start.",
+            "turns": [
+                {"final_message": "Final recovered plan."},
+                {"final_message": "Implementation followed the plan."},
+            ],
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -477,10 +483,11 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 runtime.resume.side_effect = lambda: setattr(
                     runtime, "state", RuntimeState.RUNNING
                 )
+                output = io.StringIO()
                 console = OperatorConsole(
                     runtime,
                     io.StringIO(),
-                    io.StringIO(),
+                    output,
                     codex_executable=str(fake.executable),
                     codex_auth_file=fake.auth_file,
                 )
@@ -491,29 +498,57 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                     and console._session.active_turn_phase == "planning"
                 )
                 self.assertEqual(console.codex_turn_state, "planning")
+                session = console._session
+                process_pid = session.process_pid
+                thread_id = session.thread_id
 
                 console._pause()
                 self.assertIs(runtime.state, RuntimeState.PAUSED)
-                self.assertFalse(console._session.planning_completed)
+                self.assertFalse(session.planning_completed)
                 console._resume()
+                _wait_for(lambda: console._turn_thread is None)
                 self.assertIs(runtime.state, RuntimeState.RUNNING)
-                self.assertIsNone(console._turn_thread)
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "planning did not complete",
-                ):
-                    console._start_agent()
+                self.assertTrue(session.planning_completed)
+                self.assertEqual(session.process_pid, process_pid)
+                self.assertEqual(session.thread_id, thread_id)
                 record = fake.record()
-                self.assertEqual(
-                    sum(
-                        message.get("method") == "turn/start"
-                        for message in record["messages"]
-                    ),
-                    1,
+                turns = [
+                    message["params"]
+                    for message in record["messages"]
+                    if message.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 3)
+                self.assertTrue(
+                    all(turn["threadId"] == thread_id for turn in turns)
                 )
-                self.assertNotIn(
-                    "Implementation must not start.",
-                    json.dumps(record),
+                self.assertEqual(
+                    [turn["permissions"] for turn in turns],
+                    [
+                        "codexos-planning",
+                        "codexos-planning",
+                        "codexos-implementor",
+                    ],
+                )
+                self.assertEqual(
+                    turns[1]["input"][0]["text"],
+                    PLANNING_CONTINUE_PROMPT,
+                )
+                evidence = root / "run/planning-evidence/generation-0000"
+                manifest = json.loads(
+                    (evidence / "manifest.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(manifest["outcome"], "completed")
+                self.assertEqual(
+                    [attempt["outcome"] for attempt in manifest["attempts"]],
+                    ["interrupted", "completed"],
+                )
+                self.assertEqual(
+                    (evidence / "response.txt").read_text(encoding="utf-8"),
+                    "Final recovered plan.",
+                )
+                self.assertIn(
+                    "Implementation followed the plan.",
+                    output.getvalue(),
                 )
                 console._terminate_agent_session(interrupt=False)
 

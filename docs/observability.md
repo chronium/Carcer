@@ -118,10 +118,11 @@ metric labels. Host-service arguments and response contents are not recorded.
 
 Each fresh generation also records one private run-local planning artifact under
 `planning-evidence/generation-NNNN/`. Its manifest identifies the generation,
-app-server thread and turn, terminal status, exact UTF-8 response byte count, and
-SHA-256; `response.txt` contains the exact final planning response without
-rewriting or summarization. The response is written atomically before a completed
-manifest is published and remains available if the generation later aborts.
+app-server thread, ordered turn attempts, outcomes, exact UTF-8 response byte
+counts, and SHA-256 values. Interrupted attempts remain explicitly interrupted;
+only a successful planning attempt atomically publishes the immutable final
+`response.txt` without rewriting or summarization. The evidence remains available
+if the generation later aborts.
 
 Operational `planning_started`, `planning_completed`, `planning_interrupted`,
 and `planning_failed` events contain serving/turn provenance and, for a captured

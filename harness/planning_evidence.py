@@ -1,4 +1,4 @@
-"""Private run-local evidence for one fresh generation's planning turn."""
+"""Private run-local evidence for one fresh generation's planning phase."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 class PlanningEvidenceError(RuntimeError):
@@ -57,6 +57,7 @@ class PlanningEvidenceStore:
             "turn_id": None,
             "stage": "allocated",
             "outcome": "incomplete",
+            "attempts": [],
         }
         _atomic_json(directory / "manifest.json", manifest)
         return PlanningEvidence(directory, manifest)
@@ -74,8 +75,16 @@ class PlanningEvidence:
     def record_started(self, turn_id: str) -> None:
         if not isinstance(turn_id, str) or not turn_id:
             raise ValueError("planning turn ID must not be empty")
-        if self._manifest["stage"] != "allocated":
-            raise PlanningEvidenceError("planning evidence has already started")
+        if self._manifest["stage"] not in {"allocated", "awaiting_resume"}:
+            raise PlanningEvidenceError("planning evidence cannot start another attempt")
+        attempts = self._attempts()
+        attempts.append(
+            {
+                "attempt": len(attempts) + 1,
+                "turn_id": turn_id,
+                "outcome": "active",
+            }
+        )
         self._manifest["turn_id"] = turn_id
         self._manifest["stage"] = "started"
         _atomic_json(self._directory / "manifest.json", self._manifest)
@@ -87,34 +96,77 @@ class PlanningEvidence:
     ) -> PlanningResponseIdentity:
         if outcome not in {"completed", "interrupted"}:
             raise ValueError("planning completion outcome is invalid")
-        if self._manifest["stage"] != "started":
-            raise PlanningEvidenceError("planning evidence is not active")
+        attempt = self._active_attempt()
         exact_response = "" if response is None else response
         encoded = exact_response.encode("utf-8")
         identity = PlanningResponseIdentity(
             hashlib.sha256(encoded).hexdigest(),
             len(encoded),
         )
-        _atomic_bytes(self._directory / "response.txt", encoded)
-        self._manifest.update(
+        response_file = (
+            "response.txt"
+            if outcome == "completed"
+            else f"attempt-{attempt['attempt']:04d}-response.txt"
+        )
+        _atomic_bytes(self._directory / response_file, encoded)
+        attempt.update(
             {
-                "stage": "completed",
                 "outcome": outcome,
-                "response_file": "response.txt",
+                "response_file": response_file,
                 "response_present": response is not None,
                 "response_bytes": identity.size,
                 "response_sha256": identity.sha256,
             }
         )
+        if outcome == "completed":
+            self._manifest.update(
+                {
+                    "stage": "completed",
+                    "outcome": "completed",
+                    "response_file": response_file,
+                    "response_present": response is not None,
+                    "response_bytes": identity.size,
+                    "response_sha256": identity.sha256,
+                }
+            )
+        else:
+            self._manifest["stage"] = "awaiting_resume"
+            self._manifest["outcome"] = "incomplete"
         _atomic_json(self._directory / "manifest.json", self._manifest)
         return identity
 
     def fail(self) -> None:
-        if self._manifest["stage"] == "completed":
+        if self._manifest["outcome"] in {"completed", "failed"}:
             return
+        attempts = self._attempts()
+        if self._manifest["stage"] == "started":
+            self._active_attempt()["outcome"] = "failed"
+        else:
+            attempts.append(
+                {
+                    "attempt": len(attempts) + 1,
+                    "turn_id": None,
+                    "outcome": "failed",
+                }
+            )
         self._manifest["stage"] = "completed"
         self._manifest["outcome"] = "failed"
         _atomic_json(self._directory / "manifest.json", self._manifest)
+
+    def _attempts(self) -> list[dict[str, Any]]:
+        attempts = self._manifest.get("attempts")
+        if not isinstance(attempts, list):
+            raise PlanningEvidenceError("planning evidence attempts are invalid")
+        return attempts
+
+    def _active_attempt(self) -> dict[str, Any]:
+        attempts = self._attempts()
+        if self._manifest["stage"] != "started" or not attempts:
+            raise PlanningEvidenceError("planning evidence is not active")
+        attempt = attempts[-1]
+        if not isinstance(attempt, dict) or attempt.get("outcome") != "active":
+            raise PlanningEvidenceError("planning evidence has no active attempt")
+        return attempt
 
 
 def _atomic_json(path: Path, value: object) -> None:
