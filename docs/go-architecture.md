@@ -113,5 +113,6 @@ snapshots, persistence failure, and cross-language output. Black-box tests run
 the Python reference modules without importing optional production dependencies.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
 currently starts QEMU, contacts Codex, or changes the operational entry point.
-`internal/codexapp` currently validates cumulative token-usage notifications and
-derives non-duplicating metric deltas; it does not yet start an app-server process.
+`internal/codexapp` currently provides a bounded UTF-8 JSONL message codec,
+validates cumulative token-usage notifications, and derives non-duplicating
+metric deltas; it does not yet start an app-server process.

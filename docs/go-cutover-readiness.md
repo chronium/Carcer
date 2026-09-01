@@ -20,9 +20,10 @@ and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
 and direct-child QEMU controller are implemented. Planning evidence allocation,
 attempt history, exact private responses, and digest publication are implemented,
-but are not yet wired to a Go Codex session. The app-server slice validates
-cumulative token-usage notifications and derives exact non-duplicating deltas;
-process and session ownership remain unimplemented.
+but are not yet wired to a Go Codex session. The app-server slice provides a
+bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
+derives exact non-duplicating deltas; process and session ownership remain
+unimplemented.
 
 ## Verification performed
 
@@ -77,6 +78,9 @@ Python's serial dispatcher uses an unbounded write deque. Go instead fails close
 when more than 8 writes or approximately 32 MiB are queued, preventing a trusted
 host-service burst from growing memory without bound; ordinary traffic remains
 well below both limits.
+Go rejects an individual app-server JSONL message above 16 MiB, while Python's
+line reader has no explicit bound. Normal protocol messages are substantially
+smaller; the bound prevents malformed output from exhausting harness memory.
 
 ## Operational risks
 
