@@ -20,7 +20,9 @@ and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
 and direct-child QEMU controller are implemented. Planning evidence allocation,
 attempt history, exact private responses, and digest publication are implemented,
-but are not yet wired to a Go Codex session.
+but are not yet wired to a Go Codex session. The app-server slice validates
+cumulative token-usage notifications and derives exact non-duplicating deltas;
+process and session ownership remain unimplemented.
 
 ## Verification performed
 
