@@ -40,6 +40,11 @@ remain unimplemented.
 Cross-run bootstrap can initialize and reload a fresh run from a validated latest
 completed generation, preserving exact successor-ISO, handoff, feature-ledger,
 and annotated Git-base identities. Generation lifecycle wiring remains separate.
+The trusted build operation validates and materializes a source snapshot, uses
+only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bounds
+diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
+without overwriting an existing result. The guest build service and candidate
+boot proof remain unwired.
 
 ## Verification performed
 
@@ -66,8 +71,9 @@ lifecycle.
 
 ## Remaining gaps and known differences
 
-Most persistence and all generation lifecycle, Codex session, observability, CLI,
-operator, and TUI capabilities remain to be implemented. Go `ReadFrame` relies on
+Generation orchestration, guest build/finish services, candidate validation,
+Codex sessions, metrics, CLI, operator, and TUI capabilities remain to be
+implemented. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.

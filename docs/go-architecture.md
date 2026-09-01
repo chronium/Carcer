@@ -132,3 +132,9 @@ reader, ordered writer, concurrent request routing, bounded notification and
 server-request queues, catalog/policy validation, interrupts, and TERM/KILL
 shutdown. It also validates cumulative token usage and derives non-duplicating
 metric deltas; agent sessions are not yet wired to it.
+`internal/build` performs the fixed trusted source-snapshot build in a fresh
+workspace. It copies pinned Limine inputs, discovers and validates the fixed
+toolchain, runs guest compilation and ISO construction under bubblewrap without
+interpreting guest commands, bounds diagnostics, kills cancelled process groups,
+and publishes only non-colliding artifacts. Candidate boot validation and the
+guest-facing build service remain separate slices.
