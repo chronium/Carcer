@@ -147,16 +147,21 @@ def publish_renderable_codex_notification(
     message: Mapping[str, object],
     thread_id: str,
     turn_id: str,
+    *,
+    turn_phase: str | None = None,
 ) -> tuple[RenderableCodexActivity, ...]:
     """Publish only app-server content explicitly exposed as renderable text."""
     activities = renderable_codex_notification(message, thread_id, turn_id)
     for activity in activities:
+        data = dict(activity.data)
+        if turn_phase is not None:
+            data["turn_phase"] = turn_phase
         publish_activity(
             stream,
             generation,
             role,
             activity.kind,
-            activity.data,
+            data,
             thread_id=thread_id,
             turn_id=turn_id,
             item_id=activity.item_id,

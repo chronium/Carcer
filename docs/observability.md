@@ -115,3 +115,20 @@ app-server queue, guest invocation, nested host-service receipt, response
 preparation, bounded write progress/completion, and the outer guest response.
 Byte counts and protocol request IDs are structured event data only, never
 metric labels. Host-service arguments and response contents are not recorded.
+
+Each fresh generation also records one private run-local planning artifact under
+`planning-evidence/generation-NNNN/`. Its manifest identifies the generation,
+app-server thread, ordered turn attempts, outcomes, exact UTF-8 response byte
+counts, and SHA-256 values. Interrupted attempts remain explicitly interrupted;
+only a successful planning attempt atomically publishes the immutable final
+`response.txt` without rewriting or summarization. The evidence remains available
+if the generation later aborts.
+
+Operational `planning_started`, `planning_completed`, `planning_interrupted`,
+and `planning_failed` events contain serving/turn provenance and, for a captured
+response, only its byte count and digest. Plan text is excluded from JSONL event
+payloads, OTLP metrics and labels, fresh-successor prompts, successor handoffs,
+generation Git provenance, and public tags. Within the current generation it
+remains available only as the same app-server thread's natural history and this
+private trusted evidence, not as autonomous persisted state or a plan-approval
+mechanism.

@@ -156,6 +156,11 @@ class OperatorConsole:
     def codex_turn_state(self) -> str:
         with self._agent_lock:
             if self._turn_thread is not None:
+                if (
+                    self._session is not None
+                    and self._session.active_turn_phase == "planning"
+                ):
+                    return "planning"
                 return "working"
             if self._session is not None:
                 return "idle"
@@ -573,26 +578,38 @@ class OperatorConsole:
                 self._session = session
                 self._session_generation = generation
                 initial = True
+                planning = False
             else:
                 if self._session_generation != generation:
                     raise RuntimeError("Codex session belongs to another generation")
                 if not session.healthy:
                     raise RuntimeError("Codex generation session is unusable")
                 initial = False
+                planning = not session.planning_completed
             turn = threading.Thread(
                 target=self._run_agent_turn,
-                args=(session, initial, prompt),
+                args=(session, initial, planning, prompt),
                 name="codexos-implementor-turn",
                 daemon=True,
             )
             self._turn_thread = turn
             turn.start()
-        self._print(f"Codex turn started for generation {generation}.")
+        if initial:
+            message = (
+                f"Codex planning and implementation started for generation "
+                f"{generation}."
+            )
+        elif planning:
+            message = f"Codex planning resumed for generation {generation}."
+        else:
+            message = f"Codex turn started for generation {generation}."
+        self._print(message)
 
     def _run_agent_turn(
         self,
         session: CodexGenerationSession,
         initial: bool,
+        planning: bool,
         prompt: str | None,
     ) -> None:
         result: CodexGenerationResult | None = None
@@ -600,6 +617,8 @@ class OperatorConsole:
         try:
             if initial:
                 result = session.run_initial_turn()
+            elif planning:
+                result = session.run_planning_continuation_turn()
             else:
                 result = session.run_continuation_turn(prompt or CONTINUE_PROMPT)
         except (OSError, RuntimeError, CodexGenerationWorkerError) as caught:
@@ -790,7 +809,7 @@ class OperatorConsole:
                     raise CodexGenerationWorkerError(
                         "Codex turn cleanup did not finish before timeout"
                     )
-                self._resume_agent_after_pause = True
+                self._resume_agent_after_pause = session.healthy
             else:
                 self._resume_agent_after_pause = False
             self._runtime.pause()

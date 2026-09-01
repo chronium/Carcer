@@ -55,6 +55,7 @@ class AgentMessagePresentation:
     role: CodexActivityRole
     text: str
     finalized: bool
+    turn_phase: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,7 @@ class ReasoningPresentation:
     role: CodexActivityRole
     text: str
     finalized: bool
+    turn_phase: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +331,9 @@ class OperatorActivityModel:
         if not isinstance(text, str):
             return
         finalized = event.kind is CodexActivityKind.AGENT_MESSAGE
+        turn_phase = event.data.get("turn_phase")
+        if not isinstance(turn_phase, str):
+            turn_phase = None
         if not finalized:
             text = self._message_text.get(key, "") + text
         self._message_text[key] = text
@@ -342,6 +347,7 @@ class OperatorActivityModel:
                     event.role,
                     safe_display_text(text, self._display_bytes),
                     finalized,
+                    turn_phase,
                 ),
             )
         )
@@ -352,6 +358,9 @@ class OperatorActivityModel:
         key = self._correlation_key(event, "reasoning")
         parts = self._reasoning_text.setdefault(key, {})
         finalized = event.kind is CodexActivityKind.AGENT_REASONING_SUMMARY
+        turn_phase = event.data.get("turn_phase")
+        if not isinstance(turn_phase, str):
+            turn_phase = None
         if not finalized:
             text = event.data.get("text")
             index = event.data.get("summary_index")
@@ -380,6 +389,7 @@ class OperatorActivityModel:
                     event.role,
                     safe_display_text(text, self._display_bytes),
                     finalized,
+                    turn_phase,
                 ),
             )
         )
@@ -896,9 +906,14 @@ def _build_diagnostic(data: dict[str, object], limit: int) -> str:
 def _entry_text(entry: ActivityDisplayEntry) -> str:
     presentation = entry.presentation
     if isinstance(presentation, AgentMessagePresentation):
-        return f"{_role_name(presentation.role)}\n{presentation.text}"
+        phase = " · planning" if presentation.turn_phase == "planning" else ""
+        return f"{_role_name(presentation.role)}{phase}\n{presentation.text}"
     if isinstance(presentation, ReasoningPresentation):
-        return f"{_role_name(presentation.role)} · reasoning\n{presentation.text}"
+        phase = " · planning" if presentation.turn_phase == "planning" else ""
+        return (
+            f"{_role_name(presentation.role)}{phase} · reasoning\n"
+            f"{presentation.text}"
+        )
     if isinstance(presentation, ToolPresentation):
         text = (
             f"{_role_name(presentation.role)} · {presentation.tool} "

@@ -12,7 +12,25 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
-Contract version 6 retains the version 5 behavioral contract and adds the
+Contract version 7 retains the version 6 behavioral contract and changes each
+fresh generation's first `agent` command into two sequential turns on one
+ephemeral app-server thread. The first is a neutral planning phase; after it
+completes successfully, ordinary implementation begins automatically with the
+plan still present in the thread's natural conversation context. There is no
+operator approval, harness scoring, plan rewriting, or plan enforcement between
+the turns, and later `agent` commands remain ordinary continuation turns.
+
+Planning is read-mostly. Sol may inspect source, request state, and provided
+assets; request an independent read-only review; run baseline trusted build
+validation; and record an advisory external feature request. Persistent source
+mutation and generation completion are denied by the trusted bridge until the
+implementation turn. The planning turn also uses a read-only, no-network Codex
+permission profile. A failed or interrupted plan does not automatically start
+implementation. If an operator pause interrupts planning, resume continues
+planning on the same app-server thread with the same restrictions; implementation
+starts only after a planning attempt completes successfully.
+
+Contract version 6 retained the version 5 behavioral contract and added the
 generic provided-asset host-service interface. When that trusted capability is
 explicitly provisioned, guest code can enumerate immutable opaque inputs with
 `list_provided_assets` and read exact bounded byte ranges with
@@ -33,7 +51,7 @@ provisioned; denied requests are unavailable under that request. The tool does
 not modify request state and is never invoked automatically.
 
 Version 4 clarified three semantic boundaries which remain unchanged in version
-6. Milestones and future validation describe required outcomes, not implicit
+7. Milestones and future validation describe required outcomes, not implicit
 grants of supporting trusted-environment capabilities. An absent external
 capability must not be assumed to appear merely because a future outcome would
 require it.
@@ -103,14 +121,17 @@ settings across explicit continuation turns and pause/resume.
 
 Structured Codex lifecycle events record the requested reasoning-summary mode,
 service-tier ID, and its catalog display name, when supplied, while implementor
-events also record agent contract version 6. These are serving and prompt
+events also record agent contract version 7. These are serving and prompt
 provenance only. Model-token metric labels remain exactly `model` and `role`.
 
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
 Generation 10 ran under contract version 4. No autonomous generation ran under
-contract version 5 before it was superseded. Generation 11 onward runs under
-contract version 6. Other runs record the contract version actually used in
-their implementor provenance; historical events are not backfilled.
+contract version 5 before it was superseded. Generations 11 through 15 ran under
+contract version 6, and experiment 2 ends at Generation 15. Contract version 7
+planning mode begins with experiment 3, forked from experiment 2 Generation 15;
+this document does not invent experiment 3's initial generation number. Other
+runs record the contract version actually used in their implementor provenance;
+historical events are not backfilled.
 
 ## Post-generation exit interviews
 

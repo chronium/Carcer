@@ -415,7 +415,10 @@ def _presentation(entry: ActivityDisplayEntry, expected: type[object]):
 
 def _agent_message_renderable(presentation: AgentMessagePresentation) -> Group:
     role = presentation.role.value
-    heading = Text(_ROLE_NAMES[role], style=_ROLE_STYLES[role])
+    label = _ROLE_NAMES[role]
+    if presentation.turn_phase == "planning":
+        label += " · planning"
+    heading = Text(label, style=_ROLE_STYLES[role])
     body = (
         RichMarkdown(presentation.text, hyperlinks=False)
         if presentation.finalized
@@ -426,7 +429,8 @@ def _agent_message_renderable(presentation: AgentMessagePresentation) -> Group:
 
 def _reasoning_content(presentation: ReasoningPresentation) -> Content:
     role = _ROLE_NAMES[presentation.role.value]
-    heading = f"  ◇ {role} · reasoning summary"
+    phase = " · planning" if presentation.turn_phase == "planning" else ""
+    heading = f"  ◇ {role}{phase} · reasoning summary"
     body = "\n".join(f"    {line}" for line in presentation.text.splitlines())
     text = heading + ("\n" + body if body else "")
     return Content(text, [Span(2, len(text), "italic bright_blue")])

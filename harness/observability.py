@@ -328,11 +328,19 @@ class ExperimentObservability:
                 "codex_turn_completed",
                 "codex_turn_interrupted",
                 "codex_turn_failed",
+                "planning_completed",
+                "planning_interrupted",
+                "planning_failed",
             }:
+                result = (
+                    event.removeprefix("planning_")
+                    if event.startswith("planning_")
+                    else event.removeprefix("codex_turn_")
+                )
                 attributes = {
                     "model": str(data["model"]),
                     "effort": str(data["reasoning_effort"]),
-                    "result": event.removeprefix("codex_turn_"),
+                    "result": result,
                 }
                 self._codex_turns.add(1, attributes)
                 self._codex_turn_duration.record(

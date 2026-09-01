@@ -48,6 +48,11 @@ from .exit_interview_transcript import (
 )
 from .generation_runtime import CodexOSRun, RuntimeState
 from .hardware import CodexOSHardwareProfile
+from .planning_evidence import (
+    PlanningEvidence,
+    PlanningEvidenceError,
+    PlanningEvidenceStore,
+)
 from .tool_protocol import ToolResult
 
 DEFAULT_MODEL = "gpt-5.6-sol"
@@ -55,7 +60,7 @@ DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_REASONING_SUMMARY = "auto"
 DEFAULT_SERVICE_TIER = "priority"
 DEFAULT_INTERRUPT_TIMEOUT_SECONDS = 5.0
-AGENT_CONTRACT_VERSION = 6
+AGENT_CONTRACT_VERSION = 7
 
 CONTINUE_PROMPT = "Continue working on the current CodexOS generation."
 RESUME_PROMPT = (
@@ -63,6 +68,7 @@ RESUME_PROMPT = (
 )
 
 _PERMISSION_PROFILE = "codexos-implementor"
+_PLANNING_PERMISSION_PROFILE = "codexos-planning"
 _INTERVIEW_PERMISSION_PROFILE = "codexos-interview"
 _MAX_REVIEW_REQUEST_BYTES = 8 * 1024
 _MAX_LIST_REQUESTS_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -73,6 +79,29 @@ _REVIEW_FOCUSES = {
     "security",
     "performance",
 }
+_PLANNING_CODEXOS_TOOLS = frozenset(
+    {
+        "list",
+        "read",
+        "build",
+        "request_feature",
+        "list_provided_assets",
+        "read_provided_asset",
+        "list_requests",
+    }
+)
+
+IMPLEMENTATION_PROMPT = (
+    "The planning phase is complete. Continue in this same session with ordinary "
+    "implementation work. The preceding plan remains available in the conversation "
+    "context; use your own judgment and revise it whenever appropriate."
+)
+PLANNING_CONTINUE_PROMPT = (
+    "Continue the planning phase after the operator pause. Persistent guest and "
+    "runtime changes and generation completion remain unavailable. When planning "
+    "is complete, provide the final plan; implementation will then follow "
+    "automatically in this same session and thread."
+)
 
 _BUILD_TOOL_DESCRIPTION = (
     "Compile and link the exact current persistent mutable CodexOS guest source, "
@@ -208,6 +237,13 @@ class CodexGenerationSession:
         self._started = False
         self._healthy = True
         self._initial_turn_started = False
+        self._initial_sequence_active = False
+        self._initial_sequence_done = threading.Event()
+        self._initial_sequence_done.set()
+        self._stop_before_implementation = threading.Event()
+        self._active_turn_phase: str | None = None
+        self._planning_completed = False
+        self._planning_evidence: PlanningEvidence | None = None
         self._turn_number = 0
         self._token_usage_total = CumulativeTokenUsage()
         self._last_agent_message: str | None = None
@@ -248,6 +284,16 @@ class CodexGenerationSession:
     @property
     def thread_id(self) -> str | None:
         return self._thread_id
+
+    @property
+    def active_turn_phase(self) -> str | None:
+        with self._lock:
+            return self._active_turn_phase
+
+    @property
+    def planning_completed(self) -> bool:
+        with self._lock:
+            return self._planning_completed
 
     def start(self) -> None:
         if self._started:
@@ -327,7 +373,82 @@ class CodexGenerationSession:
         if self._initial_turn_started:
             raise RuntimeError("initial Codex turn has already started")
         self._initial_turn_started = True
-        return self._run_turn(_implementor_prompt(self._runtime, self._objective))
+        self.start()
+        thread_id = self._thread_id
+        generation = self._generation_number
+        if thread_id is None or generation is None:
+            self._healthy = False
+            raise CodexGenerationWorkerError(
+                "Codex planning session identity is unavailable"
+            )
+        try:
+            self._planning_evidence = PlanningEvidenceStore(
+                self._runtime.run_directory
+            ).begin(generation, thread_id)
+        except (OSError, PlanningEvidenceError, ValueError) as error:
+            self._healthy = False
+            self._record(
+                "planning_failed",
+                {
+                    **self._serving_provenance(),
+                    "thread_id": thread_id,
+                    "turn_id": None,
+                    "turn_number": self._turn_number + 1,
+                    "turn_phase": "planning",
+                    "agent_contract_version": AGENT_CONTRACT_VERSION,
+                    "duration_seconds": 0.0,
+                    "result": "failed",
+                },
+            )
+            raise CodexGenerationWorkerError(str(error)) from error
+        return self._run_planning_sequence(
+            _planning_prompt(self._runtime, self._objective)
+        )
+
+    def run_planning_continuation_turn(
+        self,
+        prompt: str = PLANNING_CONTINUE_PROMPT,
+    ) -> CodexGenerationResult:
+        if not self._initial_turn_started or self._planning_evidence is None:
+            raise RuntimeError("initial planning has not started")
+        if self.planning_completed:
+            raise RuntimeError("planning has already completed")
+        return self._run_planning_sequence(prompt)
+
+    def _run_planning_sequence(self, prompt: str) -> CodexGenerationResult:
+        with self._lock:
+            self._initial_sequence_active = True
+            self._initial_sequence_done.clear()
+            self._stop_before_implementation.clear()
+        try:
+            planning = self._run_turn(
+                prompt,
+                turn_phase="planning",
+            )
+            if (
+                planning.turn_status != "completed"
+                or self._runtime.state is not RuntimeState.RUNNING
+            ):
+                return planning
+            with self._lock:
+                self._planning_completed = True
+            if self._stop_before_implementation.is_set():
+                return CodexGenerationResult(
+                    turn_status="interrupted",
+                    final_message=planning.final_message,
+                    runtime_state=self._runtime.state,
+                    summary=(
+                        "Codex planning completed; implementation did not start."
+                    ),
+                )
+            return self._run_turn(
+                IMPLEMENTATION_PROMPT,
+                turn_phase="implementation",
+            )
+        finally:
+            with self._lock:
+                self._initial_sequence_active = False
+                self._initial_sequence_done.set()
 
     def run_continuation_turn(
         self,
@@ -335,7 +456,11 @@ class CodexGenerationSession:
     ) -> CodexGenerationResult:
         if not self._initial_turn_started:
             raise RuntimeError("initial Codex turn has not started")
-        return self._run_turn(prompt)
+        if not self.planning_completed:
+            raise RuntimeError(
+                "implementation is unavailable because planning did not complete"
+            )
+        return self._run_turn(prompt, turn_phase="continuation")
 
     def retain_for_exit_interview(self) -> None:
         with self._lock:
@@ -403,6 +528,7 @@ class CodexGenerationSession:
         try:
             return self._run_turn(
                 _exit_interview_prompt(question),
+                turn_phase="interview",
                 interview=True,
                 interview_question=question,
                 interview_turn_number=interview_turn_number,
@@ -428,6 +554,7 @@ class CodexGenerationSession:
         self,
         prompt: str,
         *,
+        turn_phase: str,
         interview: bool = False,
         interview_question: str | None = None,
         interview_turn_number: int | None = None,
@@ -469,6 +596,7 @@ class CodexGenerationSession:
                 raise RuntimeError(
                     "a previous Codex dynamic tool call is still active"
                 )
+            self._active_turn_phase = turn_phase
             self._last_agent_message = None
             self._last_turn_status = None
             self._turn_done.clear()
@@ -483,16 +611,62 @@ class CodexGenerationSession:
                     permission_profile=(
                         _INTERVIEW_PERMISSION_PROFILE
                         if interview
+                        else _PLANNING_PERMISSION_PROFILE
+                        if turn_phase == "planning"
                         else _PERMISSION_PROFILE
                     ),
-                    runtime_workspace_roots=[] if interview else None,
+                    runtime_workspace_roots=(
+                        [] if interview or turn_phase == "planning" else None
+                    ),
                 )
             except CodexAppServerError as error:
                 self._healthy = False
+                self._active_turn_phase = None
+                self._turn_done.set()
+                if turn_phase == "planning":
+                    self._record_turn_failure(
+                        self._turn_number + 1,
+                        time.monotonic(),
+                        turn_phase=turn_phase,
+                    )
                 raise CodexGenerationWorkerError(str(error)) from error
             turn_id = self._turn_id
             self._turn_number += 1
             turn_number = self._turn_number
+            if turn_phase == "planning":
+                evidence = self._planning_evidence
+                if evidence is None:
+                    raise RuntimeError("planning evidence is unavailable")
+                try:
+                    evidence.record_started(turn_id)
+                except PlanningEvidenceError as error:
+                    self._healthy = False
+                    self._record(
+                        "planning_failed",
+                        {
+                            **self._serving_provenance(),
+                            "turn_number": turn_number,
+                            "turn_phase": turn_phase,
+                            "agent_contract_version": AGENT_CONTRACT_VERSION,
+                            "duration_seconds": 0.0,
+                            "result": "failed",
+                        },
+                    )
+                    self._publish_activity(
+                        CodexActivityRole.IMPLEMENTOR,
+                        CodexActivityKind.TURN_FAILED,
+                        {
+                            "turn_number": turn_number,
+                            "turn_phase": turn_phase,
+                            "status": "failed",
+                        },
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    )
+                    self._turn_id = None
+                    self._active_turn_phase = None
+                    self._turn_done.set()
+                    raise CodexGenerationWorkerError(str(error)) from error
             if interview:
                 transcript = self._exit_interview_transcript
                 if transcript is None or interview_turn_number is None:
@@ -520,10 +694,17 @@ class CodexGenerationSession:
             provenance.update(
                 {
                     "turn_number": turn_number,
+                    "turn_phase": turn_phase,
                     "agent_contract_version": AGENT_CONTRACT_VERSION,
                 }
             )
-            event_prefix = "codex_turn"
+            if turn_phase == "planning":
+                provenance.update(
+                    {"thread_id": thread_id, "turn_id": turn_id}
+                )
+            event_prefix = (
+                "planning" if turn_phase == "planning" else "codex_turn"
+            )
         self._record(
             f"{event_prefix}_started",
             provenance,
@@ -531,12 +712,22 @@ class CodexGenerationSession:
         self._publish_activity(
             CodexActivityRole.IMPLEMENTOR,
             CodexActivityKind.TURN_STARTED,
-            {"turn_number": turn_number},
+            {"turn_number": turn_number, "turn_phase": turn_phase},
             thread_id=thread_id,
             turn_id=turn_id,
         )
         try:
-            status, final_message = self._wait_for_turn(thread_id, turn_id)
+            status, final_message = self._wait_for_turn(
+                thread_id,
+                turn_id,
+                turn_phase,
+            )
+            response_identity = None
+            if turn_phase == "planning":
+                evidence = self._planning_evidence
+                if evidence is None:
+                    raise PlanningEvidenceError("planning evidence is unavailable")
+                response_identity = evidence.complete(status, final_message)
             if interview:
                 transcript = self._exit_interview_transcript
                 if transcript is not None:
@@ -548,15 +739,23 @@ class CodexGenerationSession:
                         status=status,
                     )
             self._last_turn_status = status
+            terminal_data: dict[str, object] = {
+                **provenance,
+                "duration_seconds": max(
+                    0.0, time.monotonic() - started_at
+                ),
+                "result": status,
+            }
+            if response_identity is not None:
+                terminal_data.update(
+                    {
+                        "response_bytes": response_identity.size,
+                        "response_sha256": response_identity.sha256,
+                    }
+                )
             self._record(
                 f"{event_prefix}_{status}",
-                {
-                    **provenance,
-                    "duration_seconds": max(
-                        0.0, time.monotonic() - started_at
-                    ),
-                    "result": status,
-                },
+                terminal_data,
             )
             terminal_kind = (
                 CodexActivityKind.TURN_COMPLETED
@@ -566,7 +765,11 @@ class CodexGenerationSession:
             self._publish_activity(
                 CodexActivityRole.IMPLEMENTOR,
                 terminal_kind,
-                {"turn_number": turn_number, "status": status},
+                {
+                    "turn_number": turn_number,
+                    "turn_phase": turn_phase,
+                    "status": status,
+                },
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
@@ -587,23 +790,34 @@ class CodexGenerationSession:
             self._record_turn_failure(
                 turn_number,
                 started_at,
+                turn_phase=turn_phase,
                 interview_turn_number=interview_turn_number if interview else None,
+            )
+            raise CodexGenerationWorkerError(str(error)) from error
+        except PlanningEvidenceError as error:
+            self._healthy = False
+            self._record_turn_failure(
+                turn_number,
+                started_at,
+                turn_phase=turn_phase,
             )
             raise CodexGenerationWorkerError(str(error)) from error
         except CodexGenerationWorkerError:
             if interview:
                 self._finish_failed_interview_turn(turn_id)
-            if self._last_turn_status != "failed":
+            if turn_phase == "planning" or self._last_turn_status != "failed":
                 self._healthy = False
             self._record_turn_failure(
                 turn_number,
                 started_at,
+                turn_phase=turn_phase,
                 interview_turn_number=interview_turn_number if interview else None,
             )
             raise
         finally:
             with self._lock:
                 self._turn_id = None
+                self._active_turn_phase = None
                 self._turn_done.set()
 
     def interrupt_turn(
@@ -616,6 +830,16 @@ class CodexGenerationSession:
             server = self._server
             thread_id = self._thread_id
             turn_id = self._turn_id
+            initial_sequence_active = self._initial_sequence_active
+        if turn_id is None and initial_sequence_active:
+            self._stop_before_implementation.set()
+            if not self._initial_sequence_done.wait(
+                max(0.0, deadline - time.monotonic())
+            ):
+                raise CodexGenerationWorkerError(
+                    "Codex initial turn sequence did not stop before timeout"
+                )
+            return
         if server is None or thread_id is None or turn_id is None:
             raise RuntimeError("no Codex implementor turn is active")
         server.request(
@@ -646,6 +870,7 @@ class CodexGenerationSession:
 
     def close(self) -> None:
         self.cancel_review()
+        self._stop_before_implementation.set()
         if self._exit_interview_started:
             self._record_exit_interview_ended("closed")
         with self._lock:
@@ -655,6 +880,7 @@ class CodexGenerationSession:
             self._thread_id = None
             self._healthy = False
             self._mode = CodexGenerationSessionMode.CLOSED
+            self._active_turn_phase = None
         if server is not None:
             server.close()
         if self._started:
@@ -681,6 +907,7 @@ class CodexGenerationSession:
         self,
         thread_id: str,
         turn_id: str,
+        turn_phase: str,
     ) -> tuple[str, str | None]:
         server = self._server
         if server is None:
@@ -696,6 +923,7 @@ class CodexGenerationSession:
                 message,
                 thread_id,
                 turn_id,
+                turn_phase=turn_phase,
             )
             transcript = self._exit_interview_transcript
             if transcript is not None:
@@ -747,15 +975,30 @@ class CodexGenerationSession:
         turn_number: int,
         started_at: float,
         *,
+        turn_phase: str,
         interview_turn_number: int | None = None,
     ) -> None:
         if interview_turn_number is None:
-            event = "codex_turn_failed"
+            event = (
+                "planning_failed"
+                if turn_phase == "planning"
+                else "codex_turn_failed"
+            )
             provenance = {
                 **self._serving_provenance(),
                 "turn_number": turn_number,
+                "turn_phase": turn_phase,
                 "agent_contract_version": AGENT_CONTRACT_VERSION,
             }
+            if turn_phase == "planning" and self._planning_evidence is not None:
+                try:
+                    self._planning_evidence.fail()
+                except PlanningEvidenceError:
+                    pass
+            if turn_phase == "planning":
+                provenance.update(
+                    {"thread_id": self._thread_id, "turn_id": self._turn_id}
+                )
         else:
             event = "exit_interview_turn_failed"
             provenance = {
@@ -773,7 +1016,11 @@ class CodexGenerationSession:
         self._publish_activity(
             CodexActivityRole.IMPLEMENTOR,
             CodexActivityKind.TURN_FAILED,
-            {"turn_number": turn_number, "status": "failed"},
+            {
+                "turn_number": turn_number,
+                "turn_phase": turn_phase,
+                "status": "failed",
+            },
             thread_id=self._thread_id,
             turn_id=self._turn_id,
         )
@@ -883,6 +1130,7 @@ class CodexGenerationSession:
                 interview_turn = (
                     self._mode is CodexGenerationSessionMode.INTERVIEW_TURN
                 )
+                planning_turn = self._active_turn_phase == "planning"
             if thread_id is None or turn_id is None:
                 server.reject_server_request(message)
                 return
@@ -901,6 +1149,7 @@ class CodexGenerationSession:
                         message.get("params"),
                         thread_id,
                         turn_id,
+                        planning=planning_turn,
                     )
                 )
                 server.write_result(message.get("id"), response)
@@ -920,9 +1169,17 @@ class CodexGenerationSession:
             return
         data = _dynamic_tool_activity_data(message.get("params"))
         tool = data.get("tool")
+        with self._lock:
+            turn_phase = self._active_turn_phase
+        phase_data = (
+            {"turn_phase": turn_phase} if turn_phase is not None else {}
+        )
         self._record(
             "tool_app_server_queued",
-            {"tool": tool if isinstance(tool, str) else "unknown"},
+            {
+                "tool": tool if isinstance(tool, str) else "unknown",
+                **phase_data,
+            },
         )
 
     def _interview_tool_denial(
@@ -960,8 +1217,12 @@ class CodexGenerationSession:
         params: object,
         thread_id: str,
         turn_id: str,
+        *,
+        planning: bool = False,
     ) -> dict[str, object]:
         activity_data = _dynamic_tool_activity_data(params)
+        if planning:
+            activity_data["turn_phase"] = "planning"
         call_id = _activity_call_id(params)
         self._publish_activity(
             CodexActivityRole.IMPLEMENTOR,
@@ -978,7 +1239,20 @@ class CodexGenerationSession:
             if not isinstance(tool, str):
                 raise ValueError("dynamic tool name must be a string")
             arguments = _arguments(values.get("arguments"))
-            if values.get("namespace") is None and tool == "review":
+            namespace = values.get("namespace")
+            if planning and not (
+                (namespace is None and tool == "review")
+                or (
+                    namespace == "codexos"
+                    and tool in _PLANNING_CODEXOS_TOOLS
+                )
+            ):
+                raise ValueError(
+                    f"{tool} is unavailable during the planning phase; "
+                    "persistent guest/runtime changes and generation completion "
+                    "begin with the implementation turn"
+                )
+            if namespace is None and tool == "review":
                 review = self._run_review(arguments)
                 self._publish_activity(
                     CodexActivityRole.IMPLEMENTOR,
@@ -992,11 +1266,15 @@ class CodexGenerationSession:
                     "contentItems": [{"type": "inputText", "text": review}],
                     "success": True,
                 }
-            if values.get("namespace") != "codexos":
+            if namespace != "codexos":
                 raise ValueError("unsupported dynamic tool namespace")
             metadata = _tool_metadata(tool, arguments)
             started_at = time.monotonic()
-            self._record("tool_started", {"tool": tool, **metadata})
+            phase_data = {"turn_phase": "planning"} if planning else {}
+            self._record(
+                "tool_started",
+                {"tool": tool, **metadata, **phase_data},
+            )
             try:
                 result = self._dispatch_tool(tool, arguments)
             except Exception:
@@ -1005,6 +1283,7 @@ class CodexGenerationSession:
                     {
                         "tool": tool,
                         **metadata,
+                        **phase_data,
                         "status": -1,
                         "output_bytes": 0,
                         "duration_seconds": max(
@@ -1016,6 +1295,7 @@ class CodexGenerationSession:
             completed = {
                 "tool": tool,
                 **metadata,
+                **phase_data,
                 "status": result.status,
                 "output_bytes": len(result.output),
                 "duration_seconds": max(0.0, time.monotonic() - started_at),
@@ -1367,6 +1647,18 @@ web_search = false
 [permissions.codexos-implementor.network]
 enabled = false
 
+[permissions.codexos-planning.filesystem]
+":root" = "deny"
+":minimal" = "read"
+":tmpdir" = "deny"
+":slash_tmp" = "deny"
+
+[permissions.codexos-planning.filesystem.":workspace_roots"]
+"." = "read"
+
+[permissions.codexos-planning.network]
+enabled = false
+
 [permissions.codexos-interview.filesystem]
 ":root" = "deny"
 ":minimal" = "read"
@@ -1608,6 +1900,19 @@ def _implementor_prompt(runtime: CodexOSRun, objective: str | None) -> str:
         + handoff_text
         + rollback
         + extra
+    )
+
+
+def _planning_prompt(runtime: CodexOSRun, objective: str | None) -> str:
+    return (
+        _implementor_prompt(runtime, objective)
+        + "\n\nThis first turn is a planning phase. Persistent guest and runtime "
+        "changes and generation completion are unavailable during this turn. "
+        "Inspect the inherited system and available environment as useful, think "
+        "through your intended approach, and provide your plan. Ordinary "
+        "implementation follows automatically in this same session and thread. "
+        "The plan is not an approval gate or enforced commitment; continue using "
+        "your own judgment during implementation."
     )
 
 

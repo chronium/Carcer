@@ -24,7 +24,10 @@ from harness import (
     ToolResult,
 )
 from harness.operator_console import OperatorConsole, main
-from harness.codex_generation_worker import CodexGenerationSessionMode
+from harness.codex_generation_worker import (
+    PLANNING_CONTINUE_PROMPT,
+    CodexGenerationSessionMode,
+)
 from tests.test_codex_generation_worker import (
     _GUEST_TOOLS,
     _assert_process_dead,
@@ -347,14 +350,18 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 record = fake.record()
                 methods = [item.get("method") for item in record["messages"]]
                 self.assertEqual(methods.count("thread/start"), 1)
-                self.assertEqual(methods.count("turn/start"), 2)
+                self.assertEqual(methods.count("turn/start"), 3)
                 self.assertNotIn("thread/resume", methods)
                 self.assertNotIn("thread/fork", methods)
                 self.assertIn("First idle result.", output.getvalue())
                 self.assertIn("Second idle result.", output.getvalue())
                 self.assertEqual(
                     output.getvalue().count("Codex turn started for generation 0."),
-                    2,
+                    1,
+                )
+                self.assertIn(
+                    "Codex planning and implementation started for generation 0.",
+                    output.getvalue(),
                 )
 
     def test_pause_does_not_touch_qemu_when_turn_interrupt_never_completes(
@@ -384,6 +391,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 _wait_for(
                     lambda: console._session is not None
                     and console._session.active_turn
+                    and console._session.active_turn_phase == "implementation"
                 )
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -426,6 +434,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                 _wait_for(
                     lambda: console._session is not None
                     and console._session.active_turn
+                    and console._session.active_turn_phase == "implementation"
                 )
                 session = console._session
                 pid = session.process_pid
@@ -447,13 +456,100 @@ class OperatorConsoleCommandTests(unittest.TestCase):
                     for item in record["messages"]
                     if item.get("method") == "turn/start"
                 ]
-                self.assertEqual(len(turns), 2)
+                self.assertEqual(len(turns), 3)
                 self.assertEqual(
-                    turns[1]["params"]["input"][0]["text"],
+                    turns[2]["params"]["input"][0]["text"],
                     "Continue working on the current CodexOS generation "
                     "after the operator pause.",
                 )
                 self.assertIn("same session", output.getvalue())
+                console._terminate_agent_session(interrupt=False)
+
+    def test_pause_resume_continues_planning_before_implementation(self) -> None:
+        scenario = {
+            "planning_turn": {"hold_for_interrupt": True},
+            "turns": [
+                {"final_message": "Final recovered plan."},
+                {"final_message": "Implementation followed the plan."},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _mock_runtime(root / "run", RuntimeState.RUNNING)
+                runtime.pause.side_effect = lambda: setattr(
+                    runtime, "state", RuntimeState.PAUSED
+                )
+                runtime.resume.side_effect = lambda: setattr(
+                    runtime, "state", RuntimeState.RUNNING
+                )
+                output = io.StringIO()
+                console = OperatorConsole(
+                    runtime,
+                    io.StringIO(),
+                    output,
+                    codex_executable=str(fake.executable),
+                    codex_auth_file=fake.auth_file,
+                )
+                console._start_agent()
+                _wait_for(
+                    lambda: console._session is not None
+                    and console._session.active_turn
+                    and console._session.active_turn_phase == "planning"
+                )
+                self.assertEqual(console.codex_turn_state, "planning")
+                session = console._session
+                process_pid = session.process_pid
+                thread_id = session.thread_id
+
+                console._pause()
+                self.assertIs(runtime.state, RuntimeState.PAUSED)
+                self.assertFalse(session.planning_completed)
+                console._resume()
+                _wait_for(lambda: console._turn_thread is None)
+                self.assertIs(runtime.state, RuntimeState.RUNNING)
+                self.assertTrue(session.planning_completed)
+                self.assertEqual(session.process_pid, process_pid)
+                self.assertEqual(session.thread_id, thread_id)
+                record = fake.record()
+                turns = [
+                    message["params"]
+                    for message in record["messages"]
+                    if message.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 3)
+                self.assertTrue(
+                    all(turn["threadId"] == thread_id for turn in turns)
+                )
+                self.assertEqual(
+                    [turn["permissions"] for turn in turns],
+                    [
+                        "codexos-planning",
+                        "codexos-planning",
+                        "codexos-implementor",
+                    ],
+                )
+                self.assertEqual(
+                    turns[1]["input"][0]["text"],
+                    PLANNING_CONTINUE_PROMPT,
+                )
+                evidence = root / "run/planning-evidence/generation-0000"
+                manifest = json.loads(
+                    (evidence / "manifest.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(manifest["outcome"], "completed")
+                self.assertEqual(
+                    [attempt["outcome"] for attempt in manifest["attempts"]],
+                    ["interrupted", "completed"],
+                )
+                self.assertEqual(
+                    (evidence / "response.txt").read_text(encoding="utf-8"),
+                    "Final recovered plan.",
+                )
+                self.assertIn(
+                    "Implementation followed the plan.",
+                    output.getvalue(),
+                )
                 console._terminate_agent_session(interrupt=False)
 
     def test_pause_fails_if_interrupted_tool_does_not_quiesce(self) -> None:
@@ -696,10 +792,10 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             records = fake.records()
             self.assertEqual(len(records), 2)
             generation_record = next(
-                record for record in records if len(record["turn_ids"]) == 3
+                record for record in records if len(record["turn_ids"]) == 4
             )
             successor_record = next(
-                record for record in records if len(record["turn_ids"]) == 1
+                record for record in records if len(record["turn_ids"]) == 2
             )
             self.assertNotEqual(
                 generation_record["pid"], successor_record["pid"]
@@ -740,7 +836,7 @@ class OperatorConsoleCommandTests(unittest.TestCase):
             self.assertIn("What did you verify?", transcript)
             self.assertIn("Second interview summary.", transcript)
             self.assertIn("Second retrospective answer.", transcript)
-            self.assertIn("Agent Contract: 6", transcript)
+            self.assertIn("Agent Contract: 7", transcript)
             self.assertIn("Interview status: completed", transcript)
             self.assertNotIn("Exit interview question sent.", transcript)
             self.assertNotIn("Generation 0 completed cooperatively", transcript)
@@ -1466,6 +1562,8 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                     _wait_for(
                         lambda: console._session is not None
                         and console._session.active_turn
+                        and console._session.active_turn_phase
+                        == "implementation"
                     )
                     observed["reviewer"] = reviewer.records()[0]["pid"]
                     observed["implementor"] = console._session.process_pid
@@ -1563,6 +1661,8 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                     _wait_for(
                         lambda: console._session is not None
                         and console._session.active_turn
+                        and console._session.active_turn_phase
+                        == "implementation"
                     )
                     self.assertIs(runtime.state, RuntimeState.RUNNING)
                     observed["generation_one"] = runtime.active_pid
@@ -1698,8 +1798,27 @@ class OperatorConsoleIntegrationTest(unittest.TestCase):
                     for message in agent_record["messages"]
                 ]
                 self.assertEqual(methods.count("thread/start"), 1)
-                self.assertEqual(methods.count("turn/start"), 2)
+                self.assertEqual(methods.count("turn/start"), 3)
                 self.assertEqual(methods.count("turn/interrupt"), 2)
+                planning_manifest = json.loads(
+                    (
+                        run_directory
+                        / "planning-evidence"
+                        / "generation-0001"
+                        / "manifest.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(planning_manifest["stage"], "completed")
+                self.assertEqual(planning_manifest["outcome"], "completed")
+                self.assertEqual(
+                    (
+                        run_directory
+                        / "planning-evidence"
+                        / "generation-0001"
+                        / "response.txt"
+                    ).read_text(encoding="utf-8"),
+                    "Fake Codex planning complete.",
+                )
                 _assert_process_dead(self, agent_record["pid"])
             finally:
                 runtime.stop()

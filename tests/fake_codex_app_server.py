@@ -215,6 +215,16 @@ def save_record() -> None:
 turns = scenario.get("turns")
 if not isinstance(turns, list):
     turns = [scenario]
+if permission_profile == "codexos-implementor" and scenario.get(
+    "prepend_planning_turn", True
+):
+    planning_turn = scenario.get(
+        "planning_turn",
+        {"final_message": "Fake Codex planning complete."},
+    )
+    if not isinstance(planning_turn, dict):
+        raise SystemExit("planning_turn must be an object")
+    turns = [planning_turn, *turns]
 
 for turn_index, turn_scenario in enumerate(turns, 1):
     turn_id = f"turn-{pid}-{turn_index}"

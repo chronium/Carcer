@@ -42,6 +42,13 @@ phase progress. Operator startup and each typed command are grouped into one
 logical output block. Command input remains pinned at the bottom and isolated
 from asynchronous updates.
 
+On the first `agent` command of a fresh generation, the header identifies Sol as
+planning and planning messages/reasoning are labelled separately from the
+automatically following implementation turn. This is presentation of the same
+ordered activity stream only; it neither approves the plan nor inserts an
+operator gate. The exact final plan is retained separately as private run-local
+evidence and is not made persistent through the TUI transcript.
+
 Streaming agent messages remain safe plain text so token deltas do not trigger
 repeated Markdown parsing and reflow. The authoritative completed message
 updates the same logical row and renders as Markdown. Terminal controls are
