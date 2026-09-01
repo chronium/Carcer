@@ -117,6 +117,9 @@ tests cover exact
 encoding, bounds, malformed input, fragmentation/coalescing, canonical
 snapshots, persistence failure, and cross-language output. Black-box tests run
 the Python reference modules without importing optional production dependencies.
+`internal/observability` owns a validated append-only event log with sequence
+recovery and a bounded in-memory activity stream that exposes only explicitly
+renderable app-server text; metrics and OTLP export remain unimplemented.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
 currently starts QEMU, contacts Codex, or changes the operational entry point.
 `internal/codexapp` currently provides a bounded UTF-8 JSONL message codec,

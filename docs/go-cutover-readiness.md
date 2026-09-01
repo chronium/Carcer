@@ -29,7 +29,10 @@ fail-closed latest-success publication. These provenance components are not yet
 wired to Go build or Codex sessions. The app-server slice provides a
 bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
 derives exact non-duplicating deltas; process and session ownership remain
-unimplemented.
+unimplemented. The local observability slice validates and appends sequenced
+JSONL events without allowing recording failures to control the experiment. Its
+bounded activity stream preserves concurrent ordering and excludes raw reasoning;
+metrics and OTLP export remain unimplemented.
 
 ## Verification performed
 
@@ -89,6 +92,9 @@ well below both limits.
 Go rejects an individual app-server JSONL message above 16 MiB, while Python's
 line reader has no explicit bound. Normal protocol messages are substantially
 smaller; the bound prevents malformed output from exhausting harness memory.
+Go also bounds an individual durable event at 16 MiB and queues at most 4096
+live activity events. Python leaves both paths unbounded; normal metadata-only
+events remain far below these limits, and live observation remains non-controlling.
 
 ## Operational risks
 
