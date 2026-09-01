@@ -643,6 +643,30 @@ class SpecializedTranscriptRowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OperatorTuiInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_header_distinguishes_planning_failure_from_idle(self) -> None:
+        runtime = _runtime(
+            Path("/tmp/tui-planning-failure"),
+            RuntimeState.RUNNING,
+        )
+        app = OperatorTui(runtime, CodexActivityStream())
+        app._executor.start = Mock()
+        session = Mock()
+        session.mode = CodexGenerationSessionMode.GENERATION
+        session.healthy = True
+        session.planning_retry_required = True
+        app._console._session = session
+        app._console._session_generation = runtime.generation_number
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._refresh_header()
+            header = str(app.query_one("#status-header").render())
+            self.assertIn("Sol planning failed", header)
+            self.assertNotIn("Sol idle", header)
+            app.exit()
+
+        app._executor.join(2.0)
+
     async def test_exit_interview_gate_status_and_prompt_are_visible(self) -> None:
         runtime = _runtime(
             Path("/tmp/tui-exit-interview"),

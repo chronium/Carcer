@@ -167,6 +167,8 @@ class OperatorConsole:
                     return "planning"
                 return "working"
             if self._session is not None:
+                if self._session.planning_retry_required is True:
+                    return "planning failed"
                 return "idle"
             return "stopped"
 
