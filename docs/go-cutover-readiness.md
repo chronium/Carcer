@@ -20,8 +20,11 @@ and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
 and direct-child QEMU controller are implemented. Planning evidence allocation,
 attempt history, exact private responses, digest publication, filtered
-exit-interview capture, and immutable Markdown publication are implemented, but
-are not yet wired to a Go Codex session. The app-server slice provides a
+exit-interview capture, and immutable Markdown publication are implemented.
+Build and review evidence includes immutable sequence allocation, exact byte
+identities, incomplete-attempt preservation, source-read capture, and
+fail-closed latest-success publication. These provenance components are not yet
+wired to Go build or Codex sessions. The app-server slice provides a
 bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
 derives exact non-duplicating deltas; process and session ownership remain
 unimplemented.
@@ -31,10 +34,10 @@ unimplemented.
 The current milestone is verified with `go test ./...`. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
-planning-evidence trees against the Python modules and exercise Python-to-Go and
-Go-to-Python feature loading. Synthetic Unix-socket peers verify exact QMP
-requests, fragmented input, asynchronous events, protocol errors, connection
-retry, and cancellation without starting QEMU. Hardware conformance compares
+planning, build, and review evidence trees against the Python modules and
+exercise Python-to-Go and Go-to-Python feature loading. Synthetic Unix-socket
+peers verify exact QMP requests, fragmented input, asynchronous events, protocol
+errors, connection retry, and cancellation without starting QEMU. Hardware conformance compares
 exact command arguments and archived manifest bytes with the Python module;
 malformed manifest parsing also has a fuzz target. Synthetic subprocesses cover
 normal exit, duplicate start, cancellation, restart, log failures, and forced

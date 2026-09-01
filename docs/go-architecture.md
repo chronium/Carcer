@@ -104,7 +104,9 @@ atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and
 public response identities in byte-compatible manifests. It also captures the
 filtered exit-interview transcript and atomically publishes one immutable,
-run-scoped Markdown artifact. `internal/qemu`
+run-scoped Markdown artifact. Build and review evidence records exact source and
+artifact identities, preserves incomplete attempts, and publishes only validated
+latest-success evidence. `internal/qemu`
 provides the fixed hardware profiles and archived manifest codec plus the
 synchronous, context-aware QMP client with bounded message reads. The QEMU
 controller owns one direct child, its parent log descriptors, and one bounded
