@@ -17,6 +17,7 @@ from .codex_generation_worker import (
 from .codex_review_worker import CodexReviewWorker, CodexReviewWorkerError
 from .cross_run_bootstrap import (
     CROSS_RUN_BOOTSTRAP_HANDOFF,
+    CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER,
     CROSS_RUN_BOOTSTRAP_MANIFEST,
     CrossRunBootstrap,
     CrossRunBootstrapError,
@@ -95,6 +96,7 @@ __all__ = [
     "CodexReviewWorker",
     "CodexReviewWorkerError",
     "CROSS_RUN_BOOTSTRAP_HANDOFF",
+    "CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER",
     "CROSS_RUN_BOOTSTRAP_MANIFEST",
     "CrossRunBootstrap",
     "CrossRunBootstrapError",

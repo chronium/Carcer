@@ -84,6 +84,23 @@ class GenerationGitRecorder:
         """The immutable commit selected by the configured base ref."""
         return self._base_commit
 
+    def generation_tag_commit(self, tag: str) -> str:
+        """Resolve one required immutable annotated generation tag."""
+        commit = self._resolve_optional_tag(tag)
+        if commit is None:
+            raise GenerationGitRecorderError(
+                f"required completed generation tag is missing: {tag}"
+            )
+        object_type = self._git_text(
+            self._repository,
+            ["cat-file", "-t", f"refs/tags/{tag}"],
+        ).strip()
+        if object_type != "tag":
+            raise GenerationGitRecorderError(
+                f"generation tag is not annotated: {tag}"
+            )
+        return commit
+
     def reconcile(self) -> list[GenerationGitRecord]:
         try:
             archives = CodexOSRun(self._run_directory).archived_generations()

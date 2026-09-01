@@ -157,15 +157,21 @@ git push REMOTE experiment-002/lineage-0000
 A new run may explicitly continue from one cooperatively completed generation
 in another validated run by pairing `--initial-iso` with
 `--inherit-from-run` and `--inherit-from-generation`. Before creating the new
-run, the harness validates the source archive lineage and requires the supplied
-initial ISO to be byte-identical to that generation's selected successor.
+run, the harness validates the source archive lineage, requires the selected
+generation to be the latest source archive, and requires the supplied initial
+ISO to be byte-identical to that generation's selected successor. The
+configured Git base must be that source run's annotated generation tag, so the
+new lineage cannot record an unrelated valid ref as its ancestry.
 
 The destination records immutable `cross-run-bootstrap.json` provenance and an
-exact `cross-run-handoff.txt`. The manifest identifies the source run and
-generation, successor ISO, handoff, inherited feature-request ledger, and exact
-configured Git base commit. Inherited requests retain their IDs, requesting
-generations, text, and status; later request allocation continues above the
-largest inherited ID. Generation zero receives the inherited handoff through
+exact `cross-run-handoff.txt`. A canonical
+`cross-run-feature-requests.json` snapshot independently records the inherited
+ledger. The manifest binds its identity alongside the source run and
+generation, successor ISO, handoff, and exact configured Git base commit.
+Inherited requests retain their IDs, requesting generations, and text. Their
+recorded bootstrap-time state remains immutable in the bootstrap snapshot while
+normal later approval or denial transitions and new higher-numbered requests
+remain valid run state. Generation zero receives the inherited handoff through
 the ordinary `previous_handoff` path, including its neutral planning turn.
 
 Bootstrap initialization stages these records outside the destination and

@@ -10,11 +10,17 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .feature_requests import FeatureRequest, FeatureRequestStore
+from .feature_requests import (
+    MAX_FEATURE_DESCRIPTION_BYTES,
+    MAX_FEATURE_TITLE_BYTES,
+    FeatureRequest,
+    FeatureRequestStore,
+)
 
 CROSS_RUN_BOOTSTRAP_MANIFEST = "cross-run-bootstrap.json"
 CROSS_RUN_BOOTSTRAP_HANDOFF = "cross-run-handoff.txt"
-_SCHEMA_VERSION = 1
+CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER = "cross-run-feature-requests.json"
+_SCHEMA_VERSION = 2
 _COPY_CHUNK_BYTES = 1024 * 1024
 
 
@@ -30,6 +36,7 @@ class CrossRunBootstrap:
     successor_iso_sha256: str
     successor_iso_size: int
     feature_ledger_sha256: str
+    feature_ledger_size: int
     inherited_request_ids: tuple[int, ...]
     git_base_ref: str
     git_base_commit: str
@@ -79,6 +86,10 @@ def initialize_cross_run_bootstrap(
         source_runtime = CodexOSRun(source)
         archives = source_runtime.archived_generations()
         CodexOSRun._validate_archived_history(archives)
+        if not archives or archives[-1].generation != source_generation:
+            raise CrossRunBootstrapError(
+                "inherited generation must be the latest source-run archive"
+            )
         archived = source_runtime.inspect_generation(source_generation)
         if archived.outcome != "completed" or archived.handoff is None:
             raise CrossRunBootstrapError(
@@ -101,6 +112,14 @@ def initialize_cross_run_bootstrap(
     handoff_bytes = archived.handoff.encode("utf-8")
     ledger_bytes = _feature_ledger_bytes(requests)
     request_ids = tuple(request.id for request in requests)
+    expected_git_base_ref = (
+        f"{source.name}/generation-{source_generation:04d}"
+    )
+    if git_base_ref != expected_git_base_ref:
+        raise CrossRunBootstrapError(
+            "Git base ref must be the inherited generation tag: "
+            + expected_git_base_ref
+        )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     wrapper = Path(
@@ -111,6 +130,7 @@ def initialize_cross_run_bootstrap(
     )
     candidate = wrapper / destination.name
     candidate.mkdir()
+    published = False
     try:
         from .generation_git import GenerationGitRecorder
 
@@ -119,6 +139,13 @@ def initialize_cross_run_bootstrap(
             candidate,
             git_base_ref,
         )
+        generation_tag_commit = recorder.generation_tag_commit(
+            expected_git_base_ref
+        )
+        if generation_tag_commit != recorder.base_commit:
+            raise CrossRunBootstrapError(
+                "Git base commit does not match the inherited generation tag"
+            )
         bootstrap = CrossRunBootstrap(
             source_run=source.name,
             source_generation=source_generation,
@@ -126,11 +153,16 @@ def initialize_cross_run_bootstrap(
             successor_iso_sha256=iso_sha256,
             successor_iso_size=iso_size,
             feature_ledger_sha256=hashlib.sha256(ledger_bytes).hexdigest(),
+            feature_ledger_size=len(ledger_bytes),
             inherited_request_ids=request_ids,
             git_base_ref=git_base_ref,
             git_base_commit=recorder.base_commit,
         )
         _write_durable(candidate / CROSS_RUN_BOOTSTRAP_HANDOFF, handoff_bytes)
+        _write_durable(
+            candidate / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER,
+            ledger_bytes,
+        )
         FeatureRequestStore(candidate).import_requests(requests)
         imported_ledger = _feature_ledger_bytes(
             FeatureRequestStore(candidate).requests()
@@ -150,10 +182,13 @@ def initialize_cross_run_bootstrap(
                 "cross-run bootstrap destination appeared during initialization"
             )
         candidate.rename(destination)
+        published = True
         _fsync_directory(destination.parent)
         wrapper.rmdir()
         return bootstrap
     except BaseException:
+        if published and destination.exists():
+            shutil.rmtree(destination)
         if wrapper.exists():
             shutil.rmtree(wrapper)
         raise
@@ -166,13 +201,20 @@ def load_cross_run_bootstrap(
     run = Path(run_directory).resolve()
     manifest_path = run / CROSS_RUN_BOOTSTRAP_MANIFEST
     handoff_path = run / CROSS_RUN_BOOTSTRAP_HANDOFF
-    if not manifest_path.exists() and not handoff_path.exists():
+    ledger_path = run / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER
+    if (
+        not manifest_path.exists()
+        and not handoff_path.exists()
+        and not ledger_path.exists()
+    ):
         return None
     if (
         manifest_path.is_symlink()
         or not manifest_path.is_file()
         or handoff_path.is_symlink()
         or not handoff_path.is_file()
+        or ledger_path.is_symlink()
+        or not ledger_path.is_file()
     ):
         raise CrossRunBootstrapError(
             "cross-run bootstrap provenance is incomplete"
@@ -181,6 +223,7 @@ def load_cross_run_bootstrap(
         value = json.loads(manifest_path.read_bytes().decode("utf-8"))
         handoff_bytes = handoff_path.read_bytes()
         handoff = handoff_bytes.decode("utf-8")
+        ledger_bytes = ledger_path.read_bytes()
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CrossRunBootstrapError(
             "cross-run bootstrap provenance is malformed"
@@ -190,6 +233,17 @@ def load_cross_run_bootstrap(
         raise CrossRunBootstrapError(
             "cross-run bootstrap handoff identity does not match"
         )
+    inherited_requests = _decode_feature_ledger(ledger_bytes)
+    if (
+        _bytes_identity(ledger_bytes)
+        != (bootstrap.feature_ledger_sha256, bootstrap.feature_ledger_size)
+        or tuple(request.id for request in inherited_requests)
+        != bootstrap.inherited_request_ids
+    ):
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger identity does not match"
+        )
+    _validate_inherited_requests(run, inherited_requests)
     return CrossRunBootstrap(
         source_run=bootstrap.source_run,
         source_generation=bootstrap.source_generation,
@@ -197,6 +251,7 @@ def load_cross_run_bootstrap(
         successor_iso_sha256=bootstrap.successor_iso_sha256,
         successor_iso_size=bootstrap.successor_iso_size,
         feature_ledger_sha256=bootstrap.feature_ledger_sha256,
+        feature_ledger_size=bootstrap.feature_ledger_size,
         inherited_request_ids=bootstrap.inherited_request_ids,
         git_base_ref=bootstrap.git_base_ref,
         git_base_commit=bootstrap.git_base_commit,
@@ -249,8 +304,10 @@ def _encode_manifest(
         },
         "feature_requests": {
             "count": request_count,
+            "file": CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER,
             "ids": list(bootstrap.inherited_request_ids),
             "sha256": bootstrap.feature_ledger_sha256,
+            "size": bootstrap.feature_ledger_size,
         },
         "git_base": {
             "ref": bootstrap.git_base_ref,
@@ -286,7 +343,9 @@ def _decode_manifest(
         value["handoff"], {"file", "sha256", "size"}, "handoff"
     )
     requests = _mapping(
-        value["feature_requests"], {"count", "ids", "sha256"}, "ledger"
+        value["feature_requests"],
+        {"count", "file", "ids", "sha256", "size"},
+        "ledger",
     )
     git_base = _mapping(value["git_base"], {"ref", "commit"}, "Git base")
     source_run = source["run"]
@@ -306,6 +365,10 @@ def _decode_manifest(
         raise CrossRunBootstrapError("cross-run bootstrap handoff file is invalid")
     count = requests["count"]
     ids = requests["ids"]
+    if requests["file"] != CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER:
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger file is invalid"
+        )
     if (
         type(count) is not int
         or count < 0
@@ -318,6 +381,11 @@ def _decode_manifest(
             "cross-run bootstrap feature-request identity is invalid"
         )
     ledger_hash = _sha256(requests["sha256"], "feature-request ledger")
+    ledger_size = requests["size"]
+    if type(ledger_size) is not int or ledger_size < 0:
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger size is invalid"
+        )
     git_ref = git_base["ref"]
     git_commit = git_base["commit"]
     if not isinstance(git_ref, str) or not git_ref:
@@ -331,6 +399,7 @@ def _decode_manifest(
             iso_identity[0],
             iso_identity[1],
             ledger_hash,
+            ledger_size,
             tuple(ids),
             git_ref,
             git_commit,
@@ -345,6 +414,136 @@ def _mapping(value: object, fields: set[str], label: str) -> dict[str, object]:
             f"cross-run bootstrap {label} has invalid fields"
         )
     return value
+
+
+def _decode_feature_ledger(contents: bytes) -> tuple[FeatureRequest, ...]:
+    try:
+        value = json.loads(contents.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger is malformed"
+        ) from error
+    if not isinstance(value, dict) or set(value) != {"requests"}:
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger has invalid fields"
+        )
+    records = value["requests"]
+    if not isinstance(records, list):
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger is invalid"
+        )
+    requests: list[FeatureRequest] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "description",
+            "generation",
+            "id",
+            "status",
+            "title",
+        }:
+            raise CrossRunBootstrapError(
+                "cross-run bootstrap feature ledger record is invalid"
+            )
+        request_id = record["id"]
+        generation = record["generation"]
+        title = record["title"]
+        description = record["description"]
+        status = record["status"]
+        if (
+            type(request_id) is not int
+            or request_id <= 0
+            or type(generation) is not int
+            or generation < 0
+            or not isinstance(title, str)
+            or not isinstance(description, str)
+            or status not in {"pending", "approved", "denied"}
+        ):
+            raise CrossRunBootstrapError(
+                "cross-run bootstrap feature ledger record is invalid"
+            )
+        try:
+            encoded_title = title.encode("utf-8")
+            encoded_description = description.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise CrossRunBootstrapError(
+                "cross-run bootstrap feature ledger text is invalid"
+            ) from error
+        if (
+            not encoded_title
+            or len(encoded_title) > MAX_FEATURE_TITLE_BYTES
+            or not encoded_description
+            or len(encoded_description) > MAX_FEATURE_DESCRIPTION_BYTES
+        ):
+            raise CrossRunBootstrapError(
+                "cross-run bootstrap feature ledger text is invalid"
+            )
+        request = FeatureRequest(
+            request_id,
+            generation,
+            title,
+            description,
+            status,
+        )
+        requests.append(request)
+    decoded = tuple(requests)
+    if (
+        tuple(request.id for request in decoded)
+        != tuple(sorted({request.id for request in decoded}))
+        or _feature_ledger_bytes(decoded) != contents
+    ):
+        raise CrossRunBootstrapError(
+            "cross-run bootstrap feature ledger is not canonical"
+        )
+    return decoded
+
+
+def _validate_inherited_requests(
+    run: Path,
+    inherited: tuple[FeatureRequest, ...],
+) -> None:
+    try:
+        current = FeatureRequestStore(run).requests()
+    except RuntimeError as error:
+        raise CrossRunBootstrapError(
+            f"inherited feature-request state is invalid: {error}"
+        ) from error
+    current_by_id = {request.id: request for request in current}
+    generation_archived = any(
+        path.name.startswith("generation-") and path.is_dir()
+        for path in run.iterdir()
+    )
+    inherited_ids = {request.id for request in inherited}
+    maximum_inherited_id = max(inherited_ids, default=0)
+    for original in inherited:
+        observed = current_by_id.get(original.id)
+        if observed is None:
+            raise CrossRunBootstrapError(
+                f"inherited feature request #{original.id} is missing"
+            )
+        if (
+            observed.generation != original.generation
+            or observed.title != original.title
+            or observed.description != original.description
+            or (
+                observed.status != original.status
+                and not (
+                    generation_archived
+                    and original.status == "pending"
+                    and observed.status in {"approved", "denied"}
+                )
+            )
+        ):
+            raise CrossRunBootstrapError(
+                f"inherited feature request #{original.id} was altered"
+            )
+    if any(
+        request.id not in inherited_ids
+        and request.id <= maximum_inherited_id
+        for request in current
+    ):
+        raise CrossRunBootstrapError(
+            "new feature request collides with an inherited identity"
+        )
 
 
 def _manifest_identity(

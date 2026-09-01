@@ -9,7 +9,9 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
+import harness.cross_run_bootstrap as cross_run_bootstrap_module
 from harness import (
+    CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER,
     CROSS_RUN_BOOTSTRAP_HANDOFF,
     CROSS_RUN_BOOTSTRAP_MANIFEST,
     TEST_HARDWARE_PROFILE,
@@ -79,6 +81,9 @@ class CrossRunBootstrapTests(unittest.TestCase):
             )
             inherited = source_store.approve(inherited.id)
             repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[-1]
             image = source / "generation-0015" / "successor" / "codexos.iso"
             destination = root / "experiment-003"
 
@@ -88,7 +93,7 @@ class CrossRunBootstrapTests(unittest.TestCase):
                 source,
                 15,
                 repository,
-                "test-base",
+                source_record.tag,
             )
             runtime = CodexOSRun(
                 destination,
@@ -145,6 +150,20 @@ class CrossRunBootstrapTests(unittest.TestCase):
             ).reconcile()[0]
             initial_iso = source / "generation-0000" / "successor" / "codexos.iso"
 
+            wrong_destination = root / "wrong-git-base"
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "inherited generation tag"
+            ):
+                initialize_cross_run_bootstrap(
+                    wrong_destination,
+                    initial_iso,
+                    source,
+                    0,
+                    repository,
+                    "test-base",
+                )
+            self.assertFalse(wrong_destination.exists())
+
             initialized = initialize_cross_run_bootstrap(
                 destination,
                 initial_iso,
@@ -179,6 +198,23 @@ class CrossRunBootstrapTests(unittest.TestCase):
                 },
             )
             self.assertEqual(manifest["feature_requests"]["ids"], [1, 2, 3])
+            ledger_bytes = (
+                destination / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER
+            ).read_bytes()
+            self.assertEqual(
+                manifest["feature_requests"]["sha256"],
+                hashlib.sha256(ledger_bytes).hexdigest(),
+            )
+            self.assertEqual(
+                manifest["feature_requests"]["size"], len(ledger_bytes)
+            )
+            self.assertEqual(
+                [
+                    record["id"]
+                    for record in json.loads(ledger_bytes)["requests"]
+                ],
+                [1, 2, 3],
+            )
             self.assertEqual(manifest["git_base"]["ref"], source_record.tag)
             self.assertEqual(manifest["git_base"]["commit"], source_record.commit)
             self.assertNotIn(str(source), json.dumps(manifest))
@@ -208,6 +244,129 @@ class CrossRunBootstrapTests(unittest.TestCase):
                 0, "Destination request", "Collision-free identity."
             )
             self.assertEqual(next_request.id, 4)
+
+    def test_rejects_non_latest_source_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "experiment-source"
+            files = [SnapshotFile("seed/kernel.c", b"source\n")]
+            _archive_completed(source, 0, None, "initial", files, handoff="G0")
+            _archive_completed(source, 1, 0, "successor", files, handoff="G1")
+            FeatureRequestStore(source).create(
+                1, "Later request", "Must not contaminate a G0 fork."
+            )
+            repository, _ = _create_repository(root / "repository")
+            source_records = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()
+            destination = root / "destination"
+
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "latest source-run archive"
+            ):
+                initialize_cross_run_bootstrap(
+                    destination,
+                    source / "generation-0000" / "successor" / "codexos.iso",
+                    source,
+                    0,
+                    repository,
+                    source_records[0].tag,
+                )
+
+            self.assertFalse(destination.exists())
+
+    def test_validates_immutable_inherited_feature_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            files = [SnapshotFile("seed/kernel.c", b"source\n")]
+            _archive_completed(source, 0, None, "initial", files, handoff="source")
+            inherited = FeatureRequestStore(source).create(
+                0, "Inherited", "Exact inherited request."
+            )
+            repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
+            image = source / "generation-0000" / "successor" / "codexos.iso"
+
+            missing = root / "missing"
+            initialize_cross_run_bootstrap(
+                missing, image, source, 0, repository, source_record.tag
+            )
+            (missing / "feature-requests" / "request-000001.json").unlink()
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "request #1 is missing"
+            ):
+                load_cross_run_bootstrap(missing)
+
+            altered = root / "altered"
+            initialize_cross_run_bootstrap(
+                altered, image, source, 0, repository, source_record.tag
+            )
+            request_path = (
+                altered / "feature-requests" / "request-000001.json"
+            )
+            record = json.loads(request_path.read_text(encoding="utf-8"))
+            record["title"] = "Altered"
+            request_path.write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "request #1 was altered"
+            ):
+                load_cross_run_bootstrap(altered)
+
+            status_changed_before_start = root / "status-before-start"
+            initialize_cross_run_bootstrap(
+                status_changed_before_start,
+                image,
+                source,
+                0,
+                repository,
+                source_record.tag,
+            )
+            FeatureRequestStore(status_changed_before_start).approve(inherited.id)
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "request #1 was altered"
+            ):
+                load_cross_run_bootstrap(status_changed_before_start)
+
+            ledger_changed = root / "ledger-changed"
+            initialize_cross_run_bootstrap(
+                ledger_changed, image, source, 0, repository, source_record.tag
+            )
+            ledger_path = ledger_changed / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER
+            ledger_path.write_bytes(ledger_path.read_bytes() + b" ")
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "feature ledger"
+            ):
+                load_cross_run_bootstrap(ledger_changed)
+
+            evolved = root / "evolved"
+            initialize_cross_run_bootstrap(
+                evolved, image, source, 0, repository, source_record.tag
+            )
+            _archive_completed(
+                evolved, 0, None, "initial", files, handoff="destination"
+            )
+            store = FeatureRequestStore(evolved)
+            approved = store.approve(inherited.id)
+            added = store.create(0, "New request", "Created by this run.")
+            loaded = load_cross_run_bootstrap(evolved)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(
+                FeatureRequestStore(evolved).requests(), (approved, added)
+            )
+            immutable_ledger = json.loads(
+                (evolved / CROSS_RUN_BOOTSTRAP_FEATURE_LEDGER).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                immutable_ledger["requests"][0]["status"], "pending"
+            )
 
     def test_rejects_iso_mismatch_and_invalid_source_generations_without_output(
         self,
@@ -299,12 +458,15 @@ class CrossRunBootstrapTests(unittest.TestCase):
             FeatureRequestStore(source).create(0, "Request", "Description")
             image = source / "generation-0000" / "successor" / "codexos.iso"
             repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
             occupied = root / "occupied"
             occupied.mkdir()
             (occupied / "keep").write_bytes(b"unchanged")
             with self.assertRaisesRegex(CrossRunBootstrapError, "fresh destination"):
                 initialize_cross_run_bootstrap(
-                    occupied, image, source, 0, repository, "test-base"
+                    occupied, image, source, 0, repository, source_record.tag
                 )
             self.assertEqual((occupied / "keep").read_bytes(), b"unchanged")
 
@@ -315,8 +477,63 @@ class CrossRunBootstrapTests(unittest.TestCase):
                 side_effect=FeatureRequestError("injected persistence failure"),
             ), self.assertRaises(FeatureRequestError):
                 initialize_cross_run_bootstrap(
-                    destination, image, source, 0, repository, "test-base"
+                    destination,
+                    image,
+                    source,
+                    0,
+                    repository,
+                    source_record.tag,
                 )
+            self.assertFalse(destination.exists())
+            self.assertEqual(
+                [
+                    path.name
+                    for path in root.iterdir()
+                    if path.name.startswith(".cross-run")
+                ],
+                [],
+            )
+
+    def test_post_publication_failure_removes_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            _archive_completed(
+                source,
+                0,
+                None,
+                "initial",
+                [SnapshotFile("seed/kernel.c", b"source\n")],
+            )
+            image = source / "generation-0000" / "successor" / "codexos.iso"
+            repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
+            destination = root / "destination"
+            real_fsync_directory = cross_run_bootstrap_module._fsync_directory
+
+            def fail_after_publication(
+                path: Path, *, optional: bool = False
+            ) -> None:
+                if destination.exists():
+                    raise OSError("injected parent-directory fsync failure")
+                real_fsync_directory(path, optional=optional)
+
+            with patch.object(
+                cross_run_bootstrap_module,
+                "_fsync_directory",
+                side_effect=fail_after_publication,
+            ), self.assertRaisesRegex(OSError, "injected parent-directory"):
+                initialize_cross_run_bootstrap(
+                    destination,
+                    image,
+                    source,
+                    0,
+                    repository,
+                    source_record.tag,
+                )
+
             self.assertFalse(destination.exists())
             self.assertEqual(
                 [
@@ -341,9 +558,17 @@ class CrossRunBootstrapTests(unittest.TestCase):
             )
             image = source / "generation-0000" / "successor" / "codexos.iso"
             repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
             destination = root / "destination"
             initialize_cross_run_bootstrap(
-                destination, image, source, 0, repository, "test-base"
+                destination,
+                image,
+                source,
+                0,
+                repository,
+                source_record.tag,
             )
             (destination / CROSS_RUN_BOOTSTRAP_HANDOFF).write_text(
                 "Changed handoff", encoding="utf-8"
@@ -364,9 +589,17 @@ class CrossRunBootstrapTests(unittest.TestCase):
             _archive_completed(source, 0, None, "initial", files, handoff="source")
             image = source / "generation-0000" / "successor" / "codexos.iso"
             repository, _ = _create_repository(root / "repository")
+            source_record = GenerationGitRecorder(
+                repository, source, "test-base"
+            ).reconcile()[0]
             destination = root / "destination"
             initialize_cross_run_bootstrap(
-                destination, image, source, 0, repository, "test-base"
+                destination,
+                image,
+                source,
+                0,
+                repository,
+                source_record.tag,
             )
             _archive_completed(
                 destination, 0, None, "initial", files, handoff="destination"
@@ -381,7 +614,7 @@ class CrossRunBootstrapTests(unittest.TestCase):
                     "--git-repository",
                     str(repository),
                     "--git-base-ref",
-                    "test-base",
+                    source_record.tag,
                     "--plain",
                 ],
                 io.StringIO("quit\n"),
