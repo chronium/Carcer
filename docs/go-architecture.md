@@ -102,7 +102,9 @@ host-service handling, and owns all framed reads and ordered writes.
 feature-request ledger, including sparse imports, authoritative refreshes, and
 atomic synced record replacement. `internal/provenance` records planning
 allocation, attempts, interruption/resumption, exact private responses, and
-public response identities in byte-compatible manifests. `internal/qemu`
+public response identities in byte-compatible manifests. It also captures the
+filtered exit-interview transcript and atomically publishes one immutable,
+run-scoped Markdown artifact. `internal/qemu`
 provides the fixed hardware profiles and archived manifest codec plus the
 synchronous, context-aware QMP client with bounded message reads. The QEMU
 controller owns one direct child, its parent log descriptors, and one bounded

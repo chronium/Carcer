@@ -19,8 +19,9 @@ and capability negotiation, status/control commands, event skipping, deadlines,
 and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
 and direct-child QEMU controller are implemented. Planning evidence allocation,
-attempt history, exact private responses, and digest publication are implemented,
-but are not yet wired to a Go Codex session. The app-server slice provides a
+attempt history, exact private responses, digest publication, filtered
+exit-interview capture, and immutable Markdown publication are implemented, but
+are not yet wired to a Go Codex session. The app-server slice provides a
 bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
 derives exact non-duplicating deltas; process and session ownership remain
 unimplemented.
@@ -59,9 +60,10 @@ There are no intentional wire-format differences in the implemented codecs.
 Feature IDs and generation numbers are represented as uint64 in Go; unlike
 Python's unbounded integers, larger persisted values are rejected. Such values
 cannot describe an operable CodexOS generation, but this remains a documented
-validation difference. Planning thread/turn IDs and response text must also be
-valid UTF-8 in Go; Python can represent lone Unicode surrogates in IDs, although
-the real app-server protocol supplies valid Unicode strings. The Go QMP client
+validation difference. Planning and exit-interview generation numbers are also
+uint64. Planning thread/turn IDs and transcript text must be valid UTF-8 in Go;
+Python can represent lone Unicode surrogates, although the real app-server
+protocol supplies valid Unicode strings. The Go QMP client
 rejects an individual message larger than 1 MiB; the Python reader has no
 explicit message bound. Normal QEMU greetings, events, and replies are far below
 that defensive limit. Go also requires response IDs to be unsigned JSON integer
