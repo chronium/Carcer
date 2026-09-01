@@ -127,6 +127,8 @@ recovery and a bounded in-memory activity stream that exposes only explicitly
 renderable app-server text; metrics and OTLP export remain unimplemented.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
 currently starts QEMU, contacts Codex, or changes the operational entry point.
-`internal/codexapp` currently provides a bounded UTF-8 JSONL message codec,
-validates cumulative token-usage notifications, and derives non-duplicating
-metric deltas; it does not yet start an app-server process.
+`internal/codexapp` owns an isolated one-shot app-server process, sole JSONL
+reader, ordered writer, concurrent request routing, bounded notification and
+server-request queues, catalog/policy validation, interrupts, and TERM/KILL
+shutdown. It also validates cumulative token usage and derives non-duplicating
+metric deltas; agent sessions are not yet wired to it.

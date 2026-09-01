@@ -29,13 +29,14 @@ fail-closed latest-success publication. These provenance components are not yet
 wired to Go build or Codex sessions. Generation Git reconciliation preserves the
 configured base commit, exact source trees/messages/annotations, rollback
 lineages, immutable conflicts, and the developer worktree; operator integration
-remains unwired. The app-server slice provides a
-bounded UTF-8 JSONL codec, validates cumulative token-usage notifications, and
-derives exact non-duplicating deltas; process and session ownership remain
-unimplemented. The local observability slice validates and appends sequenced
-JSONL events without allowing recording failures to control the experiment. Its
-bounded activity stream preserves concurrent ordering and excludes raw reasoning;
-metrics and OTLP export remain unimplemented.
+remains unwired. The app-server client owns an isolated one-shot process,
+concurrent JSONL request routing, notifications and server requests, catalog and
+thread/turn policy validation, interrupts, bounded diagnostics/queues, and
+TERM/KILL reaping. Agent-session orchestration remains unimplemented. The local
+observability slice validates and appends sequenced JSONL events without allowing
+recording failures to control the experiment. Its bounded activity stream
+preserves concurrent ordering and excludes raw reasoning; metrics and OTLP export
+remain unimplemented.
 Cross-run bootstrap can initialize and reload a fresh run from a validated latest
 completed generation, preserving exact successor-ISO, handoff, feature-ledger,
 and annotated Git-base identities. Generation lifecycle wiring remains separate.
@@ -98,6 +99,9 @@ well below both limits.
 Go rejects an individual app-server JSONL message above 16 MiB, while Python's
 line reader has no explicit bound. Normal protocol messages are substantially
 smaller; the bound prevents malformed output from exhausting harness memory.
+Go also limits either app-server notification queue to 256 messages and 32 MiB
+of encoded input. Python's queues are unbounded; overflow fails the isolated
+transport and cannot silently discard protocol state.
 Go also bounds an individual durable event at 16 MiB and queues at most 4096
 live activity events. Python leaves both paths unbounded; normal metadata-only
 events remain far below these limits, and live observation remains non-controlling.
