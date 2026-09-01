@@ -103,9 +103,7 @@ func (c *QMPClient) Connect(ctx context.Context) error {
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}

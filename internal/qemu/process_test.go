@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -145,23 +147,53 @@ func TestQEMUProcessControllerReapsSpontaneousExitAndRestarts(t *testing.T) {
 	t.Setenv(qemuHelperEnvironment, "1")
 	temporary := t.TempDir()
 	controller := NewQEMUProcessController(os.Args[0])
-	first := helperQEMUOptions("exit", filepath.Join(temporary, "first.stdout"), filepath.Join(temporary, "first.stderr"))
+	firstStdout := filepath.Join(temporary, "first.stdout")
+	first := helperQEMUOptions("exit", firstStdout, filepath.Join(temporary, "first.stderr"))
 	if err := controller.Start(first); err != nil {
 		t.Fatal(err)
 	}
 	controller.mutex.Lock()
-	firstDone := controller.done
+	firstCommand := controller.command
 	controller.mutex.Unlock()
-	select {
-	case <-firstDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first child was not reaped")
-	}
+	waitForFileText(t, firstStdout, "ready")
+	waitForProcessExit(t, firstCommand)
 	second := helperQEMUOptions("exit", filepath.Join(temporary, "second.stdout"), filepath.Join(temporary, "second.stderr"))
 	if err := controller.Start(second); err != nil {
-		t.Fatalf("restart after spontaneous exit: %v", err)
+		t.Fatalf("immediate restart after spontaneous exit: %v", err)
 	}
 	waitForControllerExit(t, controller)
+}
+
+func TestQEMUProcessControllerConcurrentStops(t *testing.T) {
+	t.Setenv(qemuHelperEnvironment, "1")
+	temporary := t.TempDir()
+	controller := NewQEMUProcessController(os.Args[0])
+	if err := controller.Start(helperQEMUOptions("wait", filepath.Join(temporary, "qemu.stdout"), filepath.Join(temporary, "qemu.stderr"))); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	waitForFileText(t, filepath.Join(temporary, "qemu.stdout"), "ready")
+
+	const callers = 8
+	stopErrors := make(chan error, callers)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(callers)
+	for range callers {
+		go func() {
+			defer waitGroup.Done()
+			stopErrors <- controller.Stop(context.Background(), time.Second)
+		}()
+	}
+	waitGroup.Wait()
+	close(stopErrors)
+	for err := range stopErrors {
+		if err != nil {
+			t.Fatalf("concurrent Stop: %v", err)
+		}
+	}
+	if controller.IsRunning() {
+		t.Fatal("controller still reports running after concurrent Stop calls")
+	}
 }
 
 func TestQEMUProcessControllerStartFailuresLeaveItReusable(t *testing.T) {
@@ -209,10 +241,21 @@ func TestQEMUProcessControllerRejectsNegativeStopTimeout(t *testing.T) {
 }
 
 func TestQEMUProcessControllerRejectsNilStopContext(t *testing.T) {
-	controller := NewQEMUProcessController("unused")
+	t.Setenv(qemuHelperEnvironment, "1")
+	temporary := t.TempDir()
+	controller := NewQEMUProcessController(os.Args[0])
+	stdoutPath := filepath.Join(temporary, "qemu.stdout")
+	if err := controller.Start(helperQEMUOptions("wait", stdoutPath, filepath.Join(temporary, "qemu.stderr"))); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	waitForFileText(t, stdoutPath, "ready")
 	err := controller.Stop(nil, time.Second)
 	if err == nil || !strings.Contains(err.Error(), "context is nil") {
 		t.Fatalf("Stop error = %v, want nil context error", err)
+	}
+	if !controller.IsRunning() {
+		t.Fatal("nil-context Stop changed the running child")
 	}
 }
 
@@ -286,5 +329,16 @@ func waitForControllerExit(t *testing.T, controller *QEMUProcessController) {
 	}
 	if controller.IsRunning() {
 		t.Fatal("controller did not reap its exited child")
+	}
+}
+
+func waitForProcessExit(t *testing.T, command *exec.Cmd) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !processExited(command) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !processExited(command) {
+		t.Fatal("child did not exit before timeout")
 	}
 }

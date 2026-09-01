@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,6 +60,13 @@ func (c *QEMUProcessController) Start(options QEMUStartOptions) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.reapExitedLocked()
+	if c.command != nil && processExited(c.command) {
+		done := c.done
+		c.mutex.Unlock()
+		<-done
+		c.mutex.Lock()
+		c.reapExitedLocked()
+	}
 	if c.command != nil {
 		return &QEMUProcessError{Reason: "QEMU is already running"}
 	}
@@ -181,6 +189,29 @@ func (c *QEMUProcessController) reapExitedLocked() {
 		c.closeLogsLocked()
 	default:
 	}
+}
+
+func processExited(command *exec.Cmd) bool {
+	if command.Process == nil {
+		return false
+	}
+	// A child that has exited but has not been waited on is a zombie. Inspect
+	// that state so Start matches Python's nonblocking Popen.poll behavior.
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", command.Process.Pid))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		_, err = os.Stat("/proc")
+		return err == nil
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "State:" {
+			return fields[1] == "Z"
+		}
+	}
+	return false
 }
 
 func (c *QEMUProcessController) closeLogsFor(command *exec.Cmd) {
