@@ -67,6 +67,30 @@ func TestExtractFrameAcceptsEveryValidPrefix(t *testing.T) {
 	}
 }
 
+func TestReadFrameHandlesByteAtATimeReader(t *testing.T) {
+	frame := Frame{MessageType: 9, RequestID: 17, Payload: []byte("fragmented payload")}
+	encoded, err := EncodeFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ReadFrame(&singleByteReader{reader: bytes.NewReader(encoded)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFrameEqual(t, decoded, frame)
+}
+
+func TestFrameAcceptsMaximumPayload(t *testing.T) {
+	payload := make([]byte, MaxPayloadSize)
+	encoded, err := EncodeFrame(Frame{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != frameHeaderSize+MaxPayloadSize {
+		t.Fatalf("encoded length = %d", len(encoded))
+	}
+}
+
 func TestFramingRejectsMalformedAndIncompleteData(t *testing.T) {
 	tests := []struct {
 		name string
@@ -132,4 +156,15 @@ func assertFrameEqual(t *testing.T, got, want Frame) {
 	if got.MessageType != want.MessageType || got.RequestID != want.RequestID || !bytes.Equal(got.Payload, want.Payload) {
 		t.Fatalf("frame = %#v, want %#v", got, want)
 	}
+}
+
+type singleByteReader struct {
+	reader *bytes.Reader
+}
+
+func (r *singleByteReader) Read(buffer []byte) (int, error) {
+	if len(buffer) > 1 {
+		buffer = buffer[:1]
+	}
+	return r.reader.Read(buffer)
 }

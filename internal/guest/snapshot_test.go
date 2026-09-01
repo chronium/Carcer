@@ -3,6 +3,7 @@ package guest
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,32 @@ func TestSourceSnapshotRejectsMalformedUnsafeAndBoundedInput(t *testing.T) {
 				t.Fatalf("DecodeSourceSnapshot() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestSourceSnapshotAcceptsExactFileAndContentBounds(t *testing.T) {
+	files := make([]SnapshotFile, maxSnapshotFiles)
+	for index := range files {
+		files[index] = SnapshotFile{Path: fmt.Sprintf("seed/file-%03d", index)}
+	}
+	files[0].Content = make([]byte, maxSnapshotContent)
+	encoded, err := EncodeSourceSnapshot(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeSourceSnapshot(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSnapshotEqual(t, decoded, files)
+
+	tooMany := append(append([]SnapshotFile(nil), files...), SnapshotFile{Path: "seed/overflow"})
+	if _, err := EncodeSourceSnapshot(tooMany); err == nil {
+		t.Fatal("snapshot with 129 files was accepted")
+	}
+	files[0].Content = make([]byte, maxSnapshotContent+1)
+	if _, err := EncodeSourceSnapshot(files); err == nil {
+		t.Fatal("snapshot exceeding 64 KiB was accepted")
 	}
 }
 

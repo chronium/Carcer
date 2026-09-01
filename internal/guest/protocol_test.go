@@ -139,3 +139,32 @@ func TestToolProtocolRejectsMalformedAndOversizedValues(t *testing.T) {
 		t.Fatal("zero response request ID accepted")
 	}
 }
+
+func TestProtocolAcceptsExactNameToolAndResponseBounds(t *testing.T) {
+	name := strings.Repeat("x", maxProtocolNames)
+	hostPayload := make([]byte, 2+len(name)+2)
+	binary.LittleEndian.PutUint16(hostPayload[:2], uint16(len(name)))
+	copy(hostPayload[2:], name)
+	if _, err := DecodeHostServiceRequest(Frame{MessageType: HostServiceRequest, RequestID: 1, Payload: hostPayload}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeInvokeRequest(name, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	toolList := make([]byte, 2, 2+maxTools*3)
+	binary.LittleEndian.PutUint16(toolList, maxTools)
+	for range maxTools {
+		toolList = append(toolList, 1, 0, 'x')
+	}
+	tools, err := ParseToolList(toolList)
+	if err != nil || len(tools) != maxTools {
+		t.Fatalf("ParseToolList() returned %d tools, %v", len(tools), err)
+	}
+
+	output := make([]byte, MaxPayloadSize-4)
+	response, err := CreateHostServiceResponse(1, 0, output)
+	if err != nil || len(response.Payload) != MaxPayloadSize {
+		t.Fatalf("maximum host response = %d bytes, %v", len(response.Payload), err)
+	}
+}
