@@ -1,33 +1,23 @@
 # CodexOS user ABI
 
-CXE1 files have a 16-byte little-endian header: `CXE1`, image size,
-entry offset, and zero flags, followed by the exact image. Generic `run`
-loads any valid CXE privately: a nonempty, at-most-511-page RWX image at
-`0x400000`, with an in-image entry and a zeroed stack page ending at
-`0x600000`. Exit reclaims all task pages. The PIT preempts user code;
-independent CPU-bound ring-3 tasks make progress without voluntary yields.
-User CPU exceptions terminate only the faulting task with status UINT64_MAX;
-the scheduler reclaims its pages and continues other workloads.
+CXE1: `CXE1`, LE image size, entry offset, zero flags, then <=511 pages.
+`run(path)` privately maps it RWX at 0x400000; stack top is 0x600000.
+PIT ticks preempt ring 3. User faults exit that task with UINT64_MAX.
 
-Ring 3 uses `int 0x80`: RAX is the call; arguments are RDI, RSI, RDX, RCX,
-R8. Failure or an unknown call returns `UINT64_MAX`.
+`int 0x80`: RAX call; args RDI, RSI, RDX, RCX, R8; failure UINT64_MAX.
 
-- 0: `exit(status)`, no return.
-- 1: `file_size(path,path_length)`.
-- 2: `file_read(path,path_length,offset,destination,count)`.
-- 3: `file_attributes(path,path_length)`; bit 0 means immutable.
-- 4: `file_write(path,path_length,offset,source,count)`.
+- 0 exit(status)
+- 1 size(path,len)
+- 2 read(path,len,offset,destination,count)
+- 3 attributes(path,len); immutable bit 0
+- 4 write(path,len,offset,source,count)
+- 5 spawn(path,len), returns task ID
+- 6 reap(id,status_pointer): 0 running; 1 stores status and frees slot
 
-Paths are explicit 1..255-byte spans. User buffers must stay wholly in the
-image or stack and may cross image pages. Overflow, holes, and boundary
-crossings fail. Reads return through EOF; offset past EOF fails. Offset-zero
-writes may create files. Zero-length I/O ignores its data pointer.
+Paths are 1..255-byte UTF-8 spans; buffers stay in image or stack.
+Sealed files reject mutation.
 
-Sealing is irreversible: writes, truncations, and removal all fail, including
-zero-length/no-op mutations. The development protocol's generic
-`import_provided_asset(id,path)` looks up the trusted advertised size,
-copies an asset up to 64 MiB in bounded range reads into a newly created
-ordinary file, removes partial files on failure, and seals the exact completed
-file. Protocol-side file transactions are scheduler-atomic. Assets
-are not automatically imported across boots. `run(path)` launches any valid
-CXE through the same loader and scheduler and returns its task identifier.
+`import_provided_asset` creates an ephemeral sealed ordinary file up to
+64 MiB. Protocol `run` shares the loader. Protocol `reap` returns
+`running` or consumes exact decimal status. Exited slots stay reserved
+until reap.
