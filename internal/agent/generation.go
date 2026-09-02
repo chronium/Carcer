@@ -324,7 +324,11 @@ type GenerationSession struct {
 	turnID       string
 	turnPhase    string
 	turnStarting bool
-	turnCancel   context.CancelFunc
+	// turnAcceptingTools closes at the terminal turn notification before the
+	// registered callbacks are joined. This prevents a late server request from
+	// escaping the per-turn ownership boundary.
+	turnAcceptingTools bool
+	turnCancel         context.CancelFunc
 	// turnReady is the per-turn reservation gate. StartTurn runs without the
 	// session mutex and may only publish its ID while this gate is current.
 	turnReady   chan struct{}
@@ -1175,6 +1179,7 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	s.lastStatus = ""
 	s.lastMessage = ""
 	s.turnStarting = true
+	s.turnAcceptingTools = false
 	turnContext, turnCancel := context.WithCancel(parentContext)
 	turnReady := make(chan struct{})
 	s.turnCancel = turnCancel
@@ -1230,6 +1235,7 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	if reserved {
 		s.turnID = turnID
 		s.turnStarting = false
+		s.turnAcceptingTools = true
 		s.turnReady = nil
 		closeGenerationChannel(turnReady)
 		s.turnNumber++
@@ -1307,6 +1313,23 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 		"turn_number": turnNumber, "turn_phase": phase,
 	}, threadID, turnID, "")
 	status, finalMessage, responsePresent, waitErr := s.waitForTurn(turnContext, threadID, turnID, phase)
+	s.mu.Lock()
+	s.turnAcceptingTools = false
+	toolIdle := s.toolIdle
+	toolJoinTimeout := s.options.StopTimeout
+	s.mu.Unlock()
+	toolTimer := time.NewTimer(toolJoinTimeout)
+	select {
+	case <-toolIdle:
+	case <-turnContext.Done():
+		waitErr = errors.Join(waitErr, &GenerationWorkerError{
+			Reason: "Codex dynamic tool call did not quiesce after the turn ended",
+			Err:    turnContext.Err(),
+		})
+	case <-toolTimer.C:
+		waitErr = errors.Join(waitErr, &GenerationWorkerError{Reason: "Codex dynamic tool call did not quiesce after the turn ended"})
+	}
+	toolTimer.Stop()
 	if waitErr != nil {
 		terminalFailure := status == "failed"
 		s.mu.Lock()
@@ -1499,6 +1522,7 @@ func (s *GenerationSession) clearTurn(status string) {
 	s.turnID = ""
 	s.turnPhase = ""
 	s.turnStarting = false
+	s.turnAcceptingTools = false
 	s.turnCancel = nil
 	s.turnReady = nil
 	closeGenerationChannel(turnReady)
@@ -1738,6 +1762,7 @@ func (s *GenerationSession) Close() error {
 	s.lastStatus = ""
 	s.lastMessage = ""
 	s.turnStarting = false
+	s.turnAcceptingTools = false
 	s.turnCancel = nil
 	s.turnReady = nil
 	s.initialActive = false
@@ -1822,7 +1847,7 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	// Close clears the owned server while holding the same mutex. Revalidate
 	// the captured turn before registering the callback so Close either sees
 	// and joins this callback or prevents it from starting.
-	if s.closed || s.server != server || s.threadID != threadID || s.turnID != turnID {
+	if s.closed || !s.turnAcceptingTools || s.server != server || s.threadID != threadID || s.turnID != turnID {
 		s.mu.Unlock()
 		_ = server.RejectServerRequest(message)
 		return

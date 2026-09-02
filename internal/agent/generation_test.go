@@ -465,6 +465,77 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	}
 }
 
+func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-terminal-tool.json")
+	setGenerationHelper(t, "terminal-before-tool-result", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	toolStarted := make(chan struct{})
+	releaseTool := make(chan struct{})
+	var firstTool sync.Once
+	runtime.invoke = func(ctx context.Context, _ string, _ [][]byte) (guest.ToolResult, error) {
+		blocked := false
+		firstTool.Do(func() {
+			blocked = true
+			close(toolStarted)
+		})
+		if blocked {
+			select {
+			case <-releaseTool:
+			case <-ctx.Done():
+				return guest.ToolResult{}, ctx.Err()
+			}
+		}
+		return guest.ToolResult{Status: 0}, nil
+	}
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	type turnOutcome struct {
+		result GenerationResult
+		err    error
+	}
+	resultChannel := make(chan turnOutcome, 1)
+	go func() {
+		result, err := session.RunInitialTurn()
+		resultChannel <- turnOutcome{result: result, err: err}
+	}()
+	select {
+	case <-toolStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("planning tool did not start")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		session.mu.Lock()
+		joining := session.turnPhase == "planning" && !session.turnAcceptingTools && session.activeTools == 1
+		session.mu.Unlock()
+		if joining {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal planning turn did not begin joining its active tool")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case outcome := <-resultChannel:
+		t.Fatalf("initial sequence advanced before its planning tool stopped: %#v", outcome)
+	default:
+	}
+	close(releaseTool)
+	select {
+	case outcome := <-resultChannel:
+		if outcome.err != nil || outcome.result.TurnStatus != "completed" {
+			t.Fatalf("initial sequence = %#v, %v", outcome.result, outcome.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial sequence did not continue after its planning tool stopped")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerationSessionRetriesOrdinaryTerminalFailureOnSameThread(t *testing.T) {
 	recordPath := filepath.Join(t.TempDir(), "generation.json")
 	setGenerationHelper(t, "continuation-failed", recordPath)
@@ -1623,7 +1694,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "worker-success" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -1738,6 +1809,16 @@ func runGenerationFakeAppServer() {
 			"callId": callID, "threadId": threadID, "turnId": turnID,
 			"namespace": "codexos", "tool": tool, "arguments": arguments,
 		}})
+		terminalBeforeToolResult := mode == "terminal-before-tool-result" && index == 0
+		if terminalBeforeToolResult {
+			item := map[string]any{"id": "message-0", "type": "agentMessage", "text": "Planning complete."}
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": item,
+			}})
+			send(map[string]any{"method": "turn/completed", "params": map[string]any{
+				"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"},
+			}})
+		}
 		interrupted := false
 		for {
 			response := read()
@@ -1774,6 +1855,9 @@ func runGenerationFakeAppServer() {
 				continue
 			}
 			os.Exit(25)
+		}
+		if terminalBeforeToolResult {
+			continue
 		}
 		interruptAt := -1
 		if mode == "interrupt" || mode == "interrupt-failed" {
