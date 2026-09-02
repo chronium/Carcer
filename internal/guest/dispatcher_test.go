@@ -366,11 +366,16 @@ func TestDispatcherHandlerCanCloseWithoutSelfWait(t *testing.T) {
 	defer peer.Close()
 	var dispatcher *SerialProtocolDispatcher
 	closeResult := make(chan error, 1)
+	recorded := make(chan string, 8)
 	dispatcher = NewSerialProtocolDispatcher(serial, DispatcherOptions{
-		BackgroundHostServices: func(context.Context, HostRequest) (Frame, error) {
-			closeResult <- dispatcher.Close()
+		BackgroundHostServices: func(ctx context.Context, _ HostRequest) (Frame, error) {
+			dispatcher.mutex.Lock()
+			dispatcher.recordLocked("callback_before_close", map[string]any{})
+			dispatcher.mutex.Unlock()
+			closeResult <- dispatcher.CloseFromCallback(ctx)
 			return Frame{}, errors.New("closed")
 		},
+		EventRecorder: func(event string, _ map[string]any) { recorded <- event },
 	})
 	dispatcher.closeTimeout = 100 * time.Millisecond
 	if err := dispatcher.StartReady(context.Background()); err != nil {
@@ -387,6 +392,66 @@ func TestDispatcherHandlerCanCloseWithoutSelfWait(t *testing.T) {
 	}
 	if err := dispatcher.Close(); err != nil {
 		t.Fatal(err)
+	}
+	foundCallbackEvent := false
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for !foundCallbackEvent {
+		select {
+		case event := <-recorded:
+			foundCallbackEvent = event == "callback_before_close"
+		case <-deadline.C:
+			t.Fatal("self-close discarded an event queued by its callback")
+		}
+	}
+	wait()
+}
+
+func TestDispatcherExternalCloseWaitsForHostServiceCallback(t *testing.T) {
+	serial, peer, wait := connectedSerial(t)
+	defer peer.Close()
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	handlerReturned := make(chan struct{})
+	dispatcher := NewSerialProtocolDispatcher(serial, DispatcherOptions{
+		BackgroundHostServices: func(context.Context, HostRequest) (Frame, error) {
+			close(handlerStarted)
+			<-releaseHandler
+			close(handlerReturned)
+			return Frame{}, errors.New("handler released")
+		},
+	})
+	dispatcher.closeTimeout = 500 * time.Millisecond
+	if err := dispatcher.StartReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writePeerFrame(t, peer, hostRequestFrame(13, "blocked", nil))
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("host-service handler was not called")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- dispatcher.Close() }()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("external Close returned while callback was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseHandler)
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("external Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("external Close did not join the reader after callback completion")
+	}
+	select {
+	case <-handlerReturned:
+	default:
+		t.Fatal("host-service callback had not returned before external Close completed")
 	}
 	wait()
 }

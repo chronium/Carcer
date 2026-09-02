@@ -29,6 +29,17 @@ type DuplexSerial interface {
 type HostServiceHandler func(context.Context, HostRequest) (Frame, error)
 type SerialEventRecorder func(string, map[string]any)
 
+// dispatcherCallbackContextKey marks the context passed to a host-service
+// callback.  CloseFromCallback uses this marker to prove that a callback has
+// explicitly opted into the self-close path; Close itself always waits for
+// the reader to stop.
+type dispatcherCallbackContextKey struct{}
+
+type dispatcherCallbackToken struct {
+	dispatcher *SerialProtocolDispatcher
+	active     bool
+}
+
 type DispatcherError struct {
 	Reason string
 	Err    error
@@ -274,6 +285,32 @@ func (d *SerialProtocolDispatcher) StartupDiagnostic() []byte {
 }
 
 func (d *SerialProtocolDispatcher) Close() error {
+	return d.close(false)
+}
+
+// CloseFromCallback closes the dispatcher without waiting for the reader
+// goroutine.  It is only valid with the context supplied to the current
+// HostServiceHandler invocation.  A callback runs on the reader goroutine, so
+// waiting for d.done from that callback would deadlock; external callers must
+// use Close instead so that their shutdown joins the reader.
+func (d *SerialProtocolDispatcher) CloseFromCallback(ctx context.Context) error {
+	if ctx == nil {
+		return &DispatcherError{Reason: "serial protocol callback context is nil"}
+	}
+	token, ok := ctx.Value(dispatcherCallbackContextKey{}).(*dispatcherCallbackToken)
+	if !ok || token.dispatcher != d {
+		return &DispatcherError{Reason: "serial protocol callback context is invalid"}
+	}
+	d.mutex.Lock()
+	active := token.active
+	d.mutex.Unlock()
+	if !active {
+		return &DispatcherError{Reason: "serial protocol callback context is no longer active"}
+	}
+	return d.close(true)
+}
+
+func (d *SerialProtocolDispatcher) close(selfCallback bool) error {
 	d.mutex.Lock()
 	if !d.closing {
 		d.closing = true
@@ -289,19 +326,23 @@ func (d *SerialProtocolDispatcher) Close() error {
 		d.signalLocked()
 	}
 	started := d.started
-	callbackActive := d.callbackActive != 0
 	d.mutex.Unlock()
 	_ = d.serial.Close()
-	if !callbackActive {
-		d.flushEvents()
+	if selfCallback {
+		// A host callback runs on the reader goroutine.  In addition to the
+		// reader join below, flushing an event recorder here could re-enter
+		// Close from that same callback and deadlock.
+		return nil
 	}
-	if !started || callbackActive {
+	if !started {
+		d.flushEvents()
 		return nil
 	}
 	timer := time.NewTimer(d.closeTimeout)
 	defer timer.Stop()
 	select {
 	case <-d.done:
+		d.flushEvents()
 		return nil
 	case <-timer.C:
 		return &SerialError{Reason: "serial protocol reader did not stop"}
@@ -309,7 +350,10 @@ func (d *SerialProtocolDispatcher) Close() error {
 }
 
 func (d *SerialProtocolDispatcher) readLoop(ctx context.Context) {
-	defer close(d.done)
+	defer func() {
+		close(d.done)
+		d.flushEvents()
+	}()
 	for {
 		d.mutex.Lock()
 		if d.closing {
@@ -666,8 +710,10 @@ func (d *SerialProtocolDispatcher) callHostServiceHandler(ctx context.Context, h
 	d.mutex.Lock()
 	d.callbackActive++
 	d.mutex.Unlock()
+	token := &dispatcherCallbackToken{dispatcher: d, active: true}
 	defer func() {
 		d.mutex.Lock()
+		token.active = false
 		d.callbackActive--
 		d.mutex.Unlock()
 	}()
@@ -676,7 +722,8 @@ func (d *SerialProtocolDispatcher) callHostServiceHandler(ctx context.Context, h
 			err = fmt.Errorf("panic: %v", recovered)
 		}
 	}()
-	return handler(ctx, request)
+	callbackContext := context.WithValue(ctx, dispatcherCallbackContextKey{}, token)
+	return handler(callbackContext, request)
 }
 
 func (d *SerialProtocolDispatcher) flushEvents() {
