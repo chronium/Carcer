@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf8"
 
@@ -111,6 +112,7 @@ func (e *GenerationRuntimeError) Unwrap() error { return e.Err }
 // attach those resources around these gate decisions without changing the
 // durable archive contract.
 type CodexOSRun struct {
+	gateMu       sync.Mutex
 	runDirectory string
 	state        RuntimeState
 
@@ -122,6 +124,7 @@ type CodexOSRun struct {
 	currentTransition string
 	currentBootImage  string
 	currentHardware   qemu.HardwareManifest
+	retainedFinish    *uint64
 }
 
 // NewCodexOSRun opens a stopped run object.  Creating the run directory is
@@ -156,13 +159,20 @@ func (r *CodexOSRun) State() RuntimeState {
 	if r == nil {
 		return RuntimeStateStopped
 	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
 	return r.state
 }
 
 // GenerationNumber returns the current generation when this run has opened or
 // started one.  A stopped, never-opened run returns (0, false).
 func (r *CodexOSRun) GenerationNumber() (uint64, bool) {
-	if r == nil || r.generationNumber == nil {
+	if r == nil {
+		return 0, false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.generationNumber == nil {
 		return 0, false
 	}
 	return *r.generationNumber, true
@@ -170,7 +180,12 @@ func (r *CodexOSRun) GenerationNumber() (uint64, bool) {
 
 // PreviousHandoff returns the handoff selected for the current generation.
 func (r *CodexOSRun) PreviousHandoff() (string, bool) {
-	if r == nil || r.previousHandoff == nil {
+	if r == nil {
+		return "", false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.previousHandoff == nil {
 		return "", false
 	}
 	return *r.previousHandoff, true
@@ -178,7 +193,12 @@ func (r *CodexOSRun) PreviousHandoff() (string, bool) {
 
 // CurrentTransition returns how the current generation entered the lineage.
 func (r *CodexOSRun) CurrentTransition() (string, bool) {
-	if r == nil || r.currentTransition == "" {
+	if r == nil {
+		return "", false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.currentTransition == "" {
 		return "", false
 	}
 	return r.currentTransition, true
@@ -187,7 +207,12 @@ func (r *CodexOSRun) CurrentTransition() (string, bool) {
 // PendingGenerationFinish returns a private copy of the selected completed
 // successor, if the run is waiting at a completed-generation gate.
 func (r *CodexOSRun) PendingGenerationFinish() (*PendingGenerationFinish, bool) {
-	if r == nil || r.pendingFinish == nil {
+	if r == nil {
+		return nil, false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.pendingFinish == nil {
 		return nil, false
 	}
 	pending := *r.pendingFinish
@@ -199,7 +224,50 @@ func (r *CodexOSRun) PendingGenerationFinish() (*PendingGenerationFinish, bool) 
 // completed generation's Codex thread for a read-only exit interview. The
 // caller separately verifies that it still owns this generation number.
 func (r *CodexOSRun) GenerationFinishFrozen() bool {
-	return r != nil && r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+	if r == nil {
+		return false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	return r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+}
+
+// RetainGenerationFinish atomically leases one frozen completed-generation
+// gate. Continue and rollback are rejected until the owning session releases
+// the lease.
+func (r *CodexOSRun) RetainGenerationFinish(generation uint64) bool {
+	if r == nil {
+		return false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.retainedFinish != nil || r.state != RuntimeStateAwaitingNextGeneration ||
+		r.pendingFinish == nil || r.generationNumber == nil || *r.generationNumber != generation {
+		return false
+	}
+	r.retainedFinish = cloneUint64Pointer(&generation)
+	return true
+}
+
+func (r *CodexOSRun) GenerationFinishRetained(generation uint64) bool {
+	if r == nil {
+		return false
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	return r.retainedFinish != nil && *r.retainedFinish == generation &&
+		r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+}
+
+func (r *CodexOSRun) ReleaseGenerationFinish(generation uint64) {
+	if r == nil {
+		return
+	}
+	r.gateMu.Lock()
+	if r.retainedFinish != nil && *r.retainedFinish == generation {
+		r.retainedFinish = nil
+	}
+	r.gateMu.Unlock()
 }
 
 // ArchivedGenerations loads every generation archive in this run.  Individual
@@ -226,6 +294,8 @@ func (r *CodexOSRun) ReopenAtGate() error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
 	if r.state != RuntimeStateStopped {
 		return &GenerationRuntimeError{Reason: "CodexOS run is not stopped"}
 	}
@@ -290,6 +360,11 @@ func (r *CodexOSRun) ContinueGeneration() error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.retainedFinish != nil {
+		return &GenerationRuntimeError{Reason: "completed generation is retained for an exit interview"}
+	}
 	if r.state != RuntimeStateAwaitingNextGeneration {
 		return &GenerationRuntimeError{Reason: "CodexOS run is not awaiting a generation"}
 	}
@@ -323,6 +398,11 @@ func (r *CodexOSRun) ContinueGeneration() error {
 func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
+	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.retainedFinish != nil {
+		return &GenerationRuntimeError{Reason: "completed generation is retained for an exit interview"}
 	}
 	if r.state != RuntimeStateAwaitingNextGeneration {
 		return &GenerationRuntimeError{Reason: "CodexOS run is not awaiting a generation"}
@@ -374,6 +454,8 @@ func (r *CodexOSRun) AbortGeneration() error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
 	if r.state != RuntimeStateRunning {
 		return &GenerationRuntimeError{Reason: "CodexOS generation cannot be aborted"}
 	}
@@ -395,6 +477,7 @@ func (r *CodexOSRun) AbortGeneration() error {
 		return err
 	}
 	r.pendingFinish = nil
+	r.retainedFinish = nil
 	r.previousHandoff = nil
 	r.currentBootImage = ""
 	r.state = RuntimeStateAwaitingNextGeneration
@@ -408,7 +491,10 @@ func (r *CodexOSRun) Stop() {
 	if r == nil {
 		return
 	}
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
 	r.pendingFinish = nil
+	r.retainedFinish = nil
 	r.previousHandoff = nil
 	r.currentParent = nil
 	r.currentTransition = ""

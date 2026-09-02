@@ -51,6 +51,19 @@ func TestCompletedArchiveGateAndContinue(t *testing.T) {
 	if !runState.GenerationFinishFrozen() {
 		t.Fatal("completed gate did not expose its frozen finish invariant")
 	}
+	if !runState.RetainGenerationFinish(0) || !runState.GenerationFinishRetained(0) {
+		t.Fatal("completed gate could not be retained atomically")
+	}
+	if runState.RetainGenerationFinish(0) {
+		t.Fatal("completed gate accepted a second retention lease")
+	}
+	if err := runState.ContinueGeneration(); err == nil || !strings.Contains(err.Error(), "retained for an exit interview") {
+		t.Fatalf("continue under retained gate error = %v", err)
+	}
+	runState.ReleaseGenerationFinish(0)
+	if runState.GenerationFinishRetained(0) {
+		t.Fatal("released gate remains retained")
+	}
 	if err := runState.ContinueGeneration(); err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +181,13 @@ func TestRollbackSelectionRequiresEarlierCompletedArchive(t *testing.T) {
 	if err := runState.ForkFromGeneration(1); err == nil || !strings.Contains(err.Error(), "earlier") {
 		t.Fatalf("same-generation fork error = %v", err)
 	}
+	if !runState.RetainGenerationFinish(1) {
+		t.Fatal("latest completed gate could not be retained")
+	}
+	if err := runState.ForkFromGeneration(0); err == nil || !strings.Contains(err.Error(), "retained for an exit interview") {
+		t.Fatalf("fork under retained gate error = %v", err)
+	}
+	runState.ReleaseGenerationFinish(1)
 	if err := runState.ForkFromGeneration(0); err != nil {
 		t.Fatal(err)
 	}

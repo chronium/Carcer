@@ -36,26 +36,27 @@ type generationTestCall struct {
 }
 
 type generationTestRuntime struct {
-	mu            sync.Mutex
-	root          string
-	running       bool
-	generation    uint64
-	tools         []string
-	calls         []generationTestCall
-	invoke        func(context.Context, string, [][]byte) (guest.ToolResult, error)
-	eventLog      *observability.EventLog
-	metrics       *observability.Metrics
-	previous      string
-	previousSet   bool
-	transition    string
-	profile       qemu.HardwareProfile
-	requests      []store.FeatureRequest
-	featureErr    error
-	listToolCalls int
-	callNotify    chan string
-	listStarted   chan struct{}
-	listRelease   chan struct{}
-	finishFrozen  bool
+	mu             sync.Mutex
+	root           string
+	running        bool
+	generation     uint64
+	tools          []string
+	calls          []generationTestCall
+	invoke         func(context.Context, string, [][]byte) (guest.ToolResult, error)
+	eventLog       *observability.EventLog
+	metrics        *observability.Metrics
+	previous       string
+	previousSet    bool
+	transition     string
+	profile        qemu.HardwareProfile
+	requests       []store.FeatureRequest
+	featureErr     error
+	listToolCalls  int
+	callNotify     chan string
+	listStarted    chan struct{}
+	listRelease    chan struct{}
+	finishFrozen   bool
+	finishRetained bool
 }
 
 func newGenerationTestRuntime(t *testing.T) *generationTestRuntime {
@@ -152,7 +153,27 @@ func (r *generationTestRuntime) GenerationState() string {
 	}
 	return "awaiting_next_generation"
 }
-func (r *generationTestRuntime) GenerationFinishFrozen() bool { return r.finishFrozen }
+func (r *generationTestRuntime) RetainGenerationFinish(generation uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.finishFrozen || r.finishRetained || r.running || generation != r.generation {
+		return false
+	}
+	r.finishRetained = true
+	return true
+}
+func (r *generationTestRuntime) GenerationFinishRetained(generation uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.finishRetained && generation == r.generation
+}
+func (r *generationTestRuntime) ReleaseGenerationFinish(generation uint64) {
+	r.mu.Lock()
+	if r.finishRetained && generation == r.generation {
+		r.finishRetained = false
+	}
+	r.mu.Unlock()
+}
 
 func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	runtime := newGenerationTestRuntime(t)
@@ -487,6 +508,21 @@ func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.
 	if err := session.BeginExitInterview(); err == nil || !strings.Contains(err.Error(), "already active") {
 		t.Fatalf("duplicate begin error = %v", err)
 	}
+	// Admission is part of the active-turn reservation even before turn/start
+	// returns an ID. End must not close a question accepted by another caller.
+	session.mu.Lock()
+	admission := make(chan struct{})
+	session.mode = GenerationModeInterviewTurn
+	session.interviewPending = true
+	session.interviewAdmissionDone = admission
+	session.mu.Unlock()
+	if err := session.EndExitInterview(); err == nil || !strings.Contains(err.Error(), "still active") {
+		t.Fatalf("end during interview admission error = %v", err)
+	}
+	session.mu.Lock()
+	session.finishInterviewAdmissionLocked(admission)
+	session.mode = GenerationModeRetainedAtGate
+	session.mu.Unlock()
 	marker := "EXIT-INTERVIEW-QUESTION-MUST-STAY-PRIVATE"
 	first, err := session.RunExitInterviewTurn(marker)
 	if err != nil {
@@ -585,6 +621,9 @@ func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.
 	}
 	if session.Mode() != GenerationModeClosed || generationProcessAlive(pid) {
 		t.Fatalf("ended interview mode/process = %q/%v", session.Mode(), generationProcessAlive(pid))
+	}
+	if runtime.GenerationFinishRetained(runtime.generation) {
+		t.Fatal("ended interview did not release the frozen gate")
 	}
 }
 

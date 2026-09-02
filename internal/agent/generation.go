@@ -221,7 +221,9 @@ type GenerationStateRuntime interface {
 // a completed generation's Codex thread. A state name alone is insufficient:
 // the selected successor and handoff must already be frozen by the runtime.
 type GenerationGateRuntime interface {
-	GenerationFinishFrozen() bool
+	RetainGenerationFinish(uint64) bool
+	GenerationFinishRetained(uint64) bool
+	ReleaseGenerationFinish(uint64)
 }
 
 // GenerationResult is the outcome of one planning, implementation, or
@@ -358,8 +360,11 @@ type GenerationSession struct {
 	availableOrder           []string
 	interviewStarted         bool
 	interviewEnding          bool
+	interviewPending         bool
+	interviewAdmissionDone   chan struct{}
 	interviewTurnNumber      int
 	interviewTranscript      *provenance.ExitInterviewTranscript
+	gateRetained             bool
 }
 
 // NewGenerationSession constructs an idle session. It does not start Codex.
@@ -489,7 +494,7 @@ func (s *GenerationSession) ActiveTurn() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.turnID != "" || s.turnStarting
+	return s.interviewPending || s.turnID != "" || s.turnStarting
 }
 
 // ActiveTurnPhase returns planning, implementation, or continuation while a
@@ -538,7 +543,9 @@ func (s *GenerationSession) ExitInterviewAvailable() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.healthy && !s.interviewEnding && s.mode == GenerationModeRetainedAtGate
+	gate, gateOK := any(s.runtime).(GenerationGateRuntime)
+	return s.healthy && !s.interviewEnding && s.mode == GenerationModeRetainedAtGate &&
+		gateOK && s.gateRetained && gate.GenerationFinishRetained(s.generation)
 }
 
 // RetainForExitInterview moves a completed generation's healthy Codex thread
@@ -559,9 +566,11 @@ func (s *GenerationSession) RetainForExitInterview() error {
 	if s.turnID != "" || s.turnStarting || s.initialActive || s.activeTools != 0 {
 		return &GenerationWorkerError{Reason: "Codex generation turn is still active"}
 	}
-	if !s.generationFrozenAtGate(s.generation) {
+	gate, ok := any(s.runtime).(GenerationGateRuntime)
+	if !ok || !gate.RetainGenerationFinish(s.generation) {
 		return &GenerationWorkerError{Reason: "completed generation is not frozen at its gate"}
 	}
+	s.gateRetained = true
 	s.mode = GenerationModeRetainedAtGate
 	return nil
 }
@@ -632,16 +641,21 @@ func (s *GenerationSession) RunExitInterviewTurn(question string) (GenerationRes
 		s.mu.Unlock()
 		return GenerationResult{}, &GenerationWorkerError{Reason: "exit interview session is unavailable"}
 	}
-	if !s.generationFrozenAtGate(s.generation) {
+	gate, ok := any(s.runtime).(GenerationGateRuntime)
+	if !ok || !s.gateRetained || !gate.GenerationFinishRetained(s.generation) {
 		s.mu.Unlock()
 		return GenerationResult{}, &GenerationWorkerError{Reason: "completed generation is not frozen at its gate"}
 	}
 	s.mode = GenerationModeInterviewTurn
+	s.interviewPending = true
+	admissionDone := make(chan struct{})
+	s.interviewAdmissionDone = admissionDone
 	s.interviewTurnNumber++
-	metadata := &interviewTurnInput{number: s.interviewTurnNumber, question: question}
+	metadata := &interviewTurnInput{number: s.interviewTurnNumber, question: question, admissionDone: admissionDone}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
+		s.finishInterviewAdmissionLocked(admissionDone)
 		if s.mode == GenerationModeInterviewTurn && s.healthy {
 			s.mode = GenerationModeRetainedAtGate
 		}
@@ -661,7 +675,7 @@ func (s *GenerationSession) EndExitInterview() error {
 		s.mu.Unlock()
 		return &GenerationWorkerError{Reason: "exit interview is not active"}
 	}
-	if s.turnID != "" || s.turnStarting {
+	if s.interviewPending || s.turnID != "" || s.turnStarting {
 		s.mu.Unlock()
 		return &GenerationWorkerError{Reason: "exit interview turn is still active"}
 	}
@@ -1058,8 +1072,9 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 }
 
 type interviewTurnInput struct {
-	number   int
-	question string
+	number        int
+	question      string
+	admissionDone chan struct{}
 }
 
 func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, error) {
@@ -1106,9 +1121,12 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 		s.mu.Unlock()
 		return failBeforeTurn(&GenerationWorkerError{Reason: "CodexOS generation is not running"})
 	}
-	if interview != nil && !s.generationFrozenAtGate(s.generation) {
-		s.mu.Unlock()
-		return failBeforeTurn(&GenerationWorkerError{Reason: "completed generation is not frozen at its gate"})
+	if interview != nil {
+		gate, ok := any(s.runtime).(GenerationGateRuntime)
+		if !ok || !s.gateRetained || !gate.GenerationFinishRetained(s.generation) {
+			s.mu.Unlock()
+			return failBeforeTurn(&GenerationWorkerError{Reason: "completed generation is not frozen at its gate"})
+		}
 	}
 	if generation, ok := s.runtime.GenerationNumber(); !ok || !s.generationSet || generation != s.generation {
 		s.mu.Unlock()
@@ -1146,6 +1164,9 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	s.turnReady = turnReady
 	s.turnDone = make(chan struct{})
 	s.toolIdle = closedChannel()
+	if interview != nil {
+		s.finishInterviewAdmissionLocked(interview.admissionDone)
+	}
 	permission := implementorPermissionProfile
 	workspaceRoots := []string(nil)
 	if phase == "planning" {
@@ -1495,15 +1516,30 @@ func (s *GenerationSession) InterruptTurn(timeout ...time.Duration) error {
 	}
 	deadline := time.Now().Add(limit)
 	s.cancelReview()
-	s.mu.Lock()
-	server, threadID, turnID := s.server, s.threadID, s.turnID
-	initialActive := s.initialActive
-	initialDone := s.initialDone
-	turnStarting := s.turnStarting
-	turnCancel := s.turnCancel
-	turnDone := s.turnDone
-	toolIdle := s.toolIdle
-	s.mu.Unlock()
+	var server *codexapp.CodexAppServer
+	var threadID, turnID string
+	var initialActive, turnStarting bool
+	var initialDone, turnDone, toolIdle chan struct{}
+	var turnCancel context.CancelFunc
+	for {
+		s.mu.Lock()
+		pending := s.interviewPending
+		admissionDone := s.interviewAdmissionDone
+		server, threadID, turnID = s.server, s.threadID, s.turnID
+		initialActive = s.initialActive
+		initialDone = s.initialDone
+		turnStarting = s.turnStarting
+		turnCancel = s.turnCancel
+		turnDone = s.turnDone
+		toolIdle = s.toolIdle
+		s.mu.Unlock()
+		if !pending {
+			break
+		}
+		if !waitUntil(admissionDone, deadline) {
+			return s.retireAfterInterruptFailure(&GenerationWorkerError{Reason: "Codex interview turn admission did not finish before timeout"}, nil)
+		}
+	}
 	if turnID == "" && (initialActive || turnStarting) {
 		s.mu.Lock()
 		if initialActive {
@@ -1623,6 +1659,11 @@ func (s *GenerationSession) Close() error {
 	s.startCancel = nil
 	s.turnCancel = nil
 	s.turnReady = nil
+	s.finishInterviewAdmissionLocked(s.interviewAdmissionDone)
+	gateRetained := s.gateRetained
+	generation := s.generation
+	gate, _ := any(s.runtime).(GenerationGateRuntime)
+	s.gateRetained = false
 	s.threadID = ""
 	s.started = false
 	s.mu.Unlock()
@@ -1694,6 +1735,9 @@ func (s *GenerationSession) Close() error {
 		})
 		s.publish(observability.ActivitySessionStopped, nil, threadID, "", "")
 	}
+	if gateRetained && gate != nil {
+		gate.ReleaseGenerationFinish(generation)
+	}
 	s.mu.Lock()
 	s.closeErr = err
 	closeDone := s.closeDone
@@ -1702,6 +1746,15 @@ func (s *GenerationSession) Close() error {
 	}
 	s.mu.Unlock()
 	return err
+}
+
+func (s *GenerationSession) finishInterviewAdmissionLocked(done chan struct{}) {
+	if done == nil || s.interviewAdmissionDone != done {
+		return
+	}
+	s.interviewPending = false
+	s.interviewAdmissionDone = nil
+	closeGenerationChannel(done)
 }
 
 func (s *GenerationSession) cancelReview() {
@@ -2381,17 +2434,6 @@ func (s *GenerationSession) runtimeState() string {
 		return "running"
 	}
 	return "awaiting_next_generation"
-}
-
-func (s *GenerationSession) generationFrozenAtGate(expected uint64) bool {
-	if s == nil || s.runtime == nil {
-		return false
-	}
-	state, stateOK := any(s.runtime).(GenerationStateRuntime)
-	gate, gateOK := any(s.runtime).(GenerationGateRuntime)
-	generation, generationOK := s.runtime.GenerationNumber()
-	return stateOK && gateOK && generationOK && generation == expected &&
-		state.GenerationState() == "awaiting_next_generation" && gate.GenerationFinishFrozen()
 }
 
 func (s *GenerationSession) publish(kind observability.ActivityKind, data map[string]any, threadID, turnID, itemID string) {
