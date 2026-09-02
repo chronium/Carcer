@@ -7,17 +7,24 @@ import (
 	"time"
 )
 
-const (
-	toolResponseTimeout = 5 * time.Second
-	// This matches REQUEST_BUFFER_SIZE in the version 1 guest protocol loop.
-	v1GuestInvocationPayloadCapacity = 16*1024 + 256 + 27
-)
+const toolResponseTimeout = 5 * time.Second
 
 type ToolClient struct {
 	dispatcher *SerialProtocolDispatcher
 	mutex      sync.Mutex
 	nextID     uint32
 	timeout    time.Duration
+}
+
+// OversizedV1GuestInvocationResult is the tool-level failure returned when
+// host admission rejects a request before the guest can receive any bytes.
+func OversizedV1GuestInvocationResult(encodedBytes uint64) ToolResult {
+	output := fmt.Sprintf(
+		"guest invocation rejected before serial dispatch: encoded payload is %d bytes; supported maximum is %d bytes; accepted_bytes:0",
+		encodedBytes,
+		V1GuestInvocationPayloadCapacity,
+	)
+	return ToolResult{Status: 1, Output: []byte(output)}
 }
 
 func NewToolClient(dispatcher *SerialProtocolDispatcher) *ToolClient {
@@ -37,13 +44,8 @@ func (c *ToolClient) InvokeTool(ctx context.Context, name string, arguments [][]
 	if err != nil {
 		return ToolResult{}, err
 	}
-	if encodedBytes > v1GuestInvocationPayloadCapacity {
-		output := fmt.Sprintf(
-			"guest invocation rejected before serial dispatch: encoded payload is %d bytes; supported maximum is %d bytes; accepted_bytes:0",
-			encodedBytes,
-			v1GuestInvocationPayloadCapacity,
-		)
-		return ToolResult{Status: 1, Output: []byte(output)}, nil
+	if encodedBytes > V1GuestInvocationPayloadCapacity {
+		return OversizedV1GuestInvocationResult(encodedBytes), nil
 	}
 	payload, err := EncodeInvokeRequest(name, arguments)
 	if err != nil {

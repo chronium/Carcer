@@ -88,7 +88,7 @@ func TestToolClientEnforcesV1GuestInvocationCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validData := []byte(strings.Repeat("v", int(uint64(v1GuestInvocationPayloadCapacity)-baseSize)))
+	validData := []byte(strings.Repeat("v", int(uint64(V1GuestInvocationPayloadCapacity)-baseSize)))
 	validResult := make(chan struct {
 		result ToolResult
 		err    error
@@ -101,8 +101,8 @@ func TestToolClientEnforcesV1GuestInvocationCapacity(t *testing.T) {
 		}{result, err}
 	}()
 	request := readPeerFrame(t, peer)
-	if request.MessageType != InvokeToolRequest || len(request.Payload) != v1GuestInvocationPayloadCapacity {
-		t.Fatalf("largest valid request type/payload = 0x%x/%d, want 0x%x/%d", request.MessageType, len(request.Payload), InvokeToolRequest, v1GuestInvocationPayloadCapacity)
+	if request.MessageType != InvokeToolRequest || len(request.Payload) != V1GuestInvocationPayloadCapacity {
+		t.Fatalf("largest valid request type/payload = 0x%x/%d, want 0x%x/%d", request.MessageType, len(request.Payload), InvokeToolRequest, V1GuestInvocationPayloadCapacity)
 	}
 	// The peer represents the guest boundary: only receipt of a request frame
 	// can mutate its target.
@@ -125,8 +125,8 @@ func TestToolClientEnforcesV1GuestInvocationCapacity(t *testing.T) {
 	}
 	for _, want := range []string{
 		"rejected before serial dispatch",
-		fmt.Sprintf("encoded payload is %d bytes", v1GuestInvocationPayloadCapacity+1),
-		fmt.Sprintf("supported maximum is %d bytes", v1GuestInvocationPayloadCapacity),
+		fmt.Sprintf("encoded payload is %d bytes", V1GuestInvocationPayloadCapacity+1),
+		fmt.Sprintf("supported maximum is %d bytes", V1GuestInvocationPayloadCapacity),
 		"accepted_bytes:0",
 	} {
 		if !strings.Contains(string(result.Output), want) {

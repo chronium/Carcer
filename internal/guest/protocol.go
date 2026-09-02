@@ -14,6 +14,10 @@ const (
 	HostServiceRequest  = uint16(0x0003)
 	HostServiceResponse = uint16(0x8003)
 
+	// V1GuestInvocationPayloadCapacity matches REQUEST_BUFFER_SIZE in the
+	// version 1 guest protocol loop.
+	V1GuestInvocationPayloadCapacity = 16*1024 + 256 + 27
+
 	maxProtocolNames = 255
 	maxArguments     = 64
 	maxTools         = 256

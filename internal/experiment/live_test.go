@@ -18,6 +18,7 @@ import (
 
 	"codexos/internal/build"
 	"codexos/internal/guest"
+	"codexos/internal/observability"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 	"codexos/internal/store"
@@ -92,6 +93,86 @@ func TestLiveRunOwnsBootToolsPauseResumeAndStop(t *testing.T) {
 	}
 	if len(workspaces) != 0 {
 		t.Fatalf("generation workspaces survived stop: %v", workspaces)
+	}
+}
+
+func TestLiveRunRecordsOversizedInvocationBeforeDispatch(t *testing.T) {
+	t.Setenv(liveQEMUHelperEnvironment, "1")
+	runDirectory := liveTestRunDirectory(t)
+	eventLog, err := observability.OpenEventLog(runDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eventLog.Close)
+	initialISO := filepath.Join(t.TempDir(), "initial.iso")
+	if err := os.WriteFile(initialISO, []byte("synthetic boot image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		QEMUExecutable: os.Args[0], HardwareProfile: qemu.TestHardwareProfile,
+		ReadyTimeout: 2 * time.Second, EventLog: eventLog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.Stop)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := run.Start(ctx, initialISO); err != nil {
+		t.Fatal(err)
+	}
+
+	path := []byte("seed/target")
+	offset := []byte("0")
+	baseSize, err := guest.InvokeRequestPayloadSize("write", [][]byte{path, offset, nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(strings.Repeat("x", int(uint64(guest.V1GuestInvocationPayloadCapacity)+1-baseSize)))
+	result, err := run.InvokeTool(ctx, "write", [][]byte{path, offset, data})
+	if err != nil || result.Status != 1 || !strings.Contains(string(result.Output), "accepted_bytes:0") {
+		t.Fatalf("oversized invocation = %#v, %v", result, err)
+	}
+
+	contents, err := os.ReadFile(eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type recordedEvent struct {
+		Event string         `json:"event"`
+		Data  map[string]any `json:"data"`
+	}
+	var lifecycle []string
+	var rejection recordedEvent
+	scanner := bufio.NewScanner(strings.NewReader(string(contents)))
+	for scanner.Scan() {
+		var event recordedEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Event == "tool_invocation_rejected_before_dispatch" || strings.HasPrefix(event.Event, "tool_guest_invocation_") {
+			lifecycle = append(lifecycle, event.Event)
+		}
+		if event.Event == "serial_protocol_write" && event.Data["write_kind"] == "tool_request" {
+			lifecycle = append(lifecycle, event.Event)
+		}
+		if event.Event == "tool_invocation_rejected_before_dispatch" {
+			rejection = event
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"tool_invocation_rejected_before_dispatch"}; !reflect.DeepEqual(lifecycle, want) {
+		t.Fatalf("oversized invocation event sequence = %v, want %v", lifecycle, want)
+	}
+	encodedBytes, encodedOK := rejection.Data["encoded_bytes"].(float64)
+	maximumBytes, maximumOK := rejection.Data["maximum_bytes"].(float64)
+	acceptedBytes, acceptedOK := rejection.Data["accepted_bytes"].(float64)
+	if rejection.Data["tool"] != "write" || !encodedOK || !maximumOK || !acceptedOK ||
+		uint64(encodedBytes) != uint64(guest.V1GuestInvocationPayloadCapacity+1) ||
+		uint64(maximumBytes) != uint64(guest.V1GuestInvocationPayloadCapacity) || uint64(acceptedBytes) != 0 {
+		t.Fatalf("oversized invocation rejection = %#v", rejection.Data)
 	}
 }
 
