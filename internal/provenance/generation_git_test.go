@@ -127,6 +127,26 @@ func TestGenerationGitRecorderCreatesImmutableTagsAndLineages(t *testing.T) {
 	}
 }
 
+func TestGenerationGitRecorderReconcilesFreshRunWithoutArchives(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repository")
+	createGenerationGitRepository(t, repository)
+	run := filepath.Join(t.TempDir(), "fresh-run")
+	if err := os.Mkdir(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := NewGenerationGitRecorder(repository, run, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := recorder.Reconcile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("fresh run records = %#v, want none", records)
+	}
+}
+
 func TestGenerationGitRecorderRejectsImmutableConflicts(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_DATE", "2026-01-02T03:04:05+0000")
 	t.Setenv("GIT_COMMITTER_DATE", "2026-01-02T03:04:05+0000")

@@ -253,7 +253,8 @@ func validateArchivedHistory(archives []generationArchive) error {
 			return errors.New("generation archive history is not contiguous")
 		}
 	}
-	for _, archive := range archives[1:] {
+	for index := 1; index < len(archives); index++ {
+		archive := archives[index]
 		if archive.parent == nil {
 			return fmt.Errorf("generation %d has no completed parent", archive.generation)
 		}
