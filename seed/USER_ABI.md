@@ -1,23 +1,13 @@
 # CodexOS user ABI
+CXE1: `CXE1`, LE32 image size/entry, zero flags, then <=511 pages.
+Private RWX base 0x400000; guarded stack top 0x40000000. PIT preempts
+ring 3; faults exit only that task.
 
-CXE1: `CXE1`, LE image size, entry offset, zero flags, then <=511 pages.
-`run(path)` privately maps it RWX at 0x400000; stack top is 0x600000.
-PIT ticks preempt ring 3. User faults exit that task with UINT64_MAX.
+`int 0x80`: RAX call; RDI,RSI,RDX,RCX,R8 args; UINT64_MAX failure.
+0 exit; 1 size; 2 read; 3 attributes (immutable bit 0); 4 write;
+5 spawn; 6 reap (0 running, 1 consumed); 7 brk.
 
-`int 0x80`: RAX call; args RDI, RSI, RDX, RCX, R8; failure UINT64_MAX.
-
-- 0 exit(status)
-- 1 size(path,len)
-- 2 read(path,len,offset,destination,count)
-- 3 attributes(path,len); immutable bit 0
-- 4 write(path,len,offset,source,count)
-- 5 spawn(path,len), returns task ID
-- 6 reap(id,status_pointer): 0 running; 1 stores status and frees slot
-
-Paths are 1..255-byte UTF-8 spans; buffers stay in image or stack.
-Sealed files reject mutation.
-
-`import_provided_asset` creates an ephemeral sealed ordinary file up to
-64 MiB. Protocol `run` shares the loader. Protocol `reap` returns
-`running` or consumes exact decimal status. Exited slots stay reserved
-until reap.
+Initial break follows the image. brk(0) queries; changes are page aligned.
+Growth zeroes; shrink unmaps; failures preserve the break. Paths are
+1..255-byte UTF-8 spans; buffers may cross pages. Protocol run shares the loader.
+Zombies reserve slots until reap.
