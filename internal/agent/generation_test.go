@@ -334,6 +334,44 @@ func TestGenerationToolDispatchUsesExactGuestArguments(t *testing.T) {
 	}
 }
 
+func TestGenerationGuestToolFailurePreservesDeliverySuccess(t *testing.T) {
+	runtime := newGenerationTestRuntime(t)
+	runtime.invoke = func(_ context.Context, _ string, _ [][]byte) (guest.ToolResult, error) {
+		return guest.ToolResult{Status: 1, Output: []byte("accepted_bytes:0")}, nil
+	}
+	activity := observability.NewActivityStream()
+	session := NewGenerationSession(runtime, GenerationSessionOptions{ActivityStream: activity})
+	session.runCtx = context.Background()
+	session.availableTools = map[string]struct{}{"write": {}}
+	response := session.dynamicToolResponse(map[string]any{
+		"callId": "failed-write", "threadId": "thread", "turnId": "turn",
+		"namespace": "codexos", "tool": "write", "arguments": map[string]any{
+			"path": "seed/target", "offset": 0, "data": "replacement",
+		},
+	}, "thread", "turn", false, nil)
+	if response["success"] != true {
+		t.Fatalf("guest tool failure was mistaken for an app-server delivery failure: %#v", response)
+	}
+	items, ok := response["contentItems"].([]map[string]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("failed response content = %#v", response["contentItems"])
+	}
+	var result struct {
+		Output string `json:"output"`
+		Status uint32 `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(items[0]["text"].(string)), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != 1 || result.Output != "accepted_bytes:0" {
+		t.Fatalf("guest tool failure result = %#v", result)
+	}
+	events := activity.Drain()
+	if len(events) != 2 || events[1].Kind != observability.ActivityToolFailed || events[1].Data["success"] != false {
+		t.Fatalf("guest tool failure activity = %#v", events)
+	}
+}
+
 func TestGenerationHelperSubprocessCannotEnterTestSuite(t *testing.T) {
 	root := t.TempDir()
 	recordPath := filepath.Join(root, "helper.json")

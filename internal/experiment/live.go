@@ -338,6 +338,15 @@ func (r *CodexOSRun) InvokeTool(ctx context.Context, name string, arguments [][]
 	if err != nil {
 		return guest.ToolResult{}, err
 	}
+	encodedBytes, sizeErr := guest.InvokeRequestPayloadSize(name, arguments)
+	if sizeErr == nil && encodedBytes > guest.V1GuestInvocationPayloadCapacity {
+		result := guest.OversizedV1GuestInvocationResult(encodedBytes)
+		r.recordLive("tool_invocation_rejected_before_dispatch", &number, map[string]any{
+			"tool": name, "encoded_bytes": encodedBytes,
+			"maximum_bytes": guest.V1GuestInvocationPayloadCapacity, "accepted_bytes": 0,
+		})
+		return result, nil
+	}
 	r.recordLive("tool_guest_invocation_started", &number, map[string]any{"tool": name})
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()

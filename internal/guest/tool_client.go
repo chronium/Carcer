@@ -16,6 +16,17 @@ type ToolClient struct {
 	timeout    time.Duration
 }
 
+// OversizedV1GuestInvocationResult is the tool-level failure returned when
+// host admission rejects a request before the guest can receive any bytes.
+func OversizedV1GuestInvocationResult(encodedBytes uint64) ToolResult {
+	output := fmt.Sprintf(
+		"guest invocation rejected before serial dispatch: encoded payload is %d bytes; supported maximum is %d bytes; accepted_bytes:0",
+		encodedBytes,
+		V1GuestInvocationPayloadCapacity,
+	)
+	return ToolResult{Status: 1, Output: []byte(output)}
+}
+
 func NewToolClient(dispatcher *SerialProtocolDispatcher) *ToolClient {
 	return &ToolClient{dispatcher: dispatcher, nextID: 1, timeout: toolResponseTimeout}
 }
@@ -29,6 +40,13 @@ func (c *ToolClient) ListTools(ctx context.Context) ([]string, error) {
 }
 
 func (c *ToolClient) InvokeTool(ctx context.Context, name string, arguments [][]byte) (ToolResult, error) {
+	encodedBytes, err := InvokeRequestPayloadSize(name, arguments)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if encodedBytes > V1GuestInvocationPayloadCapacity {
+		return OversizedV1GuestInvocationResult(encodedBytes), nil
+	}
 	payload, err := EncodeInvokeRequest(name, arguments)
 	if err != nil {
 		return ToolResult{}, err
