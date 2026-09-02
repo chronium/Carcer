@@ -130,8 +130,12 @@ consecutive race-enabled runs for both direct application shutdown and caller
 context cancellation. A separately built `cmd/codexos` executable also reopens
 a disposable archived gate through both the plain frontend and a real
 pseudo-terminal, exits cleanly on `quit` or `SIGTERM`, preserves event order,
-and restores terminal state. The concrete runner also starts a fresh generation
-against a separately built standalone QEMU/QMP/serial peer, reports status,
+and restores terminal state. A separately built command also completes a full
+planning/build/finish generation through its real TUI using standalone QEMU and
+Codex peers plus disposable build tools resolved through normal `PATH` and
+`CODEX_HOME` behavior; it reaches the completed gate, shuts down from the PTY,
+restores terminal state, and reaps every child. The concrete runner also starts
+a fresh generation against a separately built standalone QEMU/QMP/serial peer, reports status,
 pauses, permanently aborts with operator confirmation, publishes the aborted
 archive, and leaves no live workspace. A second concrete-runner path uses
 separately built standalone QEMU and Codex app-server peers to complete planning
@@ -180,13 +184,12 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: repeat a complete live generation through the TUI and the separately
-built Go command boundary, perform the corresponding real-image candidate
-acceptance when the pinned guest/toolchain environment is available, and rerun
-the complete reference suite when the documented TCG candidate timing test can
-succeed. Both frontends are proven at an archived gate, but only the plain
-frontend has been exercised through a complete live
-planning/build/finish/continue/rollback scenario. Go `ReadFrame` relies on
+owner layer: perform real-image candidate acceptance when the pinned
+guest/toolchain environment is available, and rerun the complete reference suite
+when the documented TCG candidate timing test can succeed. The plain frontend is
+exercised through a complete live planning/build/finish/continue/rollback
+scenario; the TUI and separately built Go command are exercised through a full
+planning/build/finish generation and completed gate. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -255,6 +258,31 @@ with `experiment.WriteAbortedArchive` and `qemu.TestHardwareProfile`. Plain mode
 receives `quit` over a pipe. TUI mode owns a fresh `/dev/ptmx` pair, receives
 `SIGTERM` only after raw mode is observed, and must restore the original termios.
 Neither case starts QEMU, Codex, a build, telemetry, or live state.
+
+### Recorded disposable full binary/TUI lifecycle acceptance
+
+From the repository root, the exact race-enabled command is:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./cmd/codexos -run '^TestCodexOSBinaryCompletesDisposableGenerationThroughTUI$' -count=10 -timeout=300s
+```
+
+This test builds the actual `cmd/codexos` command plus standalone QEMU and Codex
+fixtures, places disposable fixed build utilities first in `PATH`, and supplies
+a file-backed fake ChatGPT login through `CODEX_HOME`. It invokes only public CLI
+flags and normal process configuration—there is no test-only command flag or
+runner seam. A real Linux pseudo-terminal submits `agent`, and the command must
+complete planning and implementation in one thread, dispatch the ordinary and
+nested guest tools, build and validate the synthetic candidate, publish the
+completed archive and handoff, render the completed gate, and quit from the TUI.
+The test requires ordered lifecycle evidence, exact successor ISO bytes, terminal
+restoration, no live workspace, and explicit reaping of the active QEMU,
+candidate QEMU, and Codex children. The synthetic candidate peer proves protocol
+ownership but not independent bootability of its fixture ISO. Because the public
+command correctly selects the production hardware profile, this test requires
+`/dev/kvm` and skips when that profile is unavailable even though its fake QEMU
+does not consume KVM. No network, real Codex session, paid review, production
+telemetry, or live experiment state is used.
 
 ### Recorded disposable live runner acceptance
 
@@ -345,8 +373,7 @@ state is used.
 ## Operational risks
 
 The highest risks are durable archive compatibility, fail-closed provenance,
-real-image candidate behavior, and the lack of a complete disposable live
-TUI/command process run. The terminal reader's unsafe
+and real-image candidate behavior. The terminal reader's unsafe
 forced-cancellation path is avoided by application-owned graceful shutdown and
 covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
 can still use its upstream forced path after an internal renderer/input error or
