@@ -25,14 +25,19 @@ attempt history, exact private responses, digest publication, filtered
 exit-interview capture, and immutable Markdown publication are implemented.
 Build and review evidence includes immutable sequence allocation, exact byte
 identities, incomplete-attempt preservation, source-read capture, and
-fail-closed latest-success publication. These provenance components are not yet
-wired to Go build or Codex sessions. Generation Git reconciliation preserves the
+fail-closed latest-success publication. Review evidence is wired to the isolated
+Go reviewer; build-service and other Codex-session wiring remains incomplete.
+Generation Git reconciliation preserves the
 configured base commit, exact source trees/messages/annotations, rollback
 lineages, immutable conflicts, and the developer worktree; operator integration
 remains unwired. The app-server client owns an isolated one-shot process,
 concurrent JSONL request routing, notifications and server requests, catalog and
 thread/turn policy validation, interrupts, bounded diagnostics/queues, and
-TERM/KILL reaping. Agent-session orchestration remains unimplemented. The local
+TERM/KILL reaping. The isolated reviewer creates a fresh process, workspace, and
+thread per consultation, exposes only dynamically discovered read-only guest
+tools, records source-read evidence, publishes activity and bounded token
+metrics, and cleans up on cancellation. Implementor, planning, interview, and
+generation/operator orchestration remain unimplemented. The local
 observability slice validates and appends sequenced JSONL events without allowing
 recording failures to control the experiment. Its bounded activity stream
 preserves concurrent ordering and excludes raw reasoning. The fixed
@@ -81,7 +86,8 @@ lifecycle.
 
 ## Remaining gaps and known differences
 
-Generation orchestration, guest build/finish services, Codex sessions, CLI,
+Generation orchestration, guest build/finish services, implementor/planning and
+interview Codex sessions, CLI,
 operator, and TUI capabilities remain to be
 implemented. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies

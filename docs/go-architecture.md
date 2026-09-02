@@ -127,13 +127,20 @@ recovery and a bounded in-memory activity stream that exposes only explicitly
 renderable app-server text. Its OpenTelemetry owner records the fixed metric
 set with bounded low-cardinality attributes and optionally adds a bounded
 OTLP/HTTP exporter; telemetry failures never control the experiment.
-Synthetic Unix peers exercise QMP lifecycle and failure behavior. No Go code
-currently starts QEMU, contacts Codex, or changes the operational entry point.
+Synthetic Unix peers exercise QMP lifecycle and failure behavior. Candidate
+validation can start only a disposable QEMU, and reviewer tests contact only a
+synthetic app server. No Go code changes the operational entry point.
 `internal/codexapp` owns an isolated one-shot app-server process, sole JSONL
 reader, ordered writer, concurrent request routing, bounded notification and
 server-request queues, catalog/policy validation, interrupts, and TERM/KILL
 shutdown. It also validates cumulative token usage and derives non-duplicating
-metric deltas; agent sessions are not yet wired to it.
+metric deltas; implementor/planning sessions are not yet wired to it.
+`internal/agent` also owns a fresh, isolated reviewer process, workspace, and
+thread for each consultation. The reviewer exposes only dynamically discovered
+read-only guest tools through a narrow cycle-free runtime boundary, records
+source reads and immutable review evidence, attributes activity and token
+metrics, and has a bounded cancellation and process-reaping path. Generation
+and operator orchestration remain separate.
 `internal/build` performs the fixed trusted source-snapshot build in a fresh
 workspace. It copies pinned Limine inputs, discovers and validates the fixed
 toolchain, runs guest compilation and ISO construction under bubblewrap without
