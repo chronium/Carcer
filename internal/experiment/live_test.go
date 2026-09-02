@@ -20,6 +20,7 @@ import (
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/store"
 )
 
 const liveQEMUHelperEnvironment = "CODEXOS_GO_LIVE_QEMU_HELPER"
@@ -401,6 +402,61 @@ func TestLiveRunStopBeforeStartIsTerminal(t *testing.T) {
 	}
 	if err := run.Start(context.Background(), initialISO); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("start after stop error = %v", err)
+	}
+}
+
+func TestLiveRunAppliesCrossRunHandoffAndVerifiesInitialISO(t *testing.T) {
+	t.Setenv(liveQEMUHelperEnvironment, "1")
+	run, err := NewLiveCodexOSRun(liveTestRunDirectory(t), LiveRunOptions{
+		QEMUExecutable: os.Args[0], HardwareProfile: qemu.TestHardwareProfile, ReadyTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.Stop)
+	image := filepath.Join(t.TempDir(), "inherited.iso")
+	if err := os.WriteFile(image, []byte("inherited successor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := provenance.FileIdentityFromPath(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.live.bootstrap = &store.CrossRunBootstrap{
+		Handoff: "inherited context", SuccessorISOSHA256: identity.SHA256, SuccessorISOSize: identity.Size,
+	}
+	link := filepath.Join(t.TempDir(), "initial-link.iso")
+	if err := os.Symlink(image, link); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := run.Start(ctx, link); err != nil {
+		t.Fatalf("start inherited run: %v", err)
+	}
+	if handoff, ok := run.PreviousHandoff(); !ok || handoff != "inherited context" {
+		t.Fatalf("inherited handoff = %q, %v", handoff, ok)
+	}
+}
+
+func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
+	run := startLiveTestRun(t, 2*time.Second)
+	request, err := run.live.featureStore.Create(0, "Need capability", "Please record this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.ApproveFeatureRequest(request.ID); err == nil || !strings.Contains(err.Error(), "only while awaiting") {
+		t.Fatalf("running feature decision error = %v", err)
+	}
+	if err := run.AbortGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := run.ApproveFeatureRequest(request.ID)
+	if err != nil {
+		t.Fatalf("approve at gate: %v", err)
+	}
+	if approved.Status != store.FeatureApproved {
+		t.Fatalf("approved status = %q", approved.Status)
 	}
 }
 

@@ -47,6 +47,7 @@ type liveRun struct {
 	options      LiveRunOptions
 	featureStore *store.FeatureRequestStore
 	provenance   *provenance.BuildReviewProvenance
+	bootstrap    *store.CrossRunBootstrap
 	provided     *store.ProvidedAssets
 	assetsReady  bool
 	generation   *liveGeneration
@@ -97,12 +98,16 @@ func NewLiveCodexOSRun(runDirectory string, options LiveRunOptions) (*CodexOSRun
 	if err != nil {
 		return nil, err
 	}
+	bootstrap, err := store.LoadCrossRunBootstrap(run.runDirectory)
+	if err != nil {
+		return nil, err
+	}
 	forensics := provenance.NewBuildReviewProvenance(run.runDirectory, func(event string, generation uint64, data map[string]any) {
 		run.recordLive(event, &generation, data)
 	})
 	liveContext, cancelLive := context.WithCancel(context.Background())
 	run.live = &liveRun{
-		options: options, featureStore: features, provenance: forensics,
+		options: options, featureStore: features, provenance: forensics, bootstrap: bootstrap,
 		context: liveContext, cancel: cancelLive,
 	}
 	if options.Metrics != nil {
@@ -148,15 +153,24 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 		return &GenerationRuntimeError{Reason: "CodexOS run has already been started"}
 	}
 	r.gateMu.Unlock()
-	if !isRegularWithoutSymlink(initialISO) {
+	resolvedISO, err := filepath.Abs(initialISO)
+	if err == nil {
+		resolvedISO, err = filepath.EvalSymlinks(resolvedISO)
+	}
+	if err != nil || !isRegularWithoutSymlink(resolvedISO) {
 		return &GenerationRuntimeError{Reason: "initial ISO is unavailable: " + initialISO}
+	}
+	if r.live.bootstrap != nil {
+		if err := r.live.bootstrap.VerifyInitialISO(initialISO); err != nil {
+			return err
+		}
 	}
 	if err := r.configureLiveAssets(0); err != nil {
 		return err
 	}
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()
-	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, initialISO)
+	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, resolvedISO)
 	if err != nil {
 		return err
 	}
@@ -164,6 +178,10 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	zero := uint64(0)
 	r.gateMu.Lock()
 	r.generationNumber = &zero
+	if r.live.bootstrap != nil {
+		handoff := r.live.bootstrap.Handoff
+		r.previousHandoff = &handoff
+	}
 	r.currentTransition = "initial"
 	r.currentHardware = hardware
 	r.currentBootImage = generation.bootISO
@@ -220,6 +238,66 @@ func (r *CodexOSRun) FeatureRequests() ([]store.FeatureRequest, error) {
 	r.live.operationMu.Lock()
 	defer r.live.operationMu.Unlock()
 	return r.live.featureStore.Requests()
+}
+
+func (r *CodexOSRun) FeatureRequest(requestID uint64) (store.FeatureRequest, error) {
+	if r == nil || r.live == nil || r.live.featureStore == nil {
+		return store.FeatureRequest{}, &GenerationRuntimeError{Reason: "feature-request store is unavailable"}
+	}
+	r.live.operationMu.Lock()
+	defer r.live.operationMu.Unlock()
+	return r.live.featureStore.Request(requestID)
+}
+
+func (r *CodexOSRun) ApproveFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
+	return r.decideFeatureRequest(requestID, true)
+}
+
+func (r *CodexOSRun) DenyFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
+	return r.decideFeatureRequest(requestID, false)
+}
+
+func (r *CodexOSRun) decideFeatureRequest(requestID uint64, approve bool) (store.FeatureRequest, error) {
+	if r == nil || r.live == nil || r.live.featureStore == nil {
+		return store.FeatureRequest{}, &GenerationRuntimeError{Reason: "feature-request store is unavailable"}
+	}
+	r.live.operationMu.Lock()
+	defer r.live.operationMu.Unlock()
+	r.gateMu.Lock()
+	if r.state != RuntimeStateAwaitingNextGeneration || r.generationNumber == nil || r.transitioning {
+		r.gateMu.Unlock()
+		return store.FeatureRequest{}, &GenerationRuntimeError{Reason: "feature requests may be decided only while awaiting a generation"}
+	}
+	generation := *r.generationNumber
+	r.gateMu.Unlock()
+	var request store.FeatureRequest
+	var err error
+	event := "feature_denied"
+	if approve {
+		request, err = r.live.featureStore.Approve(requestID)
+		event = "feature_approved"
+	} else {
+		request, err = r.live.featureStore.Deny(requestID)
+	}
+	if err != nil {
+		return store.FeatureRequest{}, err
+	}
+	r.recordLive(event, &generation, map[string]any{
+		"request_id": request.ID, "request_generation": request.Generation,
+	})
+	if r.live.options.Metrics != nil {
+		requests, requestErr := r.live.featureStore.Requests()
+		if requestErr == nil {
+			pending := 0
+			for _, item := range requests {
+				if item.Status == store.FeaturePending {
+					pending++
+				}
+			}
+			r.live.options.Metrics.SetFeatureRequestsPending(pending)
+		}
+	}
+	return request, nil
 }
 
 // ListTools performs the canonical discovery exchange through the sole serial
