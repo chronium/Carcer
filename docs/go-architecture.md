@@ -199,5 +199,10 @@ cursed renderer for one full-screen session, owns line-based scroll/follow and
 tool-detail presentation, serializes prompts and confirmations, routes
 asynchronous operator output, cancels command work on shutdown, boundedly joins
 the active command, and invokes integration cleanup only after Bubble Tea
-returns. It delegates command meaning, session ownership, interview Markdown,
-and runtime shutdown to the same console used by plain mode.
+returns. Streaming messages remain literal while finalized messages are rendered
+with bounded Glamour Markdown and a frontend-only cache; the activity model
+retains canonical text. Caller cancellation is relayed as a graceful Bubble Tea
+quit while command work uses a separately cancelled context, ensuring the Linux
+terminal reader is joined before its descriptor is closed on harness-owned
+shutdown paths. It delegates command meaning, session ownership, interview
+Markdown, and runtime shutdown to the same console used by plain mode.

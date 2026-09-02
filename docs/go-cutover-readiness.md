@@ -110,9 +110,12 @@ gesture, recoverable command errors, asynchronous console output, and cancellabl
 post-restoration shutdown. It uses the same authoritative console/controller as
 plain mode and boundedly joins an active command before integration cleanup.
 Immutable interview Markdown is finalized by the console's provenance owner.
-Finalized agent-message Markdown presentation, the upstream terminal-reader
-shutdown race, and a complete disposable interactive acceptance run remain
-unresolved.
+Streaming agent messages remain literal and finalized messages are rendered by
+bounded Glamour Markdown without changing canonical activity text or enabling
+terminal hyperlinks. Caller cancellation and external shutdown cancel command
+work but send Bubble Tea a graceful quit, so its Linux terminal reader is joined
+before descriptor close. A complete disposable interactive acceptance run
+remains outstanding.
 
 ## Verification performed
 
@@ -122,7 +125,9 @@ tests enabled. The operator, TUI, and command packages also pass ten consecutive
 race-enabled runs, and process checks find no surviving `agent.test`, operator,
 or QEMU helpers. A process-free runner integration reopens an immutable aborted
 gate through the real plain frontend and verifies observable startup-before-stop
-ordering. Tests cover exact bytes,
+ordering. The real Linux pseudo-terminal restoration regression passes 100
+consecutive race-enabled runs for both direct application shutdown and caller
+context cancellation. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -159,11 +164,8 @@ unrelated Python failures.
 Required remaining work is operational verification rather than another missing
 owner layer: run and record the complete disposable Go-binary scenarios for new
 run, live planning/build/finish, abort, gate resume, continue/rollback, cross-run
-bootstrap, large-transfer shutdown, and both frontends; complete finalized
-agent-message Markdown rendering; rerun the complete reference suite when the
-documented TCG candidate timing test can succeed; and resolve or safely work
-around Bubble Tea v2.0.9's Linux terminal-reader race before any interactive
-cutover. Go `ReadFrame` relies on
+bootstrap, large-transfer shutdown, and both frontends; and rerun the complete
+reference suite when the documented TCG candidate timing test can succeed. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -222,12 +224,14 @@ telemetry from creating unbounded label cardinality.
 
 The highest risks are durable archive compatibility, fail-closed provenance,
 single-reader duplex serial behavior during large nested responses, generation
-gate semantics, and same-thread planning-to-implementation continuity. Bubble
-Tea v2.0.9's Linux terminal reader also races its cancel-reader cleanup under a
-real pseudo-terminal; the non-race PTY test proves restoration, but interactive
-cutover remains blocked until that dependency race is fixed or safely worked
-around. No Go component should be used on live experiment state while these
-remain unverified.
+gate semantics, same-thread planning-to-implementation continuity, and the lack
+of a complete disposable interactive process run. The terminal reader's unsafe
+forced-cancellation path is avoided by application-owned graceful shutdown and
+covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
+can still use its upstream forced path after an internal renderer/input error or
+panic; that residual dependency failure path should be removed by an upstream
+upgrade or re-evaluated before cutover. No Go component should be used on live
+experiment state while the remaining lifecycle scenarios remain unverified.
 
 ## Recommended staged cutover
 

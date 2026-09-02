@@ -99,8 +99,9 @@ type Application struct {
 	execute  CommandHandler
 	onClose  func()
 
-	model  *OperatorActivityModel
-	follow ActivityFollowState
+	model    *OperatorActivityModel
+	follow   ActivityFollowState
+	markdown *markdownRenderer
 
 	activityPoll           time.Duration
 	statusPoll             time.Duration
@@ -194,6 +195,7 @@ func NewApplication(options ApplicationOptions) (*Application, error) {
 		onClose:                options.OnShutdown,
 		model:                  model,
 		follow:                 NewActivityFollowState(),
+		markdown:               newMarkdownRenderer(model.maxEntries),
 		activityPoll:           activityPoll,
 		statusPoll:             statusPoll,
 		commandShutdownTimeout: commandShutdownTimeout,
@@ -530,8 +532,15 @@ func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Bubble Tea v2.0.9's Linux input shutdown skips joining its cancel reader
+	// when its context is cancelled.  Keep command cancellation under our
+	// ownership, but let Bubble Tea leave through a Quit message so its graceful
+	// path joins the reader before restoring and closing the terminal.
 	runContext, cancel := context.WithCancel(ctx)
-	options := []tea.ProgramOption{tea.WithContext(runContext)}
+	options := []tea.ProgramOption{
+		tea.WithContext(context.WithoutCancel(runContext)),
+		tea.WithoutSignalHandler(),
+	}
 	if input == nil {
 		options = append(options, tea.WithInput(nil))
 	} else {
@@ -557,11 +566,22 @@ func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer
 	a.started = true
 	a.program = program
 	a.stateMu.Unlock()
+	contextShutdownDone := make(chan struct{})
+	stopContextShutdown := context.AfterFunc(ctx, func() {
+		defer close(contextShutdownDone)
+		a.Shutdown()
+	})
 	defer func() {
+		contextShutdownStopped := stopContextShutdown()
 		// Bubble Tea normally restores terminal state before Run returns.  It
 		// can return early during setup, though, so Kill is the idempotent
 		// final cleanup for both paths.
 		program.Kill()
+		if !contextShutdownStopped {
+			// Kill also unblocks a cancellation callback that raced with setup
+			// before Bubble Tea began receiving messages.
+			<-contextShutdownDone
+		}
 		a.close()
 		resultErr = errors.Join(resultErr, a.waitForCommand())
 		a.stateMu.Lock()
@@ -1216,7 +1236,15 @@ func (a *Application) renderEntry(entry ActivityDisplayEntry) string {
 		if presentation.TurnPhase == "planning" {
 			phase = " · planning"
 		}
-		return SafeDisplayText(roleName(presentation.Role)+phase, SummaryDisplayBytes) + "\n" + presentation.Text
+		body := presentation.Text
+		if presentation.Finalized {
+			body = a.markdown.render(entry.Key, body, a.width-2)
+		}
+		heading := SafeDisplayText(roleName(presentation.Role)+phase, SummaryDisplayBytes)
+		if body == "" {
+			return heading
+		}
+		return heading + "\n" + indentBlock(body, "  ")
 	case ReasoningPresentation:
 		phase := ""
 		if presentation.TurnPhase == "planning" {

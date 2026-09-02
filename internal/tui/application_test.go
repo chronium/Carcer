@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"codexos/internal/observability"
 )
@@ -69,8 +70,71 @@ func TestApplicationViewUsesV2FullScreenAndTypedTranscriptRows(t *testing.T) {
 			t.Fatalf("view does not contain %q:\n%s", want, view.Content)
 		}
 	}
-	if strings.Contains(view.Content, "\x1b") {
-		t.Fatal("view exposed a raw terminal control")
+	if strings.Contains(view.Content, "\x1b[2J") {
+		t.Fatal("view exposed the hostile terminal control")
+	}
+}
+
+func TestApplicationRendersOnlyFinalAgentMessagesAsSafeMarkdown(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	generation := uint64(4)
+	streaming := observability.ActivityEvent{
+		Sequence: 1, Generation: &generation,
+		Role: observability.ActivityImplementor, Kind: observability.ActivityAgentTextDelta,
+		Data:     map[string]any{"text": "Streaming **plain**", "turn_phase": "planning"},
+		ThreadID: "thread", TurnID: "turn", ItemID: "message",
+	}
+	if !app.model.Consume(streaming) {
+		t.Fatal("streaming event did not change the model")
+	}
+	entries := app.model.Entries()
+	messageEntry := entries[len(entries)-1]
+	if messageEntry.Kind != ActivityDisplayKindMessage {
+		t.Fatalf("last streaming entry = %#v, want message", messageEntry)
+	}
+	key := messageEntry.Key
+	streamed := app.renderEntry(messageEntry)
+	if !strings.Contains(streamed, "Streaming **plain**") || strings.Contains(streamed, "\x1b[") {
+		t.Fatalf("streaming message was not literal plain text: %q", streamed)
+	}
+
+	final := streaming
+	final.Sequence = 2
+	final.Kind = observability.ActivityAgentMessage
+	final.Data = map[string]any{
+		"text":       "# Result\n\nFinal **Markdown** with [docs](https://example.test), `code`, and ~~old~~.\x1b[2J\n\n- item",
+		"turn_phase": "planning",
+	}
+	if !app.model.Consume(final) {
+		t.Fatal("final event did not change the model")
+	}
+	entries = app.model.Entries()
+	messageEntry = entries[len(entries)-1]
+	if messageEntry.Key != key {
+		t.Fatalf("final message did not update the stable row: %#v", entries)
+	}
+	rendered := app.renderEntry(messageEntry)
+	plain := ansi.Strip(rendered)
+	for _, want := range []string{"Sol · planning", "Result", "Final Markdown", "docs (https://example.test)", "code", "old", "• item", `\x1b[2J`} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("rendered Markdown missing %q:\n%s", want, plain)
+		}
+	}
+	for _, unwanted := range []string{"**Markdown**", "[docs]", "`code`", "~~old~~", "\x1b[2J", "\x1b]8;"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("rendered Markdown contains %q:\n%q", unwanted, rendered)
+		}
+	}
+	for _, line := range strings.Split(plain, "\n")[1:] {
+		if !strings.HasPrefix(line, "  ") {
+			t.Fatalf("Markdown body line is not padded: %q\n%s", line, plain)
+		}
+	}
+	if !strings.Contains(rendered, "\x1b[") {
+		t.Fatalf("finalized Markdown did not carry trusted terminal styling: %q", rendered)
+	}
+	if raw := app.model.RenderText(); !strings.Contains(raw, "**Markdown**") {
+		t.Fatalf("presentation rendering mutated canonical model text: %q", raw)
 	}
 }
 
@@ -304,8 +368,8 @@ func TestApplicationRunRestoresThroughBubbleTeaOnNonInteractiveContextCancel(t *
 	defer cancel()
 	var output bytes.Buffer
 	err = app.Run(ctx, nil, &output)
-	if err == nil || !errors.Is(err, tea.ErrProgramKilled) {
-		t.Fatalf("Run error = %v, want Bubble Tea killed error", err)
+	if err != nil {
+		t.Fatalf("Run after context cancellation: %v", err)
 	}
 	if shutdowns.Load() != 1 {
 		t.Fatalf("shutdown hook count = %d", shutdowns.Load())
@@ -313,6 +377,28 @@ func TestApplicationRunRestoresThroughBubbleTeaOnNonInteractiveContextCancel(t *
 	// The cursed renderer is allowed to emit terminal controls for screen
 	// management. User payload safety is asserted at the View boundary above.
 	_ = output
+}
+
+func TestApplicationRunWithAlreadyCanceledContextIsBounded(t *testing.T) {
+	app, err := NewApplication(ApplicationOptions{ActivityPoll: time.Millisecond, StatusPoll: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runDone := make(chan error, 1)
+	go func() {
+		var output bytes.Buffer
+		runDone <- app.Run(ctx, nil, &output)
+	}()
+	select {
+	case runErr := <-runDone:
+		if runErr != nil {
+			t.Fatalf("Run with already canceled context: %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run blocked while relaying an already canceled context")
+	}
 }
 
 func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
@@ -403,8 +489,8 @@ func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
 	}
 	select {
 	case runErr := <-runDone:
-		if runErr == nil || !errors.Is(runErr, tea.ErrProgramKilled) {
-			t.Fatalf("Run error = %v, want Bubble Tea killed error", runErr)
+		if runErr != nil {
+			t.Fatalf("Run after Shutdown: %v", runErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after Shutdown")
@@ -453,8 +539,8 @@ func TestApplicationPostsAsynchronousOperatorOutputOnlyWhileRunning(t *testing.T
 	app.Shutdown()
 	select {
 	case err := <-runDone:
-		if err == nil || !errors.Is(err, tea.ErrProgramKilled) {
-			t.Fatalf("Run error = %v, want Bubble Tea killed error", err)
+		if err != nil {
+			t.Fatalf("Run after Shutdown: %v", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop")
@@ -538,7 +624,7 @@ func TestApplicationMultilineViewportScrollsByLinesAndClampsAfterTrim(t *testing
 		lines[index] = fmt.Sprintf("line-%02d", index)
 	}
 	if _, err := stream.Publish(&generation, observability.ActivityImplementor, observability.ActivityAgentMessage,
-		map[string]any{"text": strings.Join(lines, "\n")}, "thread", "turn", "long"); err != nil {
+		map[string]any{"text": "```text\n" + strings.Join(lines, "\n") + "\n```"}, "thread", "turn", "long"); err != nil {
 		t.Fatal(err)
 	}
 	app.Update(activityPollMsg{})
