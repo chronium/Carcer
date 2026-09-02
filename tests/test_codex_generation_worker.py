@@ -532,7 +532,10 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
             )
             self.assertTrue(results[allowed_count + len(denied)]["result"]["success"])
             self.assertTrue(results[-1]["result"]["success"])
-            review.assert_called_once_with({"focus": "design"})
+            review.assert_called_once()
+            self.assertEqual(review.call_args.args, ({"focus": "design"},))
+            routing = review.call_args.kwargs["routing"]
+            self.assertEqual(routing.call_id, f"call-1-{allowed_count + len(denied) + 1}")
             invoked_names = [call.args[0] for call in runtime.invoke_tool.call_args_list]
             self.assertEqual(
                 invoked_names,
@@ -611,6 +614,544 @@ class CodexGenerationWorkerProtocolTests(unittest.TestCase):
                 )
                 self.assertEqual(manifest["attempts"][0]["outcome"], outcome)
                 session.close()
+
+    def test_planning_turn_completion_with_active_review_fails_before_implementation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            review_started_path = root / "review-started"
+            scenario = {
+                "planning_turn": {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {"focus": "design"},
+                            "call_id": "planning-review",
+                            "abandon_response": True,
+                        },
+                        {
+                            "tool": "list",
+                            "arguments": {},
+                            "call_id": "queued-after-review",
+                            "abandon_response": True,
+                        },
+                    ],
+                    "wait_for_path_before_completion": str(
+                        review_started_path
+                    ),
+                    "final_message": "Plan that abandoned its review.",
+                },
+                "turns": [
+                    {"final_message": "Recovered final plan."},
+                    {"final_message": "Implementation started once."},
+                ],
+            }
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _runtime_mock()
+                runtime.run_directory = root / "run"
+                review_release = threading.Event()
+                session = CodexGenerationSession(
+                    runtime,
+                    fake.executable,
+                    fake.auth_file,
+                )
+
+                def delayed_review(
+                    _arguments: object,
+                    *,
+                    routing: object,
+                ) -> str:
+                    self.assertIsNotNone(routing)
+                    review_started_path.write_text("started", encoding="utf-8")
+                    review_release.wait()
+                    return "Late review result."
+
+                original_cancel = session.cancel_review
+
+                def cancel_review() -> None:
+                    review_release.set()
+                    original_cancel()
+
+                with patch.object(
+                    session,
+                    "_run_review",
+                    side_effect=delayed_review,
+                ), patch.object(
+                    session,
+                    "cancel_review",
+                    side_effect=cancel_review,
+                ):
+                    planning = session.run_initial_turn()
+                    self.assertEqual(planning.turn_status, "failed")
+                    self.assertFalse(session.planning_completed)
+                    self.assertTrue(session.planning_retry_required)
+                    self.assertEqual(session._active_tool_calls, 0)
+                    routing_events = [
+                        call.args
+                        for call in runtime.observability.record.call_args_list
+                        if call.args[0]
+                        in {
+                            "tool_result_delivered",
+                            "tool_result_rejected",
+                            "tool_result_orphaned",
+                        }
+                    ]
+                    self.assertEqual(
+                        [event for event, _generation, _data in routing_events],
+                        ["tool_result_orphaned", "tool_result_orphaned"],
+                    )
+                    self.assertEqual(
+                        {
+                            data["call_id"]
+                            for _event, _generation, data in routing_events
+                        },
+                        {"planning-review", "queued-after-review"},
+                    )
+                    self.assertNotIn(
+                        "list",
+                        [
+                            call.args[0]
+                            for call in runtime.invoke_tool.call_args_list
+                        ],
+                    )
+                    event_names = [
+                        call.args[0]
+                        for call in runtime.observability.record.call_args_list
+                    ]
+                    self.assertIn("tool_result_ready", event_names)
+                    self.assertNotIn(
+                        "tool_response_write_attempted",
+                        event_names,
+                    )
+                    terminal = next(
+                        call.args[2]
+                        for call in runtime.observability.record.call_args_list
+                        if call.args[0] == "turn_dynamic_calls_terminal"
+                    )
+                    self.assertEqual(terminal["pending_dynamic_call_count"], 2)
+                    self.assertEqual(
+                        terminal["pending_dynamic_call_ids"],
+                        ["planning-review", "queued-after-review"],
+                    )
+                    manifest = json.loads(
+                        (
+                            runtime.run_directory
+                            / "planning-evidence/generation-0000/manifest.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(manifest["outcome"], "incomplete")
+                    self.assertEqual(manifest["stage"], "awaiting_resume")
+                    self.assertEqual(
+                        manifest["attempts"][0]["outcome"],
+                        "failed",
+                    )
+                    self.assertFalse(
+                        (
+                            runtime.run_directory
+                            / "planning-evidence/generation-0000/response.txt"
+                        ).exists()
+                    )
+
+                    implementation = session.run_planning_continuation_turn()
+
+                self.assertEqual(implementation.turn_status, "completed")
+                self.assertEqual(
+                    implementation.final_message,
+                    "Implementation started once.",
+                )
+                self.assertTrue(session.planning_completed)
+                turns = [
+                    message["params"]
+                    for message in fake.record()["messages"]
+                    if message.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 3)
+                self.assertEqual(
+                    [turn["permissions"] for turn in turns],
+                    [
+                        "codexos-planning",
+                        "codexos-planning",
+                        "codexos-implementor",
+                    ],
+                )
+                self.assertTrue(
+                    all(turn["threadId"] == session.thread_id for turn in turns)
+                )
+                self.assertEqual(
+                    sum(
+                        call.args[0] == "planning_completed"
+                        for call in runtime.observability.record.call_args_list
+                    ),
+                    1,
+                )
+                session.close()
+
+    def test_review_execution_and_delivery_are_correlated_in_both_phases(
+        self,
+    ) -> None:
+        scenario = {
+            "planning_turn": {
+                "tool_calls": [
+                    {
+                        "namespace": None,
+                        "tool": "review",
+                        "arguments": {"focus": "design"},
+                        "call_id": "planning-review",
+                    }
+                ],
+                "final_message": "Plan after delivered review.",
+            },
+            "turns": [
+                {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {"focus": "correctness"},
+                            "call_id": "implementation-review",
+                        }
+                    ],
+                    "final_message": "Implementation after delivered review.",
+                }
+            ],
+        }
+        reviewer_scenario = {
+            "model": "gpt-5.6-luna",
+            "permission_profile": "codexos-reviewer",
+            "final_message": "Synthetic advisory result.",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with _fake_codex(scenario, root / "implementor") as implementor:
+                with _fake_codex(
+                    reviewer_scenario,
+                    root / "reviewer",
+                ) as reviewer:
+                    runtime = _runtime_mock()
+                    runtime.run_directory = root / "run"
+                    session = CodexGenerationSession(
+                        runtime,
+                        implementor.executable,
+                        implementor.auth_file,
+                        reviewer_codex_executable=reviewer.executable,
+                        reviewer_auth_file=reviewer.auth_file,
+                    )
+                    result = session.run_initial_turn()
+
+                    self.assertEqual(result.turn_status, "completed")
+                    self.assertEqual(
+                        result.final_message,
+                        "Implementation after delivered review.",
+                    )
+                    events = [
+                        call.args
+                        for call in runtime.observability.record.call_args_list
+                    ]
+                    delivered = [
+                        data
+                        for event, _generation, data in events
+                        if event == "tool_result_delivered"
+                    ]
+                    self.assertEqual(
+                        [data["call_id"] for data in delivered],
+                        ["planning-review", "implementation-review"],
+                    )
+                    self.assertEqual(
+                        [data["turn_phase"] for data in delivered],
+                        ["planning", "implementation"],
+                    )
+                    for call_id in (
+                        "planning-review",
+                        "implementation-review",
+                    ):
+                        correlated = [
+                            data
+                            for event, _generation, data in events
+                            if event in {"review_started", "review_completed"}
+                            and data.get("call_id") == call_id
+                        ]
+                        self.assertEqual(len(correlated), 2)
+                        self.assertTrue(
+                            all(
+                                data["request_id"].startswith("server-")
+                                and data["thread_id"] == session.thread_id
+                                and isinstance(data["turn_id"], str)
+                                for data in correlated
+                            )
+                        )
+                    self.assertNotIn(
+                        "Synthetic advisory result.",
+                        json.dumps([data for _event, _generation, data in events]),
+                    )
+                    self.assertEqual(
+                        sum(
+                            message.get("method") == "turn/start"
+                            for message in implementor.record()["messages"]
+                        ),
+                        2,
+                    )
+                    self.assertEqual(session._dynamic_calls, {})
+                    session.close()
+
+    def test_premature_mismatched_review_completion_fails_planning_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            response_written_path = root / "response-written"
+            scenario = {
+                "planning_turn": {
+                    "tool_calls": [
+                        {
+                            "namespace": None,
+                            "tool": "review",
+                            "arguments": {"focus": "design"},
+                            "call_id": "premature-review",
+                            "abandon_response": True,
+                            "completion_before_response": {
+                                "tool": "list",
+                                "status": "inProgress",
+                            },
+                        }
+                    ],
+                    "wait_for_path_before_completion": str(
+                        response_written_path
+                    ),
+                    "consume_abandoned_responses_before_completion": True,
+                    "final_message": "Plan with invalid delivery evidence.",
+                },
+                "turns": [
+                    {"final_message": "Recovered final plan."},
+                    {"final_message": "Implementation started once."},
+                ],
+            }
+            with _fake_codex(scenario, root / "fake-codex") as fake:
+                runtime = _runtime_mock()
+                runtime.run_directory = root / "run"
+                session = CodexGenerationSession(
+                    runtime,
+                    fake.executable,
+                    fake.auth_file,
+                )
+                session.start()
+                server = session._server
+                self.assertIsNotNone(server)
+                assert server is not None
+                rejected = threading.Event()
+                original_record = session._record
+                original_write_result = server.write_result
+
+                def record(
+                    event: str,
+                    data: object,
+                ) -> None:
+                    original_record(event, data)
+                    if event == "tool_delivery_notification_rejected":
+                        rejected.set()
+
+                def review(
+                    _arguments: object,
+                    *,
+                    routing: object,
+                ) -> str:
+                    self.assertIsNotNone(routing)
+                    self.assertTrue(rejected.wait(2.0))
+                    return "Review completed after invalid notification."
+
+                def write_result(
+                    request_id: object,
+                    response: object,
+                ) -> None:
+                    original_write_result(request_id, response)
+                    response_written_path.write_text(
+                        "written",
+                        encoding="utf-8",
+                    )
+
+                with patch.object(
+                    session,
+                    "_record",
+                    side_effect=record,
+                ), patch.object(
+                    session,
+                    "_run_review",
+                    side_effect=review,
+                ), patch.object(
+                    server,
+                    "write_result",
+                    side_effect=write_result,
+                ):
+                    planning = session.run_initial_turn()
+                    self.assertEqual(planning.turn_status, "failed")
+                    self.assertFalse(session.planning_completed)
+                    self.assertTrue(session.planning_retry_required)
+                    self.assertEqual(session._dynamic_calls, {})
+
+                    implementation = session.run_planning_continuation_turn()
+
+                self.assertEqual(implementation.turn_status, "completed")
+                self.assertEqual(
+                    implementation.final_message,
+                    "Implementation started once.",
+                )
+                events = [
+                    call.args
+                    for call in runtime.observability.record.call_args_list
+                ]
+                notification = next(
+                    data
+                    for event, _generation, data in events
+                    if event == "tool_delivery_notification_rejected"
+                )
+                self.assertEqual(
+                    set(notification["validation_failures"]),
+                    {
+                        "result_not_ready",
+                        "response_not_attempted",
+                        "invalid_status",
+                        "tool_mismatch",
+                    },
+                )
+                self.assertFalse(
+                    any(
+                        event == "tool_result_delivered"
+                        and data["call_id"] == "premature-review"
+                        for event, _generation, data in events
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        event == "tool_result_orphaned"
+                        and data["call_id"] == "premature-review"
+                        for event, _generation, data in events
+                    )
+                )
+                turns = [
+                    message["params"]
+                    for message in fake.record()["messages"]
+                    if message.get("method") == "turn/start"
+                ]
+                self.assertEqual(len(turns), 3)
+                self.assertEqual(
+                    [turn["permissions"] for turn in turns],
+                    [
+                        "codexos-planning",
+                        "codexos-planning",
+                        "codexos-implementor",
+                    ],
+                )
+                session.close()
+
+    def test_implementation_waits_for_delayed_planning_review_delivery(
+        self,
+    ) -> None:
+        scenario = {
+            "planning_turn": {
+                "tool_calls": [
+                    {
+                        "namespace": None,
+                        "tool": "review",
+                        "arguments": {"focus": "design"},
+                        "call_id": "delayed-review",
+                    }
+                ]
+            },
+            "turns": [{"final_message": "Implementation started."}],
+        }
+        with _fake_codex(scenario) as fake:
+            runtime = _runtime_mock()
+            session = CodexGenerationSession(
+                runtime,
+                fake.executable,
+                fake.auth_file,
+            )
+            session.start()
+            server = session._server
+            self.assertIsNotNone(server)
+            assert server is not None
+            review_started = threading.Event()
+            review_release = threading.Event()
+            response_written = threading.Event()
+            handler_release = threading.Event()
+            result: list[object] = []
+            original_write_result = server.write_result
+
+            def delayed_review(
+                _arguments: object,
+                *,
+                routing: object,
+            ) -> str:
+                self.assertIsNotNone(routing)
+                review_started.set()
+                self.assertTrue(review_release.wait(2.0))
+                return "Delivered planning review."
+
+            def delayed_handler_return(
+                request_id: object,
+                response: object,
+            ) -> None:
+                original_write_result(request_id, response)
+                response_written.set()
+                self.assertTrue(handler_release.wait(2.0))
+
+            def run_sequence() -> None:
+                result.append(session.run_initial_turn())
+
+            with patch.object(
+                session,
+                "_run_review",
+                side_effect=delayed_review,
+            ), patch.object(
+                server,
+                "write_result",
+                side_effect=delayed_handler_return,
+            ):
+                worker = threading.Thread(target=run_sequence)
+                worker.start()
+                self.assertTrue(review_started.wait(2.0))
+                self.assertEqual(
+                    sum(
+                        message.get("method") == "turn/start"
+                        for message in fake.record()["messages"]
+                    ),
+                    1,
+                )
+                review_release.set()
+                self.assertTrue(response_written.wait(2.0))
+                _wait_for(lambda: session._last_turn_status == "completed")
+                self.assertTrue(worker.is_alive())
+                self.assertEqual(
+                    sum(
+                        message.get("method") == "turn/start"
+                        for message in fake.record()["messages"]
+                    ),
+                    1,
+                )
+                handler_release.set()
+                worker.join(2.0)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].turn_status, "completed")
+            self.assertEqual(
+                sum(
+                    message.get("method") == "turn/start"
+                    for message in fake.record()["messages"]
+                ),
+                2,
+            )
+            delivered = [
+                call.args[2]
+                for call in runtime.observability.record.call_args_list
+                if call.args[0] == "tool_result_delivered"
+            ]
+            self.assertEqual(
+                [data["call_id"] for data in delivered],
+                ["delayed-review"],
+            )
+            session.close()
 
     def test_plan_text_is_private_evidence_not_operational_telemetry(self) -> None:
         secret = "PRIVATE-PLAN-TEXT-83f1"
@@ -2239,7 +2780,9 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
                 target=lambda: results.append(session.run_initial_turn())
             )
             turn.start()
-            _wait_for(lambda: session.active_turn)
+            _wait_for(
+                lambda: session.active_turn_phase == "implementation"
+            )
             pid = session.process_pid
             thread_id = session.thread_id
 
@@ -2306,7 +2849,9 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
 
             turn = threading.Thread(target=run_turn)
             turn.start()
-            _wait_for(lambda: session.active_turn)
+            _wait_for(
+                lambda: session.active_turn_phase == "implementation"
+            )
             with self.assertRaisesRegex(
                 CodexGenerationWorkerError,
                 "did not reach interrupted state",
@@ -2337,7 +2882,9 @@ class CodexGenerationSessionProtocolTests(unittest.TestCase):
             )
             turn = threading.Thread(target=session.run_initial_turn)
             turn.start()
-            _wait_for(lambda: session.active_turn)
+            _wait_for(
+                lambda: session.active_turn_phase == "implementation"
+            )
 
             with self.assertRaisesRegex(CodexAppServerError, "timed out"):
                 session.interrupt_turn(0.05)

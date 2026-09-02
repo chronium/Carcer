@@ -153,6 +153,14 @@ class PlanningEvidence:
         self._manifest["outcome"] = "failed"
         _atomic_json(self._directory / "manifest.json", self._manifest)
 
+    def record_retryable_failure(self) -> None:
+        """Record one failed attempt without claiming the final plan failed."""
+        attempt = self._active_attempt()
+        attempt["outcome"] = "failed"
+        self._manifest["stage"] = "awaiting_resume"
+        self._manifest["outcome"] = "incomplete"
+        _atomic_json(self._directory / "manifest.json", self._manifest)
+
     def _attempts(self) -> list[dict[str, Any]]:
         attempts = self._manifest.get("attempts")
         if not isinstance(attempts, list):

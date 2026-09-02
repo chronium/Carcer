@@ -37,9 +37,49 @@ def respond(request: dict[str, object], result: object) -> None:
     send({"id": request["id"], "result": result})
 
 
-def request_client(method: str, params: object) -> dict[str, object]:
-    request_id = f"server-{len(server_responses) + 1}"
+def send_client_request(method: str, params: object) -> str:
+    request_id = (
+        f"server-{len(server_responses) + len(abandoned_requests) + 1}"
+    )
     send({"id": request_id, "method": method, "params": params})
+    return request_id
+
+
+def send_tool_completion(
+    params: dict[str, object],
+    result: object,
+    overrides: dict[str, object] | None = None,
+) -> None:
+    success = isinstance(result, dict) and result.get("success") is True
+    item = {
+        "id": params.get("callId"),
+        "type": "dynamicToolCall",
+        "namespace": params.get("namespace"),
+        "tool": params.get("tool"),
+        "arguments": params.get("arguments"),
+        "status": "completed" if success else "failed",
+        "success": success,
+        "contentItems": (
+            result.get("contentItems")
+            if isinstance(result, dict)
+            else None
+        ),
+    }
+    item.update(overrides or {})
+    send(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": params.get("threadId"),
+                "turnId": params.get("turnId"),
+                "item": item,
+            },
+        }
+    )
+
+
+def request_client(method: str, params: object) -> dict[str, object]:
+    request_id = send_client_request(method, params)
     while True:
         response = read_message()
         if response.get("method") == "turn/interrupt" and "id" in response:
@@ -63,6 +103,9 @@ def request_client(method: str, params: object) -> dict[str, object]:
             raise SystemExit(f"wrong client response ID: {response}")
         break
     server_responses.append(response)
+    if method == "item/tool/call" and isinstance(params, dict):
+        result = response.get("result")
+        send_tool_completion(params, result)
     return response
 
 
@@ -82,6 +125,7 @@ record_path = Path(
 scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
 messages: list[dict[str, object]] = []
 server_responses: list[dict[str, object]] = []
+abandoned_requests: list[dict[str, object]] = []
 interrupted_turns: set[str] = set()
 current_turn_id = ""
 pid = os.getpid()
@@ -199,6 +243,7 @@ def save_record() -> None:
             ).read_text(encoding="utf-8"),
             "messages": messages,
             "server_responses": server_responses,
+            "abandoned_requests": abandoned_requests,
             "tool_results": tool_results,
             "dead_process_checks": dead_process_checks,
         }
@@ -227,6 +272,7 @@ if permission_profile == "codexos-implementor" and scenario.get(
     turns = [planning_turn, *turns]
 
 for turn_index, turn_scenario in enumerate(turns, 1):
+    abandoned_start = len(abandoned_requests)
     turn_id = f"turn-{pid}-{turn_index}"
     current_turn_id = turn_id
     turn_ids.append(turn_id)
@@ -314,8 +360,17 @@ for turn_index, turn_scenario in enumerate(turns, 1):
         }
         if call.get("omit_call_id"):
             del call_params["callId"]
-        response = request_client("item/tool/call", call_params)
-        tool_results.append(response)
+        if call.get("abandon_response"):
+            request_id = send_client_request("item/tool/call", call_params)
+            abandoned_requests.append(
+                {"id": request_id, "params": call_params}
+            )
+            completion = call.get("completion_before_response")
+            if isinstance(completion, dict):
+                send_tool_completion(call_params, None, completion)
+        else:
+            response = request_client("item/tool/call", call_params)
+            tool_results.append(response)
         check_root = turn_scenario.get(
             "assert_dead_processes_in",
             scenario.get("assert_dead_processes_in"),
@@ -331,6 +386,23 @@ for turn_index, turn_scenario in enumerate(turns, 1):
                     dead = True
                 checks.append({"pid": checked_pid, "dead": dead})
             dead_process_checks.append(checks)
+
+    wait_path = turn_scenario.get("wait_for_path_before_completion")
+    if isinstance(wait_path, str):
+        deadline = time.monotonic() + 5.0
+        while not Path(wait_path).exists():
+            if time.monotonic() >= deadline:
+                raise SystemExit(f"timed out waiting for {wait_path}")
+            time.sleep(0.005)
+
+    if turn_scenario.get("consume_abandoned_responses_before_completion"):
+        for abandoned in abandoned_requests[abandoned_start:]:
+            response = read_message()
+            if response.get("id") != abandoned["id"]:
+                raise SystemExit(
+                    f"wrong abandoned client response ID: {response}"
+                )
+            server_responses.append(response)
 
     token_usage = turn_scenario.get("token_usage")
     if isinstance(token_usage, dict):

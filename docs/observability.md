@@ -132,3 +132,14 @@ generation Git provenance, and public tags. Within the current generation it
 remains available only as the same app-server thread's natural history and this
 private trusted evidence, not as autonomous persisted state or a plan-approval
 mechanism.
+
+Turn-scoped dynamic-call routing is recorded separately from tool execution.
+Queueing, result readiness, response-write attempts, and the single terminal
+delivery, rejection, or orphaning outcome carry the originating JSON-RPC request,
+call, thread, turn, and phase identities. Turn-terminal evidence also records any
+still-pending call IDs. A response write is only an attempt; the matching
+app-server `item/completed` notification is the delivery evidence. Reviewer
+execution may therefore complete even though its
+outer result was orphaned; the two outcomes are never conflated, and review text
+is not included in these events. A planning turn with an orphaned call is recorded
+as failed and remains retryable instead of advancing to implementation.

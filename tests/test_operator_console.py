@@ -41,6 +41,47 @@ _TEST_HARDWARE = TEST_HARDWARE_PROFILE.manifest(
 
 
 class OperatorConsoleCommandTests(unittest.TestCase):
+    def test_planning_routing_failure_is_not_reported_as_sol_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run",
+                RuntimeState.RUNNING,
+            )
+            console = OperatorConsole(runtime, io.StringIO(), io.StringIO())
+            session = Mock()
+            session.planning_retry_required = True
+            session.mode = CodexGenerationSessionMode.GENERATION
+            session.healthy = True
+            console._session = session
+            console._session_generation = runtime.generation_number
+
+            self.assertEqual(console.codex_turn_state, "planning failed")
+
+    def test_agent_retries_planning_after_routing_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _mock_runtime(
+                Path(temporary) / "run",
+                RuntimeState.RUNNING,
+            )
+            console = OperatorConsole(runtime, io.StringIO(), io.StringIO())
+            result = Mock()
+            result.turn_status = "failed"
+            result.final_message = None
+            result.summary = "Planning must be retried."
+            session = Mock()
+            session.healthy = True
+            session.planning_completed = False
+            session.planning_retry_required = True
+            session.run_planning_continuation_turn.return_value = result
+            console._session = session
+            console._session_generation = runtime.generation_number
+
+            console._start_agent()
+            _wait_for(lambda: console._turn_thread is None)
+
+            session.run_planning_continuation_turn.assert_called_once_with()
+            session.run_continuation_turn.assert_not_called()
+
     def test_historical_gate_does_not_reconstruct_an_interview_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = _mock_runtime(
