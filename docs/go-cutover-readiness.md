@@ -60,6 +60,10 @@ aborted generation archives, rejects partial or inconsistent histories, restores
 an archived gate without booting, and requires an explicit successor or rollback
 selection. It does not yet perform the selected QEMU boot or create the required
 fresh Codex session.
+The Cobra command surface validates the Python startup flags, mutually exclusive
+opening and display modes, paired Git and inheritance options, and automatic
+TUI selection before handing control to a runner. The concrete runner, terminal
+probe, operator commands, and Go process entry point are not yet implemented.
 
 ## Verification performed
 
@@ -87,8 +91,8 @@ lifecycle.
 ## Remaining gaps and known differences
 
 Generation orchestration, guest build/finish services, implementor/planning and
-interview Codex sessions, CLI,
-operator, and TUI capabilities remain to be
+interview Codex sessions, concrete CLI startup,
+operator commands, and TUI capabilities remain to be
 implemented. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
