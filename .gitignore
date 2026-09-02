@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 
 build/
+bin/
 dist/
 out/
 runs/

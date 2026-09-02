@@ -115,6 +115,98 @@ class CrossRunBootstrapTests(unittest.TestCase):
             )
             self.assertEqual(runtime.feature_requests(), (inherited,))
 
+    def test_chained_bootstrap_preserves_high_generation_inherited_requests(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            predecessor = root / "experiment-002"
+            files = [SnapshotFile("seed/kernel.c", b"source\n")]
+            for generation in range(16):
+                _archive_completed(
+                    predecessor,
+                    generation,
+                    generation - 1 if generation else None,
+                    "successor" if generation else "initial",
+                    files,
+                    handoff=f"G{generation}",
+                )
+            predecessor_store = FeatureRequestStore(predecessor)
+            inherited = predecessor_store.create(
+                10,
+                "Inherited request",
+                "Retain its original generation across experiments.",
+            )
+            inherited = predecessor_store.approve(inherited.id)
+            repository, _ = _create_repository(root / "repository")
+            predecessor_record = GenerationGitRecorder(
+                repository, predecessor, "test-base"
+            ).reconcile()[-1]
+
+            middle = root / "experiment-003"
+            predecessor_iso = (
+                predecessor
+                / "generation-0015"
+                / "successor"
+                / "codexos.iso"
+            )
+            initialize_cross_run_bootstrap(
+                middle,
+                predecessor_iso,
+                predecessor,
+                15,
+                repository,
+                predecessor_record.tag,
+            )
+            _archive_completed(
+                middle,
+                0,
+                None,
+                "initial",
+                files,
+                handoff="Experiment 3 G0",
+            )
+            middle_record = GenerationGitRecorder(
+                repository, middle, predecessor_record.tag
+            ).reconcile()[0]
+
+            destination = root / "experiment-004"
+            middle_iso = (
+                middle / "generation-0000" / "successor" / "codexos.iso"
+            )
+            initialize_cross_run_bootstrap(
+                destination,
+                middle_iso,
+                middle,
+                0,
+                repository,
+                middle_record.tag,
+            )
+
+            self.assertEqual(
+                FeatureRequestStore(destination).requests(),
+                (inherited,),
+            )
+
+            FeatureRequestStore(middle).create(
+                1,
+                "Unarchived local request",
+                "Must still be rejected.",
+            )
+            invalid_destination = root / "invalid-destination"
+            with self.assertRaisesRegex(
+                CrossRunBootstrapError, "newer than the inherited generation"
+            ):
+                initialize_cross_run_bootstrap(
+                    invalid_destination,
+                    middle_iso,
+                    middle,
+                    0,
+                    repository,
+                    middle_record.tag,
+                )
+            self.assertFalse(invalid_destination.exists())
+
     def test_imports_handoff_feature_ledger_and_immutable_identities(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

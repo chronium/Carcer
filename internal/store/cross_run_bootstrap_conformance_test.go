@@ -83,6 +83,80 @@ assert [(request.id, request.status) for request in FeatureRequestStore(run).req
 	}
 }
 
+func TestCrossRunBootstrapAllowsChainedInheritedRequestFromHigherGeneration(t *testing.T) {
+	root := t.TempDir()
+	repositoryRoot := repositoryRootForCrossRunTest(t)
+	predecessor := filepath.Join(root, "experiment-002")
+	if err := createPythonCrossRunHistory(predecessor, repositoryRoot, 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	repository := filepath.Join(root, "repository")
+	createCrossRunGitRepository(t, repository, "experiment-002/generation-0010")
+
+	middle := filepath.Join(root, "experiment-003")
+	predecessorISO := filepath.Join(predecessor, "generation-0010", "successor", "codexos.iso")
+	if _, err := InitializeCrossRunBootstrap(
+		middle,
+		predecessorISO,
+		predecessor,
+		10,
+		repository,
+		"experiment-002/generation-0010",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := createPythonCrossRunHistory(middle, repositoryRoot, 0, -1); err != nil {
+		t.Fatal(err)
+	}
+	runCrossRunGit(t, repository, "tag", "--annotate", "--no-sign", "--cleanup=verbatim", "-m", "Cross-run base", "experiment-003/generation-0000")
+
+	destination := filepath.Join(root, "experiment-004")
+	middleISO := filepath.Join(middle, "generation-0000", "successor", "codexos.iso")
+	if _, err := InitializeCrossRunBootstrap(
+		destination,
+		middleISO,
+		middle,
+		0,
+		repository,
+		"experiment-003/generation-0000",
+	); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := NewFeatureRequestStore(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inherited, err := requests.Requests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inherited) != 2 || inherited[0].Generation != 10 || inherited[1].Generation != 10 {
+		t.Fatalf("chained inherited requests = %#v", inherited)
+	}
+
+	middleRequests, err := NewFeatureRequestStore(middle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := middleRequests.Create(1, "Unarchived local request", "Must still be rejected."); err != nil {
+		t.Fatal(err)
+	}
+	invalidDestination := filepath.Join(root, "invalid-destination")
+	if _, err := InitializeCrossRunBootstrap(
+		invalidDestination,
+		middleISO,
+		middle,
+		0,
+		repository,
+		"experiment-003/generation-0000",
+	); err == nil || !strings.Contains(err.Error(), "newer than the inherited generation") {
+		t.Fatalf("unarchived local request error = %v", err)
+	}
+	if _, err := os.Lstat(invalidDestination); !os.IsNotExist(err) {
+		t.Fatalf("failed initialization published destination: %v", err)
+	}
+}
+
 func TestCrossRunBootstrapRejectsIdentityAndLedgerTampering(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -194,10 +268,16 @@ func TestCrossRunBootstrapRequiresAnnotatedGenerationTagAndCompleteTriple(t *tes
 }
 
 func createPythonCrossRunFixture(source, repositoryRoot string) error {
+	return createPythonCrossRunHistory(source, repositoryRoot, 0, 0)
+}
+
+func createPythonCrossRunHistory(source, repositoryRoot string, latestGeneration, requestGeneration int) error {
 	script := `
 import importlib.util, json, pathlib, sys, types
 root = pathlib.Path(sys.argv[1])
 source = pathlib.Path(sys.argv[2])
+latest = int(sys.argv[3])
+request_generation = int(sys.argv[4])
 package = types.ModuleType("harness")
 package.__path__ = [str(root / "harness")]
 sys.modules["harness"] = package
@@ -209,32 +289,55 @@ for name in ("source_snapshot", "hardware", "feature_requests"):
 snapshot_module = sys.modules["harness.source_snapshot"]
 hardware_module = sys.modules["harness.hardware"]
 feature_module = sys.modules["harness.feature_requests"]
-archive = source / "generation-0000"
-(archive / "boot").mkdir(parents=True)
-(archive / "source").mkdir()
-(archive / "successor").mkdir()
-(archive / "metadata.json").write_text(json.dumps({"generation": 0, "outcome": "completed", "parent_generation": None, "transition": "initial"}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-hardware = hardware_module.TEST_HARDWARE_PROFILE.manifest("QEMU emulator version test")
-(archive / "hardware.json").write_text(json.dumps(hardware.as_json_object(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-snapshot = snapshot_module.encode_source_snapshot((snapshot_module.SnapshotFile("seed/kernel.c", b"Python source\n"),))
-(archive / "source.snapshot").write_bytes(snapshot)
-(archive / "source" / "seed").mkdir()
-(archive / "source" / "seed" / "kernel.c").write_bytes(b"Python source\n")
-(archive / "handoff.txt").write_text("Python handoff λ.\n", encoding="utf-8")
-(archive / "boot" / "codexos.iso").write_bytes(b"boot")
-(archive / "successor" / "kernel.elf").write_bytes(b"kernel")
-(archive / "successor" / "codexos.iso").write_bytes(b"successor")
-(archive / "qemu.stdout").write_bytes(b"")
-(archive / "qemu.stderr").write_bytes(b"")
-store = feature_module.FeatureRequestStore(source)
-store.create(0, "Pending λ", "Pending source request")
-approved = store.create(0, "Approved", "Approved source request")
-store.approve(approved.id)
+snapshot = snapshot_module.encode_source_snapshot((snapshot_module.SnapshotFile("seed/kernel.c", b"source\n"),))
+for generation in range(latest + 1):
+    archive = source / f"generation-{generation:04d}"
+    (archive / "boot").mkdir(parents=True)
+    (archive / "source" / "seed").mkdir(parents=True)
+    (archive / "successor").mkdir()
+    metadata = {
+        "generation": generation,
+        "outcome": "completed",
+        "parent_generation": generation - 1 if generation else None,
+        "transition": "successor" if generation else "initial",
+    }
+    (archive / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    hardware = hardware_module.TEST_HARDWARE_PROFILE.manifest("QEMU emulator version test")
+    (archive / "hardware.json").write_text(json.dumps(hardware.as_json_object(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (archive / "source.snapshot").write_bytes(snapshot)
+    (archive / "source" / "seed" / "kernel.c").write_bytes(b"source\n")
+    (archive / "handoff.txt").write_text("Python handoff λ.\n", encoding="utf-8")
+    (archive / "boot" / "codexos.iso").write_bytes(b"boot")
+    (archive / "successor" / "kernel.elf").write_bytes(b"kernel")
+    (archive / "successor" / "codexos.iso").write_bytes(b"successor")
+    (archive / "qemu.stdout").write_bytes(b"")
+    (archive / "qemu.stderr").write_bytes(b"")
+if request_generation >= 0:
+    store = feature_module.FeatureRequestStore(source)
+    store.create(
+        request_generation,
+        "Pending λ",
+        "Pending source request",
+    )
+    approved = store.create(
+        request_generation,
+        "Approved",
+        "Approved source request",
+    )
+    store.approve(approved.id)
 `
-	command := exec.Command("python3", "-c", script, repositoryRoot, source)
+	command := exec.Command(
+		"python3",
+		"-c",
+		script,
+		repositoryRoot,
+		source,
+		fmt.Sprintf("%d", latestGeneration),
+		fmt.Sprintf("%d", requestGeneration),
+	)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("Python source fixture failed: %w\n%s", err, output)
+		return fmt.Errorf("Python cross-run history fixture failed: %w\n%s", err, output)
 	}
 	return nil
 }

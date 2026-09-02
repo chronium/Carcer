@@ -140,7 +140,8 @@ func InitializeCrossRunBootstrap(
 	// Constructing the Python source runtime validates any bootstrap already
 	// attached to that run. Preserve the same fail-closed behavior before
 	// treating its latest archive as an inheritance source.
-	if _, err := LoadCrossRunBootstrap(source); err != nil {
+	sourceBootstrap, err := LoadCrossRunBootstrap(source)
+	if err != nil {
 		return nil, wrapCrossRunSourceError(err)
 	}
 
@@ -172,8 +173,19 @@ func InitializeCrossRunBootstrap(
 	if err != nil {
 		return nil, wrapCrossRunSourceError(err)
 	}
+	inheritedRequestIDs := make(map[uint64]struct{})
+	if sourceBootstrap != nil {
+		inheritedRequestIDs = make(map[uint64]struct{}, len(sourceBootstrap.InheritedRequestIDs))
+		for _, requestID := range sourceBootstrap.InheritedRequestIDs {
+			inheritedRequestIDs[requestID] = struct{}{}
+		}
+	}
 	for _, request := range requests {
-		if request.Generation > sourceGeneration {
+		// Requests inherited by the source retain their original run's
+		// generation number. Only requests created by this source run must fit
+		// within its local archived generation range.
+		_, inherited := inheritedRequestIDs[request.ID]
+		if request.Generation > sourceGeneration && !inherited {
 			return nil, &CrossRunBootstrapError{Reason: "source feature-request ledger contains a request from a generation newer than the inherited generation"}
 		}
 	}

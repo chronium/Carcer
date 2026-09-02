@@ -83,6 +83,7 @@ def initialize_cross_run_bootstrap(
     try:
         from .generation_runtime import CodexOSRun
 
+        source_bootstrap = load_cross_run_bootstrap(source)
         source_runtime = CodexOSRun(source)
         archives = source_runtime.archived_generations()
         CodexOSRun._validate_archived_history(archives)
@@ -101,8 +102,18 @@ def initialize_cross_run_bootstrap(
                 "initial ISO is not byte-identical to the inherited successor"
             )
         requests = FeatureRequestStore(source).requests()
+        inherited_request_ids = (
+            frozenset(source_bootstrap.inherited_request_ids)
+            if source_bootstrap is not None
+            else frozenset()
+        )
+        # Requests inherited by the source retain their original run's
+        # generation number. Only requests created by this source run must fit
+        # within its local archived generation range.
         if any(
-            request.generation > source_generation for request in requests
+            request.generation > source_generation
+            and request.id not in inherited_request_ids
+            for request in requests
         ):
             raise CrossRunBootstrapError(
                 "source feature-request ledger contains a request from a "
