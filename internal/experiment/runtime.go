@@ -115,6 +115,7 @@ type CodexOSRun struct {
 	gateMu       sync.Mutex
 	runDirectory string
 	state        RuntimeState
+	live         *liveRun
 
 	generationNumber *uint64
 	previousHandoff  *string
@@ -149,10 +150,14 @@ func (r *CodexOSRun) RunDirectory() string {
 	return r.runDirectory
 }
 
-// ActivePID reports whether this process-free slice owns a live guest.  It
-// always reports no process; a later runtime owner may provide the actual
-// QEMU PID without changing gate semantics.
-func (r *CodexOSRun) ActivePID() (int, bool) { return 0, false }
+// ActivePID reports the concrete QEMU child owned by a live run.
+func (r *CodexOSRun) ActivePID() (int, bool) {
+	generation := r.liveGeneration()
+	if generation == nil || generation.controller == nil {
+		return 0, false
+	}
+	return generation.controller.PID()
+}
 
 // State returns the current run state.
 func (r *CodexOSRun) State() RuntimeState {
@@ -360,6 +365,9 @@ func (r *CodexOSRun) ContinueGeneration() error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	if r.live != nil {
+		return &GenerationRuntimeError{Reason: "live generation continuation is not yet available"}
+	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
 	if r.retainedFinish != nil {
@@ -398,6 +406,9 @@ func (r *CodexOSRun) ContinueGeneration() error {
 func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
+	}
+	if r.live != nil {
+		return &GenerationRuntimeError{Reason: "live generation rollback is not yet available"}
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
@@ -454,6 +465,9 @@ func (r *CodexOSRun) AbortGeneration() error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	if r.live != nil {
+		return &GenerationRuntimeError{Reason: "live generation abort is not yet available"}
+	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
 	if r.state != RuntimeStateRunning {
@@ -491,6 +505,7 @@ func (r *CodexOSRun) Stop() {
 	if r == nil {
 		return
 	}
+	r.stopLive()
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
 	r.pendingFinish = nil
