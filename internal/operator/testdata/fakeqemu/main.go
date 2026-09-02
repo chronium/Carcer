@@ -21,6 +21,8 @@ import (
 const (
 	fakeQEMUModeEnvironment           = "CODEXOS_DISPOSABLE_QEMU_LIFECYCLE"
 	processRecordDirectoryEnvironment = "CODEXOS_DISPOSABLE_PROCESS_RECORDS"
+	largeShutdownMode                 = "large-shutdown"
+	largeShutdownSocketBuffer         = 1024
 )
 
 const maxHostResponseOutput = 64 * 1024
@@ -62,11 +64,15 @@ func run() int {
 	done := make(chan struct{})
 	results := make(chan error, 2)
 	go func() { results <- serveQMP(qmpListener, done) }()
-	lifecycle := os.Getenv(fakeQEMUModeEnvironment) == "1" || os.Getenv(fakeQEMUModeEnvironment) == "lifecycle"
+	mode := os.Getenv(fakeQEMUModeEnvironment)
+	lifecycle := mode == "1" || mode == "lifecycle"
+	largeShutdown := mode == largeShutdownMode
 	candidate := hasArgument(os.Args[1:], "-S")
-	go func() { results <- serveSerial(serialListener, done, lifecycle, lifecycle && !candidate) }()
+	go func() {
+		results <- serveSerial(serialListener, done, lifecycle, lifecycle && !candidate, largeShutdown && !candidate)
+	}()
 	timeout := 15 * time.Second
-	if lifecycle && !candidate {
+	if (lifecycle || largeShutdown) && !candidate {
 		timeout = time.Minute
 	}
 	timer := time.NewTimer(timeout)
@@ -90,6 +96,15 @@ func recordProcess(kind string) error {
 		return nil
 	}
 	path := filepath.Join(directory, fmt.Sprintf("%s-%d.pid", kind, os.Getpid()))
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600)
+}
+
+func recordLargeShutdownRequest() error {
+	directory := os.Getenv(processRecordDirectoryEnvironment)
+	if directory == "" {
+		return nil
+	}
+	path := filepath.Join(directory, fmt.Sprintf("qemu-large-response-requested-%d.marker", os.Getpid()))
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600)
 }
 
@@ -165,12 +180,24 @@ func serveQMP(listener net.Listener, done chan struct{}) error {
 	}
 }
 
-func serveSerial(listener net.Listener, done <-chan struct{}, lifecycle, activeLifecycle bool) error {
+func serveSerial(listener net.Listener, done <-chan struct{}, lifecycle, activeLifecycle, largeShutdown bool) error {
 	connection, err := listener.Accept()
 	if err != nil {
 		return err
 	}
 	defer connection.Close()
+	if largeShutdown {
+		unixConnection, ok := connection.(*net.UnixConn)
+		if !ok {
+			return errors.New("large-shutdown serial connection is not a Unix socket")
+		}
+		if err := unixConnection.SetReadBuffer(largeShutdownSocketBuffer); err != nil {
+			return fmt.Errorf("set large-shutdown serial read buffer: %w", err)
+		}
+		if err := unixConnection.SetWriteBuffer(largeShutdownSocketBuffer); err != nil {
+			return fmt.Errorf("set large-shutdown serial write buffer: %w", err)
+		}
+	}
 	go func() {
 		<-done
 		_ = connection.Close()
@@ -178,6 +205,20 @@ func serveSerial(listener net.Listener, done <-chan struct{}, lifecycle, activeL
 	}()
 	if _, err := io.WriteString(connection, guest.ReadyMarker); err != nil {
 		return err
+	}
+	if largeShutdown {
+		request, err := encodeHostServiceRequest(1, "read_provided_asset", [][]byte{[]byte("bulk"), []byte("0"), []byte("1048576")})
+		if err != nil {
+			return err
+		}
+		if _, err := connection.Write(request); err != nil {
+			return err
+		}
+		if err := recordLargeShutdownRequest(); err != nil {
+			return err
+		}
+		<-done
+		return nil
 	}
 	var snapshot []byte
 	if activeLifecycle {

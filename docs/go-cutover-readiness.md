@@ -180,14 +180,13 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: exercise large-transfer shutdown, repeat a complete live generation
-through the TUI and the separately built Go command
-boundary, perform the corresponding real-image candidate acceptance when the
-pinned guest/toolchain environment is available, and rerun the complete reference
-suite when the documented TCG candidate timing test can succeed. Both frontends
-are proven at an archived gate, but only the plain frontend has been exercised
-through a complete live planning/build/finish/continue/rollback scenario. Go
-`ReadFrame` relies on
+owner layer: repeat a complete live generation through the TUI and the separately
+built Go command boundary, perform the corresponding real-image candidate
+acceptance when the pinned guest/toolchain environment is available, and rerun
+the complete reference suite when the documented TCG candidate timing test can
+succeed. Both frontends are proven at an archived gate, but only the plain
+frontend has been exercised through a complete live
+planning/build/finish/continue/rollback scenario. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -275,6 +274,27 @@ immutable aborted generation-zero archive, and removal of the live generation
 workspace. It invokes no Codex session, compiler, candidate VM, telemetry
 endpoint, or live state.
 
+### Recorded disposable large-transfer shutdown acceptance
+
+From the repository root, the exact race-enabled commands are:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/guest -run '^TestDispatcher(LargeHostResponseOneByteProgressAndFraming|CloseDuringBlockedLargeHostResponse|AbortDuringBlockedLargeHostResponse)$' -count=10 -timeout=180s
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerAbortsDuringBlockedLargeHostResponse$' -count=10 -timeout=180s
+```
+
+The dispatcher scenario relays an exact 1 MiB G13-style host response one byte
+at a time, then completes an ordinary tool exchange and a nested build exchange.
+It also verifies bounded cancellation and close against a transport that cannot
+make write progress. The operator scenario freezes a real 1 MiB provided asset,
+boots the separately built QEMU peer with 1 KiB socket buffers, waits until the
+host response has begun and made progress while the peer deliberately does not
+read it, and issues a confirmed abort. QEMU teardown produces one terminal
+`write_failed` event after the progress events; the abort still publishes its
+immutable archive, removes the workspace, quits, and reaps the QEMU child within
+the bounded test deadline. Neither scenario uses network, Codex, compilation,
+paid review, production telemetry, or live experiment state.
+
 ### Recorded disposable cross-run bootstrap acceptance
 
 From the repository root, the exact race-enabled command is:
@@ -325,9 +345,8 @@ state is used.
 ## Operational risks
 
 The highest risks are durable archive compatibility, fail-closed provenance,
-single-reader duplex serial behavior during large nested responses, generation
-transition semantics beyond the first completed gate, and the lack of a complete
-disposable live TUI/command process run. The terminal reader's unsafe
+real-image candidate behavior, and the lack of a complete disposable live
+TUI/command process run. The terminal reader's unsafe
 forced-cancellation path is avoided by application-owned graceful shutdown and
 covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
 can still use its upstream forced path after an internal renderer/input error or

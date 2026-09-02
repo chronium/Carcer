@@ -432,6 +432,206 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	}
 }
 
+func TestRunnerAbortsDuringBlockedLargeHostResponse(t *testing.T) {
+	t.Setenv("CODEXOS_DISPOSABLE_QEMU_LIFECYCLE", "large-shutdown")
+	processRecords := t.TempDir()
+	t.Setenv("CODEXOS_DISPOSABLE_PROCESS_RECORDS", processRecords)
+	qemuExecutable := buildDisposableRunnerQEMU(t)
+	runDirectory, err := os.MkdirTemp("/tmp", "co-large-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runDirectory) })
+	initialISO := filepath.Join(t.TempDir(), "initial.iso")
+	if err := os.WriteFile(initialISO, []byte("large-transfer initial image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	providedAssets := filepath.Join(t.TempDir(), "assets")
+	bulkAsset := filepath.Join(providedAssets, "bulk")
+	if err := os.MkdirAll(bulkAsset, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, store.MaxProvidedAssetReadBytes)
+	for index := range payload {
+		payload[index] = byte(index)
+	}
+	if err := os.WriteFile(filepath.Join(bulkAsset, "payload.bin"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	input, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer inputWriter.Close()
+	var output synchronizedBuffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- runWithIOConfigured(ctx, Options{
+			RunDirectory: runDirectory, InitialISO: initialISO, ProvidedAssets: providedAssets,
+		}, input, &output, runnerConfiguration{
+			live: experiment.LiveRunOptions{
+				QEMUExecutable: qemuExecutable, HardwareProfile: qemu.TestHardwareProfile,
+				ReadyTimeout: 3 * time.Second,
+			},
+		})
+	}()
+
+	eventPath := filepath.Join(runDirectory, observability.EventLogFilename)
+	started := waitForDisposableEvent(t, cancel, inputWriter, result, eventPath, func(event disposableEvent) bool {
+		return event.Event == "serial_protocol_write" && event.Data["connection"] == "active" &&
+			event.Data["request_id"] == float64(1) && event.Data["write_kind"] == "host_response" &&
+			event.Data["phase"] == "write_started"
+	})
+	if started.Data["total_bytes"] != float64(store.MaxProvidedAssetReadBytes+20) {
+		stopErr := stopDisposableRunner(cancel, inputWriter, result)
+		t.Fatalf("large host-response bytes = %v, want %d; stop runner: %v", started.Data["total_bytes"], store.MaxProvidedAssetReadBytes+20, stopErr)
+	}
+	markers, err := filepath.Glob(filepath.Join(processRecords, "qemu-large-response-requested-*.marker"))
+	if err != nil || len(markers) != 1 {
+		stopErr := stopDisposableRunner(cancel, inputWriter, result)
+		t.Fatalf("large-response request markers = %v, %v; stop runner: %v", markers, err, stopErr)
+	}
+
+	abortStarted := time.Now()
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 0 aborted.")
+	if elapsed := time.Since(abortStarted); elapsed > 10*time.Second {
+		stopErr := stopDisposableRunner(cancel, inputWriter, result)
+		t.Fatalf("abort during large host response took %s; stop runner: %v", elapsed, stopErr)
+	}
+	sendDisposableCommand(t, cancel, inputWriter, result, "quit\n")
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("large-response runner failed: %v\n%s", err, output.String())
+		}
+	case <-time.After(15 * time.Second):
+		stopErr := stopDisposableRunner(cancel, inputWriter, result)
+		t.Fatalf("large-response runner did not stop: %v\n%s", stopErr, output.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("large-response runner exceeded acceptance deadline: %v", ctx.Err())
+	}
+	assertDisposableProcessesStopped(t, processRecords, 1)
+
+	events := readDisposableEvents(t, eventPath)
+	phases := make([]string, 0, 3)
+	for _, event := range events {
+		if event.Event == "serial_protocol_write" && event.Data["connection"] == "active" &&
+			event.Data["request_id"] == float64(1) && event.Data["write_kind"] == "host_response" {
+			if phase, ok := event.Data["phase"].(string); ok {
+				phases = append(phases, phase)
+			}
+		}
+	}
+	if len(phases) < 3 || phases[0] != "write_started" || phases[len(phases)-1] != "write_failed" {
+		t.Fatalf("large host-response write phases = %v", phases)
+	}
+	for _, phase := range phases[1 : len(phases)-1] {
+		if phase != "write_progress" {
+			t.Fatalf("large host-response write phases = %v", phases)
+		}
+	}
+	loaded, err := experiment.NewCodexOSRun(runDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := loaded.InspectGeneration(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.Outcome != "aborted" || archive.Transition != "initial" {
+		t.Fatalf("large-response abort archive = %#v", archive)
+	}
+	workspaces, err := filepath.Glob(filepath.Join(runDirectory, ".generation-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 0 {
+		t.Fatalf("large-response runner left generation workspaces: %v", workspaces)
+	}
+}
+
+type disposableEvent struct {
+	Event string         `json:"event"`
+	Data  map[string]any `json:"data"`
+}
+
+func waitForDisposableEvent(
+	t *testing.T,
+	cancel context.CancelFunc,
+	input *os.File,
+	result <-chan error,
+	path string,
+	match func(disposableEvent) bool,
+) disposableEvent {
+	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, event := range readDisposableEventsIfAvailable(t, path) {
+			if match(event) {
+				return event
+			}
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("runner stopped before expected event: %v", err)
+		case <-ticker.C:
+		case <-timer.C:
+			stopErr := stopDisposableRunner(cancel, input, result)
+			t.Fatalf("runner did not record expected event: %v", stopErr)
+		}
+	}
+}
+
+func readDisposableEvents(t *testing.T, path string) []disposableEvent {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decodeDisposableEvents(t, contents)
+}
+
+func readDisposableEventsIfAvailable(t *testing.T, path string) []disposableEvent {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decodeDisposableEvents(t, contents)
+}
+
+func decodeDisposableEvents(t *testing.T, contents []byte) []disposableEvent {
+	t.Helper()
+	lines := bytes.Split(contents, []byte{'\n'})
+	if len(contents) != 0 && contents[len(contents)-1] != '\n' {
+		lines = lines[:len(lines)-1]
+	}
+	events := make([]disposableEvent, 0, len(lines))
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		var event disposableEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode disposable event: %v\n%s", err, line)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
 func sendDisposableCommand(t *testing.T, cancel context.CancelFunc, input *os.File, result <-chan error, command string) {
 	t.Helper()
 	if _, err := io.WriteString(input, command); err != nil {
