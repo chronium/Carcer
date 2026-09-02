@@ -158,5 +158,7 @@ process-free decision model; QEMU and fresh-session startup are not yet wired.
 `internal/operator` defines the Cobra startup surface and validates the same
 opening-mode, Git-provenance, cross-run inheritance, and display-mode
 relationships as the Python entry point before invoking a concrete runner.
+The same package makes untrusted terminal controls inert and parses the exact
+plain-console `ask TEXT` form without changing the question body.
 Operator commands, terminal detection, runtime construction, and `cmd/codexos`
 remain separate, so Python is still the only operational entry point.
