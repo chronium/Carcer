@@ -465,6 +465,43 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	}
 }
 
+func TestGenerationSessionRetriesOrdinaryTerminalFailureOnSameThread(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation.json")
+	setGenerationHelper(t, "continuation-failed", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	defer session.Close()
+	if _, err := session.RunInitialTurn(); err != nil {
+		t.Fatal(err)
+	}
+	pid, ok := session.ProcessPID()
+	if !ok {
+		t.Fatal("session process is unavailable before failed continuation")
+	}
+	threadID := session.ThreadID()
+	if _, err := session.RunContinuationTurn(); err == nil || !strings.Contains(err.Error(), "Codex turn failed") {
+		t.Fatalf("ordinary failed continuation error = %v", err)
+	}
+	if !session.Healthy() {
+		t.Fatal("ordinary terminal failure poisoned the reusable session")
+	}
+	result, err := session.RunContinuationTurn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TurnStatus != "completed" {
+		t.Fatalf("retry result = %#v", result)
+	}
+	if got, ok := session.ProcessPID(); !ok || got != pid {
+		t.Fatalf("retry process = %d, %v; want %d", got, ok, pid)
+	}
+	if got := session.ThreadID(); got != threadID {
+		t.Fatalf("retry thread = %q, want %q", got, threadID)
+	}
+}
+
 func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.T) {
 	recordPath := filepath.Join(t.TempDir(), "generation-interview.json")
 	setGenerationHelper(t, "interview", recordPath)
@@ -1579,7 +1616,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "worker-success" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "worker-success" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -1659,6 +1696,9 @@ func runGenerationFakeAppServer() {
 	}
 	if mode == "resume-failed" {
 		turnCount = 2
+	}
+	if mode == "continuation-failed" {
+		turnCount = 4
 	}
 	for index := 0; index < turnCount; index++ {
 		turn := expect("turn/start")
@@ -1757,7 +1797,7 @@ func runGenerationFakeAppServer() {
 			}
 			continue
 		}
-		if (mode == "planning-failed" && index == 0) || (mode == "resume-failed" && index == 1) {
+		if (mode == "planning-failed" && index == 0) || (mode == "resume-failed" && index == 1) || (mode == "continuation-failed" && index == 2) {
 			send(map[string]any{"method": "turn/completed", "params": map[string]any{
 				"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{}, "status": "failed", "error": map[string]any{"message": "fake planning failure"}},
 			}})

@@ -1303,6 +1303,7 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	}, threadID, turnID, "")
 	status, finalMessage, responsePresent, waitErr := s.waitForTurn(turnContext, threadID, turnID, phase)
 	if waitErr != nil {
+		terminalFailure := status == "failed"
 		s.mu.Lock()
 		s.lastStatus = "failed"
 		s.mu.Unlock()
@@ -1315,7 +1316,12 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 		if interview != nil {
 			s.finishInterviewTurn(turnID, nil, "failed")
 		}
-		s.markUnhealthy()
+		// A terminal failed status is an ordinary recoverable turn failure after
+		// planning. Protocol, transport, and planning failures still poison the
+		// session because its continuity or private evidence is no longer safe.
+		if phase == "planning" || !terminalFailure {
+			s.markUnhealthy()
+		}
 		if interview != nil {
 			s.recordInterviewTurnFailure(turnNumber, interview.number, startedAt)
 		} else {
@@ -1463,7 +1469,7 @@ func (s *GenerationSession) waitForTurn(ctx context.Context, threadID, turnID, p
 			ok = true
 		}
 		if status == "failed" {
-			return "", "", false, &GenerationWorkerError{Reason: "Codex turn failed: " + shortJSON(turn["error"])}
+			return "failed", "", false, &GenerationWorkerError{Reason: "Codex turn failed: " + shortJSON(turn["error"])}
 		}
 		return status, finalMessage, ok, nil
 	}
