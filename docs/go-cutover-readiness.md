@@ -127,7 +127,10 @@ or QEMU helpers. A process-free runner integration reopens an immutable aborted
 gate through the real plain frontend and verifies observable startup-before-stop
 ordering. The real Linux pseudo-terminal restoration regression passes 100
 consecutive race-enabled runs for both direct application shutdown and caller
-context cancellation. Tests cover exact bytes,
+context cancellation. A separately built `cmd/codexos` executable also reopens
+a disposable archived gate through both the plain frontend and a real
+pseudo-terminal, exits cleanly on `quit` or `SIGTERM`, preserves event order,
+and restores terminal state. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -165,7 +168,9 @@ Required remaining work is operational verification rather than another missing
 owner layer: run and record the complete disposable Go-binary scenarios for new
 run, live planning/build/finish, abort, gate resume, continue/rollback, cross-run
 bootstrap, large-transfer shutdown, and both frontends; and rerun the complete
-reference suite when the documented TCG candidate timing test can succeed. Go `ReadFrame` relies on
+reference suite when the documented TCG candidate timing test can succeed. The
+two frontends are proven at an archived gate, but still need to be exercised as
+part of the complete live-generation scenarios. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -219,6 +224,21 @@ focuses, operator actions, and token roles to fixed fallback values. Python
 passes those trusted strings through unchanged. Current harness catalogs and
 event producers use the preserved values; normalization prevents malformed
 telemetry from creating unbounded label cardinality.
+
+### Recorded disposable binary gate acceptance
+
+From the repository root, the exact race-enabled command is:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./cmd/codexos -run '^TestCodexOSBinaryOperatesAtDisposableGate$' -count=20 -timeout=240s
+```
+
+`cmd/codexos/acceptance_linux_test.go` builds the actual command rather than
+re-entering a Go test helper. Each case creates a fresh temporary aborted archive
+with `experiment.WriteAbortedArchive` and `qemu.TestHardwareProfile`. Plain mode
+receives `quit` over a pipe. TUI mode owns a fresh `/dev/ptmx` pair, receives
+`SIGTERM` only after raw mode is observed, and must restore the original termios.
+Neither case starts QEMU, Codex, a build, telemetry, or live state.
 
 ## Operational risks
 
