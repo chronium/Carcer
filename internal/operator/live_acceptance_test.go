@@ -313,14 +313,16 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := featureStore.Create(0, "Pending inherited capability", "Keep this request pending."); err != nil {
+	pending, err := featureStore.Create(0, "Pending inherited capability", "Keep this request pending.")
+	if err != nil {
 		t.Fatal(err)
 	}
 	approved, err := featureStore.Create(0, "Approved inherited capability", "Preserve this decision.")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := featureStore.Approve(approved.ID); err != nil {
+	approved, err = featureStore.Approve(approved.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -384,6 +386,7 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	}
 	if bootstrap == nil || bootstrap.SourceRun != "source" || bootstrap.SourceGeneration != 0 ||
 		bootstrap.Handoff != "Inherited handoff λ.\n" || bootstrap.GitBaseRef != "source/generation-0000" ||
+		bootstrap.GitBaseCommit != records[0].Commit ||
 		len(bootstrap.InheritedRequestIDs) != 2 || bootstrap.InheritedRequestIDs[0] != 1 || bootstrap.InheritedRequestIDs[1] != 2 {
 		t.Fatalf("destination bootstrap = %#v", bootstrap)
 	}
@@ -395,7 +398,7 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 2 || requests[0].Status != store.FeaturePending || requests[1].Status != store.FeatureApproved {
+	if len(requests) != 2 || requests[0] != pending || requests[1] != approved {
 		t.Fatalf("destination feature requests = %#v", requests)
 	}
 	loaded, err := experiment.NewCodexOSRun(destinationRun)
@@ -419,6 +422,13 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	}
 	if len(workspaces) != 0 {
 		t.Fatalf("inherited runner left generation workspaces: %v", workspaces)
+	}
+	staging, err := filepath.Glob(filepath.Join(root, ".cross-run-bootstrap-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staging) != 0 {
+		t.Fatalf("inherited runner left bootstrap staging directories: %v", staging)
 	}
 }
 
