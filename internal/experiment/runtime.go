@@ -195,6 +195,13 @@ func (r *CodexOSRun) PendingGenerationFinish() (*PendingGenerationFinish, bool) 
 	return &pending, true
 }
 
+// GenerationFinishFrozen reports the gate invariant needed to retain a
+// completed generation's Codex thread for a read-only exit interview. The
+// caller separately verifies that it still owns this generation number.
+func (r *CodexOSRun) GenerationFinishFrozen() bool {
+	return r != nil && r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+}
+
 // ArchivedGenerations loads every generation archive in this run.  Individual
 // archives are validated, but ancestry is intentionally checked by the caller
 // through ValidateArchivedHistory or ReopenAtGate.

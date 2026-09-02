@@ -48,6 +48,9 @@ func TestCompletedArchiveGateAndContinue(t *testing.T) {
 	if !ok || pending.HandoffMessage != "handoff zero λ" || !bytes.Equal(pending.SourceSnapshot, snapshot) {
 		t.Fatalf("pending = %#v, %t", pending, ok)
 	}
+	if !runState.GenerationFinishFrozen() {
+		t.Fatal("completed gate did not expose its frozen finish invariant")
+	}
 	if err := runState.ContinueGeneration(); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +65,9 @@ func TestCompletedArchiveGateAndContinue(t *testing.T) {
 	}
 	if _, ok := runState.PendingGenerationFinish(); ok {
 		t.Fatal("continue retained selected successor")
+	}
+	if runState.GenerationFinishFrozen() {
+		t.Fatal("running generation still reported a frozen finish")
 	}
 }
 
@@ -91,6 +97,9 @@ func TestAbortedGateHasNoSuccessor(t *testing.T) {
 	}
 	if _, ok := runState.PendingGenerationFinish(); ok {
 		t.Fatal("aborted gate selected a successor")
+	}
+	if runState.GenerationFinishFrozen() {
+		t.Fatal("aborted gate reported a frozen completed finish")
 	}
 	if err := runState.ContinueGeneration(); err == nil || !strings.Contains(err.Error(), "no selected successor") {
 		t.Fatalf("continue error = %v", err)

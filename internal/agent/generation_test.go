@@ -55,6 +55,7 @@ type generationTestRuntime struct {
 	callNotify    chan string
 	listStarted   chan struct{}
 	listRelease   chan struct{}
+	finishFrozen  bool
 }
 
 func newGenerationTestRuntime(t *testing.T) *generationTestRuntime {
@@ -151,6 +152,7 @@ func (r *generationTestRuntime) GenerationState() string {
 	}
 	return "awaiting_next_generation"
 }
+func (r *generationTestRuntime) GenerationFinishFrozen() bool { return r.finishFrozen }
 
 func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	runtime := newGenerationTestRuntime(t)
@@ -438,6 +440,334 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 		t.Fatal("private planning response leaked into events.jsonl")
 	}
 	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-interview.json")
+	setGenerationHelper(t, "interview", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	activity := observability.NewActivityStream()
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ActivityStream: activity, StopTimeout: time.Second,
+	})
+	initial, err := session.RunInitialTurn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.FinalMessage != "Implementation complete." {
+		t.Fatalf("initial result = %#v", initial)
+	}
+	pid, ok := session.ProcessPID()
+	if !ok {
+		t.Fatal("generation app-server has no live process")
+	}
+	threadID := session.ThreadID()
+	if err := session.RetainForExitInterview(); err == nil || !strings.Contains(err.Error(), "not frozen") {
+		t.Fatalf("retain before gate error = %v", err)
+	}
+	runtime.running = false
+	if err := session.RetainForExitInterview(); err == nil || !strings.Contains(err.Error(), "not frozen") {
+		t.Fatalf("retain without successor error = %v", err)
+	}
+	runtime.finishFrozen = true
+	if err := session.RetainForExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	if !session.ExitInterviewAvailable() || session.Mode() != GenerationModeRetainedAtGate {
+		t.Fatalf("retained mode = %q, available = %v", session.Mode(), session.ExitInterviewAvailable())
+	}
+	if _, err := session.RunContinuationTurn(); err == nil || !strings.Contains(err.Error(), "unavailable after finish") {
+		t.Fatalf("ordinary turn after retain error = %v", err)
+	}
+	if err := session.BeginExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.BeginExitInterview(); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("duplicate begin error = %v", err)
+	}
+	marker := "EXIT-INTERVIEW-QUESTION-MUST-STAY-PRIVATE"
+	first, err := session.RunExitInterviewTurn(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := session.RunExitInterviewTurn("Why this design?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FinalMessage != "Retrospective answer." || first.Summary != "Exit interview turn completed." || second.FinalMessage != "Second retrospective answer." {
+		t.Fatalf("interview results = %#v, %#v", first, second)
+	}
+	if currentPID, live := session.ProcessPID(); !live || currentPID != pid || session.ThreadID() != threadID {
+		t.Fatalf("interview changed process/thread: pid=(%d,%v), thread=%q", currentPID, live, session.ThreadID())
+	}
+	snapshot, ok := session.ExitInterviewTranscript()
+	if !ok || len(snapshot.Turns) != 2 {
+		t.Fatalf("interview snapshot = %#v, %v", snapshot, ok)
+	}
+	if snapshot.Metadata.Run != filepath.Base(runtime.root) || snapshot.Metadata.Generation != runtime.generation || snapshot.Metadata.AgentContractVersion != AgentContractVersion {
+		t.Fatalf("interview metadata = %#v", snapshot.Metadata)
+	}
+	if snapshot.Turns[0].Question != marker || snapshot.Turns[1].Question != "Why this design?" ||
+		strings.Join(snapshot.Turns[0].ReasoningSummaries, "|") != "First explicit summary.|Then another." ||
+		snapshot.Turns[0].Response == nil || *snapshot.Turns[0].Response != "Retrospective answer." ||
+		snapshot.Turns[1].Response == nil || *snapshot.Turns[1].Response != "Second retrospective answer." {
+		t.Fatalf("interview turns = %#v", snapshot.Turns)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", snapshot), "PRIVATE RAW") {
+		t.Fatalf("raw reasoning entered transcript: %#v", snapshot)
+	}
+	if len(runtime.calls) != 2 {
+		t.Fatalf("interview invoked guest tools: %#v", runtime.calls)
+	}
+	waitForReviewerFile(t, recordPath)
+	record := readReviewerJSON(t, recordPath)
+	messages := record["messages"].([]any)
+	turns := make([]map[string]any, 0, 4)
+	for _, value := range messages {
+		message, valid := value.(map[string]any)
+		if valid && message["method"] == "turn/start" {
+			turns = append(turns, message["params"].(map[string]any))
+		}
+	}
+	if len(turns) != 4 {
+		t.Fatalf("turn/start messages = %#v", turns)
+	}
+	for _, turn := range turns[2:] {
+		if turn["threadId"] != threadID || turn["permissions"] != interviewPermissionProfile {
+			t.Fatalf("interview turn identity/policy = %#v", turn)
+		}
+		if roots, valid := turn["runtimeWorkspaceRoots"].([]any); !valid || len(roots) != 0 {
+			t.Fatalf("interview workspace roots = %#v", turn["runtimeWorkspaceRoots"])
+		}
+		if _, present := turn["dynamicTools"]; present {
+			t.Fatalf("interview turn exposed dynamic tools: %#v", turn)
+		}
+	}
+	prompt := turns[2]["input"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(prompt, "read-only exit interview") || !strings.Contains(prompt, "Operator question:\n"+marker) {
+		t.Fatalf("interview prompt = %q", prompt)
+	}
+	serverResponses := record["messages"].([]any)
+	denials := 0
+	for _, value := range serverResponses {
+		message, valid := value.(map[string]any)
+		if !valid || message["method"] != nil || message["result"] == nil {
+			continue
+		}
+		result, valid := message["result"].(map[string]any)
+		if valid && result["success"] == false {
+			denials++
+		}
+	}
+	if denials != 2 {
+		t.Fatalf("interview tool denials = %d, record = %#v", denials, record)
+	}
+	events, err := os.ReadFile(runtime.eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(events, []byte(marker)) || bytes.Contains(events, []byte("Retrospective answer.")) {
+		t.Fatalf("interview text leaked into events: %s", events)
+	}
+	questionCount := 0
+	for _, event := range activity.Drain() {
+		if event.Kind == observability.ActivityExitInterviewQuestion {
+			questionCount++
+		}
+	}
+	if questionCount != 2 {
+		t.Fatalf("exit interview question activities = %d", questionCount)
+	}
+	if err := session.EndExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	if session.Mode() != GenerationModeClosed || generationProcessAlive(pid) {
+		t.Fatalf("ended interview mode/process = %q/%v", session.Mode(), generationProcessAlive(pid))
+	}
+}
+
+func TestGenerationWorkerRejectsConcurrentRunAndAlwaysClosesSession(t *testing.T) {
+	holdRecord := filepath.Join(t.TempDir(), "generation-worker-hold.json")
+	setGenerationHelper(t, "hold", holdRecord)
+	runtime := newGenerationTestRuntime(t)
+	worker := NewGenerationWorker(GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := worker.RunGeneration(ctx, runtime)
+		result <- err
+	}()
+	waitForReviewerFile(t, holdRecord)
+	hold := readReviewerJSON(t, holdRecord)
+	pid := int(hold["pid"].(float64))
+	if _, err := worker.RunGeneration(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("concurrent worker error = %v", err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled generation worker unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled generation worker did not return")
+	}
+	if generationProcessAlive(pid) {
+		t.Fatalf("cancelled worker left app-server process %d alive", pid)
+	}
+
+	successRecord := filepath.Join(t.TempDir(), "generation-worker-success.json")
+	setGenerationHelper(t, "worker-success", successRecord)
+	runtime = newGenerationTestRuntime(t)
+	completed, err := worker.RunGeneration(context.Background(), runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.FinalMessage != "Implementation complete." {
+		t.Fatalf("worker result = %#v", completed)
+	}
+	waitForReviewerFile(t, successRecord)
+	success := readReviewerJSON(t, successRecord)
+	successPID := int(success["pid"].(float64))
+	if generationProcessAlive(successPID) {
+		t.Fatalf("completed worker left app-server process %d alive", successPID)
+	}
+}
+
+func TestGenerationSessionClosePreservesPartialInterviewWithoutResponse(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-interview-hold.json")
+	setGenerationHelper(t, "interview-hold", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	if _, err := session.RunInitialTurn(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.running = false
+	runtime.finishFrozen = true
+	if err := session.RetainForExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.BeginExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := session.ProcessPID()
+	turnResult := make(chan error, 1)
+	go func() {
+		_, err := session.RunExitInterviewTurn("Explain the interrupted work.")
+		turnResult <- err
+	}()
+	waitForReviewerFile(t, recordPath)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, ok := session.ExitInterviewTranscript()
+		if ok && len(snapshot.Turns) == 1 && strings.Join(snapshot.Turns[0].ReasoningSummaries, "|") == "Partial visible summary." {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partial reasoning did not reach transcript: %#v", snapshot)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-turnResult:
+		if err == nil {
+			t.Fatal("closed active interview unexpectedly completed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active interview did not return after close")
+	}
+	snapshot, ok := session.ExitInterviewTranscript()
+	if !ok || len(snapshot.Turns) != 1 {
+		t.Fatalf("partial transcript = %#v, %v", snapshot, ok)
+	}
+	turn := snapshot.Turns[0]
+	if turn.Status != "failed" || turn.Response != nil || strings.Join(turn.ReasoningSummaries, "|") != "Partial visible summary." {
+		t.Fatalf("closed partial turn = %#v", turn)
+	}
+	events, err := os.ReadFile(runtime.eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(events, []byte(`"event":"exit_interview_ended"`)) != 1 || !bytes.Contains(events, []byte(`"result":"closed"`)) {
+		t.Fatalf("interview close events = %s", events)
+	}
+	if session.Mode() != GenerationModeClosed || generationProcessAlive(pid) {
+		t.Fatalf("closed interview mode/process = %q/%v", session.Mode(), generationProcessAlive(pid))
+	}
+}
+
+func TestGenerationSessionInterruptsInterviewAndReturnsToFrozenGate(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-interview-interrupt.json")
+	setGenerationHelper(t, "interview-interrupt", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	if _, err := session.RunInitialTurn(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.running = false
+	runtime.finishFrozen = true
+	if err := session.RetainForExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.BeginExitInterview(); err != nil {
+		t.Fatal(err)
+	}
+	turnResult := make(chan struct {
+		result GenerationResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := session.RunExitInterviewTurn("Why was this unfinished?")
+		turnResult <- struct {
+			result GenerationResult
+			err    error
+		}{result, err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	turnStarted := false
+	for !turnStarted && time.Now().Before(deadline) {
+		session.mu.Lock()
+		turnStarted = session.turnID != ""
+		session.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	if !turnStarted {
+		t.Fatal("interview turn did not become active")
+	}
+	if err := session.InterruptTurn(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-turnResult:
+		if outcome.err != nil || outcome.result.TurnStatus != "interrupted" || outcome.result.Summary != "Exit interview turn interrupted." {
+			t.Fatalf("interrupted interview result = %#v, %v", outcome.result, outcome.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupted interview did not return")
+	}
+	if session.Mode() != GenerationModeRetainedAtGate || !session.ExitInterviewAvailable() {
+		t.Fatalf("post-interrupt mode = %q, available = %v", session.Mode(), session.ExitInterviewAvailable())
+	}
+	snapshot, ok := session.ExitInterviewTranscript()
+	if !ok || len(snapshot.Turns) != 1 {
+		t.Fatalf("interrupted transcript = %#v, %v", snapshot, ok)
+	}
+	turn := snapshot.Turns[0]
+	if turn.Status != "interrupted" || turn.Response != nil || strings.Join(turn.ReasoningSummaries, "|") != "Interrupted visible summary." {
+		t.Fatalf("interrupted transcript turn = %#v", turn)
+	}
+	if err := session.EndExitInterview(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1210,7 +1540,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "worker-success" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -1273,6 +1603,15 @@ func runGenerationFakeAppServer() {
 		select {}
 	}
 	turnCount := 2
+	if mode == "interview" {
+		turnCount = 4
+	}
+	if mode == "interview-hold" {
+		turnCount = 3
+	}
+	if mode == "interview-interrupt" {
+		turnCount = 3
+	}
 	if mode == "interrupt" || mode == "planning-interrupt" || mode == "resume-failed" {
 		turnCount = 3
 	}
@@ -1286,9 +1625,25 @@ func runGenerationFakeAppServer() {
 		turn := expect("turn/start")
 		turnID := fmt.Sprintf("generation-turn-%d-%d", os.Getpid(), index)
 		respond(turn, map[string]any{"turn": map[string]any{"id": turnID}})
+		if mode == "interview-hold" && index == 2 {
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": map[string]any{
+					"id": "reasoning-held", "type": "reasoning", "summary": []any{"Partial visible summary."},
+				},
+			}})
+			writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
+			select {}
+		}
+		if mode == "interview-interrupt" && index == 2 {
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": map[string]any{
+					"id": "reasoning-interrupted", "type": "reasoning", "summary": []any{"Interrupted visible summary."},
+				},
+			}})
+		}
 		tool := "list"
 		arguments := map[string]any{}
-		if (mode == "success" && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
+		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			tool = "write"
 			arguments = map[string]any{"path": "seed/kernel.c", "offset": 0, "data": "x"}
 		}
@@ -1313,6 +1668,9 @@ func runGenerationFakeAppServer() {
 			}
 			if mode == "resume-failed" {
 				interruptAt = 0
+			}
+			if mode == "interview-interrupt" {
+				interruptAt = 2
 			}
 			if index == interruptAt && response["method"] == "turn/interrupt" {
 				respond(response, map[string]any{})
@@ -1341,6 +1699,9 @@ func runGenerationFakeAppServer() {
 		if mode == "resume-failed" {
 			interruptAt = 0
 		}
+		if mode == "interview-interrupt" {
+			interruptAt = 2
+		}
 		if index == interruptAt {
 			if !interrupted {
 				interrupt := expect("turn/interrupt")
@@ -1367,8 +1728,22 @@ func runGenerationFakeAppServer() {
 		if plan := os.Getenv(generationHelperPlan); plan != "" && ((index == 0 && mode != "resume-failed") || (mode == "planning-interrupt" && index == 1)) {
 			text = plan
 		}
-		if (mode == "success" && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
+		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			text = "Implementation complete."
+		}
+		if mode == "interview" && index == 2 {
+			text = "Retrospective answer."
+			send(map[string]any{"method": "item/reasoning/summaryTextDelta", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "itemId": "reasoning-interview", "summaryIndex": 0, "delta": "First explicit ",
+			}})
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": map[string]any{
+					"id": "reasoning-interview", "type": "reasoning", "summary": []any{"First explicit summary.", "Then another."}, "content": []any{"PRIVATE RAW REASONING"},
+				},
+			}})
+		}
+		if mode == "interview" && index == 3 {
+			text = "Second retrospective answer."
 		}
 		if mode == "interrupt" && index == 2 {
 			text = "Continuation complete."
@@ -1380,6 +1755,9 @@ func runGenerationFakeAppServer() {
 		send(map[string]any{"method": "item/completed", "params": map[string]any{
 			"threadId": threadID, "turnId": turnID, "item": item,
 		}})
+		if mode == "worker-success" && index == 1 {
+			writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
+		}
 		send(map[string]any{"method": "turn/completed", "params": map[string]any{
 			"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"},
 		}})

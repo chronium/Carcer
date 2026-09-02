@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ const (
 
 	implementorPermissionProfile = "codexos-implementor"
 	planningPermissionProfile    = "codexos-planning"
+	interviewPermissionProfile   = "codexos-interview"
 	maxListRequestsOutputBytes   = 16 * 1024 * 1024
 )
 
@@ -215,6 +217,13 @@ type GenerationStateRuntime interface {
 	GenerationState() string
 }
 
+// GenerationGateRuntime is the narrow trusted boundary used before retaining
+// a completed generation's Codex thread. A state name alone is insufficient:
+// the selected successor and handoff must already be frozen by the runtime.
+type GenerationGateRuntime interface {
+	GenerationFinishFrozen() bool
+}
+
 // GenerationResult is the outcome of one planning, implementation, or
 // continuation turn. FinalMessage is empty when the app-server did not return
 // an agent message.
@@ -233,8 +242,10 @@ type CodexGenerationResult = GenerationResult
 type GenerationSessionMode string
 
 const (
-	GenerationMode       GenerationSessionMode = "generation"
-	GenerationModeClosed GenerationSessionMode = "closed"
+	GenerationMode               GenerationSessionMode = "generation"
+	GenerationModeRetainedAtGate GenerationSessionMode = "retained_at_gate"
+	GenerationModeInterviewTurn  GenerationSessionMode = "interview_turn"
+	GenerationModeClosed         GenerationSessionMode = "closed"
 )
 
 // GenerationWorkerError reports a failed implementor/planning consultation.
@@ -345,6 +356,10 @@ type GenerationSession struct {
 	generation               uint64
 	generationSet            bool
 	availableOrder           []string
+	interviewStarted         bool
+	interviewEnding          bool
+	interviewTurnNumber      int
+	interviewTranscript      *provenance.ExitInterviewTranscript
 }
 
 // NewGenerationSession constructs an idle session. It does not start Codex.
@@ -403,6 +418,63 @@ func NewImplementorSession(runtime GenerationRuntime, options ImplementorSession
 	return NewGenerationSession(runtime, options)
 }
 
+// GenerationWorker runs one fresh generation session and always retires it.
+// It is intentionally single-use-at-a-time so concurrent callers cannot
+// accidentally create multiple implementors for one worker owner.
+type GenerationWorker struct {
+	options GenerationSessionOptions
+	mu      sync.Mutex
+	running bool
+}
+
+// CodexGenerationWorker retains the Python owner's descriptive name.
+type CodexGenerationWorker = GenerationWorker
+
+func NewGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
+	return &GenerationWorker{options: options}
+}
+
+func NewCodexGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
+	return NewGenerationWorker(options)
+}
+
+func (w *GenerationWorker) RunGeneration(ctx context.Context, runtime GenerationRuntime) (result GenerationResult, resultErr error) {
+	if w == nil {
+		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker is nil"}
+	}
+	if ctx == nil {
+		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker context is nil"}
+	}
+	w.mu.Lock()
+	if w.running {
+		w.mu.Unlock()
+		return GenerationResult{}, &GenerationWorkerError{Reason: "Codex generation worker is already running"}
+	}
+	w.running = true
+	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		w.running = false
+		w.mu.Unlock()
+	}()
+
+	session := NewGenerationSession(runtime, w.options)
+	stopCancellation := context.AfterFunc(ctx, session.Cancel)
+	defer stopCancellation()
+	defer func() {
+		closeErr := session.Close()
+		if resultErr == nil {
+			resultErr = closeErr
+		} else if closeErr != nil {
+			resultErr = fmt.Errorf("%w; generation session close also failed: %v", resultErr, closeErr)
+		}
+	}()
+	if err := session.Start(ctx); err != nil {
+		return GenerationResult{}, err
+	}
+	return session.RunInitialTurn()
+}
+
 func closedChannel() chan struct{} {
 	channel := make(chan struct{})
 	close(channel)
@@ -456,6 +528,149 @@ func (s *GenerationSession) Mode() GenerationSessionMode {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mode
+}
+
+// ExitInterviewAvailable reports whether the healthy generation thread is
+// retained at a frozen completed-generation gate.
+func (s *GenerationSession) ExitInterviewAvailable() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.healthy && !s.interviewEnding && s.mode == GenerationModeRetainedAtGate
+}
+
+// RetainForExitInterview moves a completed generation's healthy Codex thread
+// into the gate-only state. It fails closed unless the runtime confirms that
+// the exact successor and handoff have already been frozen.
+func (s *GenerationSession) RetainForExitInterview() error {
+	if s == nil {
+		return &GenerationWorkerError{Reason: "generation session is nil"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.healthy || !s.started {
+		return &GenerationWorkerError{Reason: "Codex generation session is unusable"}
+	}
+	if s.mode != GenerationMode {
+		return &GenerationWorkerError{Reason: "Codex session is not completing a generation"}
+	}
+	if s.turnID != "" || s.turnStarting || s.initialActive || s.activeTools != 0 {
+		return &GenerationWorkerError{Reason: "Codex generation turn is still active"}
+	}
+	if !s.generationFrozenAtGate(s.generation) {
+		return &GenerationWorkerError{Reason: "completed generation is not frozen at its gate"}
+	}
+	s.mode = GenerationModeRetainedAtGate
+	return nil
+}
+
+// BeginExitInterview starts transcript capture without starting another
+// process or thread. Interview content remains outside generation state.
+func (s *GenerationSession) BeginExitInterview() error {
+	if s == nil {
+		return &GenerationWorkerError{Reason: "generation session is nil"}
+	}
+	s.mu.Lock()
+	if !s.healthy || s.interviewEnding || s.mode != GenerationModeRetainedAtGate {
+		s.mu.Unlock()
+		return &GenerationWorkerError{Reason: "no retained Codex session is available"}
+	}
+	if s.interviewStarted {
+		s.mu.Unlock()
+		return &GenerationWorkerError{Reason: "exit interview is already active"}
+	}
+	run := filepath.Base(filepath.Clean(s.runtime.RunDirectory()))
+	s.interviewStarted = true
+	s.interviewTranscript = provenance.NewExitInterviewTranscript(provenance.ExitInterviewMetadata{
+		Run:                  run,
+		Generation:           s.generation,
+		AgentContractVersion: AgentContractVersion,
+		Model:                s.options.Model,
+		ReasoningEffort:      s.options.ReasoningEffort,
+		ReasoningSummary:     s.options.ReasoningSummary,
+		ServiceTier:          s.options.ServiceTier,
+	})
+	threadID := s.threadID
+	s.mu.Unlock()
+	s.record("exit_interview_started", s.servingProvenance())
+	s.publishRole(observability.ActivityHarness, observability.ActivityExitInterviewStarted, nil, threadID, "", "")
+	return nil
+}
+
+// ExitInterviewTranscript returns an immutable snapshot of the current
+// human-facing transcript, if an interview has been started.
+func (s *GenerationSession) ExitInterviewTranscript() (provenance.ExitInterviewTranscriptSnapshot, bool) {
+	if s == nil {
+		return provenance.ExitInterviewTranscriptSnapshot{}, false
+	}
+	s.mu.Lock()
+	transcript := s.interviewTranscript
+	s.mu.Unlock()
+	if transcript == nil {
+		return provenance.ExitInterviewTranscriptSnapshot{}, false
+	}
+	return transcript.Snapshot(), true
+}
+
+// RunExitInterviewTurn asks one retrospective question on the retained
+// generation thread under the tool-less interview policy.
+func (s *GenerationSession) RunExitInterviewTurn(question string) (GenerationResult, error) {
+	if s == nil {
+		return GenerationResult{}, &GenerationWorkerError{Reason: "generation session is nil"}
+	}
+	if !utf8.ValidString(question) || strings.TrimSpace(question) == "" {
+		return GenerationResult{}, &GenerationWorkerError{Reason: "exit interview question must not be empty"}
+	}
+	s.mu.Lock()
+	if !s.interviewStarted {
+		s.mu.Unlock()
+		return GenerationResult{}, &GenerationWorkerError{Reason: "exit interview has not been started"}
+	}
+	if !s.healthy || s.interviewEnding || s.mode != GenerationModeRetainedAtGate {
+		s.mu.Unlock()
+		return GenerationResult{}, &GenerationWorkerError{Reason: "exit interview session is unavailable"}
+	}
+	if !s.generationFrozenAtGate(s.generation) {
+		s.mu.Unlock()
+		return GenerationResult{}, &GenerationWorkerError{Reason: "completed generation is not frozen at its gate"}
+	}
+	s.mode = GenerationModeInterviewTurn
+	s.interviewTurnNumber++
+	metadata := &interviewTurnInput{number: s.interviewTurnNumber, question: question}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.mode == GenerationModeInterviewTurn && s.healthy {
+			s.mode = GenerationModeRetainedAtGate
+		}
+		s.mu.Unlock()
+	}()
+	return s.runTurnWithInterview(exitInterviewPrompt(question), "interview", metadata)
+}
+
+// EndExitInterview records one terminal interview event and permanently
+// closes the retained Codex session.
+func (s *GenerationSession) EndExitInterview() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if !s.interviewStarted {
+		s.mu.Unlock()
+		return &GenerationWorkerError{Reason: "exit interview is not active"}
+	}
+	if s.turnID != "" || s.turnStarting {
+		s.mu.Unlock()
+		return &GenerationWorkerError{Reason: "exit interview turn is still active"}
+	}
+	s.interviewStarted = false
+	s.interviewEnding = true
+	threadID := s.threadID
+	s.mu.Unlock()
+	s.emitExitInterviewEnded("ended", threadID)
+	return s.Close()
 }
 
 func (s *GenerationSession) ThreadID() string {
@@ -842,7 +1057,16 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 	return s.runTurn(ImplementationPrompt, "implementation")
 }
 
+type interviewTurnInput struct {
+	number   int
+	question string
+}
+
 func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, error) {
+	return s.runTurnWithInterview(prompt, phase, nil)
+}
+
+func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview *interviewTurnInput) (GenerationResult, error) {
 	failBeforeTurn := func(err error) (GenerationResult, error) {
 		if phase == "planning" {
 			return GenerationResult{}, generationFailure(err, s.failPlanningEvidence())
@@ -867,13 +1091,24 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 		s.mu.Unlock()
 		return failBeforeTurn(&GenerationWorkerError{Reason: "Codex generation session is unusable"})
 	}
-	if s.mode != GenerationMode {
+	expectedMode := GenerationMode
+	if interview != nil {
+		expectedMode = GenerationModeInterviewTurn
+	}
+	if s.mode != expectedMode {
 		s.mu.Unlock()
+		if interview != nil {
+			return failBeforeTurn(&GenerationWorkerError{Reason: "Codex session is not in an interview turn"})
+		}
 		return failBeforeTurn(&GenerationWorkerError{Reason: "ordinary Codex generation turns are unavailable after finish"})
 	}
-	if !s.runtime.GenerationRunning() {
+	if interview == nil && !s.runtime.GenerationRunning() {
 		s.mu.Unlock()
 		return failBeforeTurn(&GenerationWorkerError{Reason: "CodexOS generation is not running"})
+	}
+	if interview != nil && !s.generationFrozenAtGate(s.generation) {
+		s.mu.Unlock()
+		return failBeforeTurn(&GenerationWorkerError{Reason: "completed generation is not frozen at its gate"})
 	}
 	if generation, ok := s.runtime.GenerationNumber(); !ok || !s.generationSet || generation != s.generation {
 		s.mu.Unlock()
@@ -916,6 +1151,9 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 	if phase == "planning" {
 		permission = planningPermissionProfile
 		workspaceRoots = []string{}
+	} else if interview != nil {
+		permission = interviewPermissionProfile
+		workspaceRoots = []string{}
 	}
 	s.mu.Unlock()
 	startedAt := time.Now()
@@ -941,7 +1179,11 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 		if phase == "planning" {
 			err = combineGenerationErrors(err, s.failPlanningEvidence())
 		}
-		s.recordTurnFailure(s.nextTurnNumber(), startedAt, phase)
+		if interview != nil {
+			s.recordInterviewTurnFailure(s.nextTurnNumber(), interview.number, startedAt)
+		} else {
+			s.recordTurnFailure(s.nextTurnNumber(), startedAt, phase)
+		}
 		s.clearTurn("failed")
 		return GenerationResult{}, generationError(err)
 	}
@@ -987,17 +1229,38 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 			s.clearTurn("failed")
 			return GenerationResult{}, &GenerationWorkerError{Reason: "Codex generation session closed while starting turn"}
 		}
+		transcript := s.interviewTranscript
 		s.mu.Unlock()
+		if interview != nil {
+			if transcript == nil {
+				s.markUnhealthy()
+				s.recordInterviewTurnFailure(turnNumber, interview.number, startedAt)
+				s.clearTurn("failed")
+				return GenerationResult{}, &GenerationWorkerError{Reason: "exit interview transcript is unavailable"}
+			}
+			if err := transcript.BeginTurn(interview.number, interview.question, turnID); err != nil {
+				s.markUnhealthy()
+				s.recordInterviewTurnFailure(turnNumber, interview.number, startedAt)
+				s.clearTurn("failed")
+				return GenerationResult{}, generationError(err)
+			}
+		}
 	}
 	provenanceData := s.servingProvenance()
-	provenanceData["turn_number"] = turnNumber
-	provenanceData["turn_phase"] = phase
-	provenanceData["agent_contract_version"] = AgentContractVersion
-	if phase == "planning" {
-		provenanceData["thread_id"] = threadID
-		provenanceData["turn_id"] = turnID
-	}
 	eventPrefix := "codex_turn"
+	if interview != nil {
+		provenanceData["interview_turn_number"] = interview.number
+		eventPrefix = "exit_interview_turn"
+		s.publishRole(observability.ActivityHarness, observability.ActivityExitInterviewQuestion, map[string]any{"text": interview.question}, threadID, turnID, "")
+	} else {
+		provenanceData["turn_number"] = turnNumber
+		provenanceData["turn_phase"] = phase
+		provenanceData["agent_contract_version"] = AgentContractVersion
+		if phase == "planning" {
+			provenanceData["thread_id"] = threadID
+			provenanceData["turn_id"] = turnID
+		}
+	}
 	if phase == "planning" {
 		eventPrefix = "planning"
 	}
@@ -1016,8 +1279,15 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 				waitErr = generationFailure(waitErr, evidenceErr)
 			}
 		}
+		if interview != nil {
+			s.finishInterviewTurn(turnID, nil, "failed")
+		}
 		s.markUnhealthy()
-		s.recordTurnFailure(turnNumber, startedAt, phase)
+		if interview != nil {
+			s.recordInterviewTurnFailure(turnNumber, interview.number, startedAt)
+		} else {
+			s.recordTurnFailure(turnNumber, startedAt, phase)
+		}
 		s.clearTurn("failed")
 		return GenerationResult{}, waitErr
 	}
@@ -1044,6 +1314,18 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 			return GenerationResult{}, generationFailure(err, evidenceErr)
 		}
 	}
+	if interview != nil {
+		var response *string
+		if status == "completed" && responsePresent {
+			response = &finalMessage
+		}
+		if err := s.finishInterviewTurn(turnID, response, status); err != nil {
+			s.markUnhealthy()
+			s.recordInterviewTurnFailure(turnNumber, interview.number, startedAt)
+			s.clearTurn("failed")
+			return GenerationResult{}, generationError(err)
+		}
+	}
 	s.mu.Lock()
 	s.lastStatus = status
 	s.lastMessage = finalMessage
@@ -1064,12 +1346,16 @@ func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, err
 		"turn_number": turnNumber, "turn_phase": phase, "status": status,
 	}, threadID, turnID, "")
 	s.clearTurn(status)
-	return GenerationResult{
+	result := GenerationResult{
 		TurnStatus:   status,
 		FinalMessage: finalMessage,
 		RuntimeState: s.runtimeState(),
 		Summary:      resultSummary(status, s.runtimeState()),
-	}, nil
+	}
+	if interview != nil {
+		result.Summary = fmt.Sprintf("Exit interview turn %s.", status)
+	}
+	return result, nil
 }
 
 func (s *GenerationSession) waitForTurn(ctx context.Context, threadID, turnID, phase string) (string, string, bool, error) {
@@ -1080,7 +1366,26 @@ func (s *GenerationSession) waitForTurn(ctx context.Context, threadID, turnID, p
 		if err != nil {
 			return "", "", false, generationError(err)
 		}
-		observability.PublishRenderableCodexNotification(s.options.ActivityStream, s.generationPointer(), observability.ActivityImplementor, message, threadID, turnID, phase)
+		renderable := observability.PublishRenderableCodexNotification(s.options.ActivityStream, s.generationPointer(), observability.ActivityImplementor, message, threadID, turnID, phase)
+		if phase == "interview" {
+			s.mu.Lock()
+			transcript := s.interviewTranscript
+			s.mu.Unlock()
+			if transcript != nil {
+				for _, activity := range renderable {
+					if activity.Kind != observability.ActivityAgentReasoningDelta && activity.Kind != observability.ActivityAgentReasoningSummary {
+						continue
+					}
+					if err := transcript.Observe(provenance.ExitInterviewActivity{
+						Kind:   provenance.ExitInterviewActivityKind(activity.Kind),
+						Data:   activity.Data,
+						ItemID: activity.ItemID,
+					}, turnID); err != nil {
+						return "", "", false, generationError(err)
+					}
+				}
+			}
+		}
 		method := message["method"]
 		params := message["params"]
 		if method == "thread/tokenUsage/updated" {
@@ -1276,6 +1581,7 @@ func (s *GenerationSession) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.recordExitInterviewEnded("closed")
 	deadline := time.Now().Add(s.options.StopTimeout)
 	s.cancelReview()
 	s.mu.Lock()
@@ -1411,6 +1717,7 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	s.mu.Lock()
 	server, threadID, turnID := s.server, s.threadID, s.turnID
 	planning := s.turnPhase == "planning"
+	interview := s.mode == GenerationModeInterviewTurn
 	turnStarting := s.turnStarting
 	turnReady := s.turnReady
 	s.mu.Unlock()
@@ -1425,6 +1732,7 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 		s.mu.Lock()
 		server, threadID, turnID = s.server, s.threadID, s.turnID
 		planning = s.turnPhase == "planning"
+		interview = s.mode == GenerationModeInterviewTurn
 		s.mu.Unlock()
 	}
 	if server == nil || threadID == "" || turnID == "" {
@@ -1460,8 +1768,28 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 		}
 		s.mu.Unlock()
 	}()
-	response := s.dynamicToolResponse(message["params"], threadID, turnID, planning)
+	var response map[string]any
+	if interview {
+		response = s.interviewToolDenial(message["params"], threadID, turnID)
+	} else {
+		response = s.dynamicToolResponse(message["params"], threadID, turnID, planning)
+	}
 	_ = server.WriteResult(message["id"], response)
+}
+
+func (s *GenerationSession) interviewToolDenial(params any, threadID, turnID string) map[string]any {
+	activityData := dynamicToolActivityData(params)
+	callID := activityCallID(params)
+	s.publishWithItem(observability.ActivityToolStarted, activityData, threadID, turnID, callID)
+	const denial = "dynamic tools are unavailable during a read-only exit interview"
+	s.publishWithItem(observability.ActivityToolFailed, mergeMaps(activityData, map[string]any{
+		"success": false,
+		"error":   denial,
+	}), threadID, turnID, callID)
+	return map[string]any{
+		"contentItems": []map[string]any{{"type": "inputText", "text": denial}},
+		"success":      false,
+	}
 }
 
 func (s *GenerationSession) recordServerRequestQueued(message map[string]any) {
@@ -1823,6 +2151,16 @@ func (s *GenerationSession) planningPrompt() (string, error) {
 	return prompt + "\n\nThis first turn is a planning phase. Persistent guest and runtime changes and generation completion are unavailable during this turn. Inspect the inherited system and available environment as useful, think through your intended approach, and provide your plan. Ordinary implementation follows automatically in this same session and thread. The plan is not an approval gate or enforced commitment; continue using your own judgment during implementation.", nil
 }
 
+func exitInterviewPrompt(question string) string {
+	return "The CodexOS generation has already completed and its exact successor " +
+		"and handoff are frozen.\n\n" +
+		"You are now in a read-only exit interview. Answer the human operator's " +
+		"retrospective question about the generation you just performed.\n\n" +
+		"You cannot modify the generation, successor, handoff, feature requests, " +
+		"or future generations. Do not attempt development work.\n\n" +
+		"Operator question:\n" + question
+}
+
 func (s *GenerationSession) servingProvenance() map[string]any {
 	data := map[string]any{
 		"model":             s.options.Model,
@@ -1952,6 +2290,51 @@ func (s *GenerationSession) recordTurnFailure(turnNumber uint64, startedAt time.
 	s.publish(observability.ActivityTurnFailed, map[string]any{"turn_number": turnNumber, "turn_phase": phase, "status": "failed"}, s.ThreadID(), s.currentTurnID(), "")
 }
 
+func (s *GenerationSession) recordInterviewTurnFailure(turnNumber uint64, interviewTurnNumber int, startedAt time.Time) {
+	data := s.servingProvenance()
+	data["interview_turn_number"] = interviewTurnNumber
+	data["duration_seconds"] = nonNegativeSeconds(time.Since(startedAt))
+	data["result"] = "failed"
+	s.record("exit_interview_turn_failed", data)
+	s.publish(observability.ActivityTurnFailed, map[string]any{
+		"turn_number": turnNumber,
+		"turn_phase":  "interview",
+		"status":      "failed",
+	}, s.ThreadID(), s.currentTurnID(), "")
+}
+
+func (s *GenerationSession) finishInterviewTurn(turnID string, response *string, status string) error {
+	s.mu.Lock()
+	transcript := s.interviewTranscript
+	s.mu.Unlock()
+	if transcript == nil {
+		return &GenerationWorkerError{Reason: "exit interview transcript is unavailable"}
+	}
+	return transcript.FinishTurn(turnID, response, status)
+}
+
+func (s *GenerationSession) recordExitInterviewEnded(result string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if !s.interviewStarted {
+		s.mu.Unlock()
+		return
+	}
+	s.interviewStarted = false
+	threadID := s.threadID
+	s.mu.Unlock()
+	s.emitExitInterviewEnded(result, threadID)
+}
+
+func (s *GenerationSession) emitExitInterviewEnded(result, threadID string) {
+	data := s.servingProvenance()
+	data["result"] = result
+	s.record("exit_interview_ended", data)
+	s.publishRole(observability.ActivityHarness, observability.ActivityExitInterviewEnded, map[string]any{"result": result}, threadID, "", "")
+}
+
 func (s *GenerationSession) nextTurnNumber() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2000,8 +2383,22 @@ func (s *GenerationSession) runtimeState() string {
 	return "awaiting_next_generation"
 }
 
+func (s *GenerationSession) generationFrozenAtGate(expected uint64) bool {
+	if s == nil || s.runtime == nil {
+		return false
+	}
+	state, stateOK := any(s.runtime).(GenerationStateRuntime)
+	gate, gateOK := any(s.runtime).(GenerationGateRuntime)
+	generation, generationOK := s.runtime.GenerationNumber()
+	return stateOK && gateOK && generationOK && generation == expected &&
+		state.GenerationState() == "awaiting_next_generation" && gate.GenerationFinishFrozen()
+}
+
 func (s *GenerationSession) publish(kind observability.ActivityKind, data map[string]any, threadID, turnID, itemID string) {
-	observability.PublishActivity(s.options.ActivityStream, s.generationPointer(), observability.ActivityImplementor, kind, data, threadID, turnID, itemID)
+	s.publishRole(observability.ActivityImplementor, kind, data, threadID, turnID, itemID)
+}
+func (s *GenerationSession) publishRole(role observability.ActivityRole, kind observability.ActivityKind, data map[string]any, threadID, turnID, itemID string) {
+	observability.PublishActivity(s.options.ActivityStream, s.generationPointer(), role, kind, data, threadID, turnID, itemID)
 }
 func (s *GenerationSession) publishWithItem(kind observability.ActivityKind, data map[string]any, threadID, turnID, itemID string) {
 	s.publish(kind, data, threadID, turnID, itemID)
