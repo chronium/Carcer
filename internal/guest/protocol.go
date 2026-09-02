@@ -153,27 +153,38 @@ func ParseToolList(payload []byte) ([]string, error) {
 	return tools, nil
 }
 
-func EncodeInvokeRequest(name string, arguments [][]byte) ([]byte, error) {
+// InvokeRequestPayloadSize returns the exact encoded payload size without
+// allocating the payload. The framing header is not included.
+func InvokeRequestPayloadSize(name string, arguments [][]byte) (uint64, error) {
 	if !utf8.ValidString(name) {
-		return nil, fmt.Errorf("tool name is not valid UTF-8")
+		return 0, fmt.Errorf("tool name is not valid UTF-8")
 	}
 	if name == "" {
-		return nil, fmt.Errorf("tool name must not be empty")
+		return 0, fmt.Errorf("tool name must not be empty")
 	}
 	if len(name) > maxProtocolNames {
-		return nil, fmt.Errorf("tool name exceeds 255 UTF-8 bytes")
+		return 0, fmt.Errorf("tool name exceeds 255 UTF-8 bytes")
 	}
 	if len(arguments) > maxArguments {
-		return nil, fmt.Errorf("an invocation may contain at most 64 arguments")
+		return 0, fmt.Errorf("an invocation may contain at most 64 arguments")
 	}
 
-	size := 2 + len(name) + 2
+	size := uint64(2 + len(name) + 2)
 	for _, argument := range arguments {
-		if len(argument) > MaxPayloadSize-4-size {
-			return nil, fmt.Errorf("invocation payload exceeds the 16 MiB frame limit")
-		}
-		size += 4 + len(argument)
+		size += 4 + uint64(len(argument))
 	}
+	return size, nil
+}
+
+func EncodeInvokeRequest(name string, arguments [][]byte) ([]byte, error) {
+	encodedSize, err := InvokeRequestPayloadSize(name, arguments)
+	if err != nil {
+		return nil, err
+	}
+	if encodedSize > MaxPayloadSize {
+		return nil, fmt.Errorf("invocation payload exceeds the 16 MiB frame limit")
+	}
+	size := int(encodedSize)
 	payload := make([]byte, size)
 	binary.LittleEndian.PutUint16(payload[:2], uint16(len(name)))
 	copy(payload[2:], name)

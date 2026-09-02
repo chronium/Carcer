@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-const toolResponseTimeout = 5 * time.Second
+const (
+	toolResponseTimeout = 5 * time.Second
+	// This matches REQUEST_BUFFER_SIZE in the version 1 guest protocol loop.
+	v1GuestInvocationPayloadCapacity = 16*1024 + 256 + 27
+)
 
 type ToolClient struct {
 	dispatcher *SerialProtocolDispatcher
@@ -29,6 +33,18 @@ func (c *ToolClient) ListTools(ctx context.Context) ([]string, error) {
 }
 
 func (c *ToolClient) InvokeTool(ctx context.Context, name string, arguments [][]byte) (ToolResult, error) {
+	encodedBytes, err := InvokeRequestPayloadSize(name, arguments)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if encodedBytes > v1GuestInvocationPayloadCapacity {
+		output := fmt.Sprintf(
+			"guest invocation rejected before serial dispatch: encoded payload is %d bytes; supported maximum is %d bytes; accepted_bytes:0",
+			encodedBytes,
+			v1GuestInvocationPayloadCapacity,
+		)
+		return ToolResult{Status: 1, Output: []byte(output)}, nil
+	}
 	payload, err := EncodeInvokeRequest(name, arguments)
 	if err != nil {
 		return ToolResult{}, err
