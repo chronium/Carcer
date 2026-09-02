@@ -138,10 +138,11 @@ separately built standalone QEMU and Codex app-server peers to complete planning
 and implementation in one thread, dispatch an ordinary guest tool, perform
 nested build and finish host-service calls, run the fixed trusted build, boot and
 exercise the candidate validator against a distinct synthetic QMP/serial peer,
-freeze the exact successful snapshot, publish
-the completed generation-zero archive, retain and then retire the same healthy
-Codex session at the gate, and leave no child or live workspace. Tests cover
-exact bytes,
+freeze the exact successful snapshot, publish the completed generation-zero
+archive, retain and then retire the same healthy Codex session at the gate, boot
+the selected successor, archive its abort, roll back to generation zero's
+successor in a later generation, archive that abort, and leave no child or live
+workspace. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -176,14 +177,14 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: extend the disposable completed run through continue and rollback,
-exercise cross-run bootstrap and large-transfer shutdown, repeat a complete live
-generation through the TUI and the separately built Go command boundary, perform
-the corresponding real-image candidate acceptance when the pinned guest/toolchain
-environment is available, and rerun the complete reference suite when the
-documented TCG candidate timing test can succeed. Both frontends are proven at an
-archived gate, but only the plain frontend has been exercised through a complete
-live planning/build/finish generation. Go `ReadFrame` relies on
+owner layer: exercise cross-run bootstrap and large-transfer shutdown, repeat a
+complete live generation through the TUI and the separately built Go command
+boundary, perform the corresponding real-image candidate acceptance when the
+pinned guest/toolchain environment is available, and rerun the complete reference
+suite when the documented TCG candidate timing test can succeed. Both frontends
+are proven at an archived gate, but only the plain frontend has been exercised
+through a complete live planning/build/finish/continue/rollback scenario. Go
+`ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -271,12 +272,12 @@ immutable aborted generation-zero archive, and removal of the live generation
 workspace. It invokes no Codex session, compiler, candidate VM, telemetry
 endpoint, or live state.
 
-### Recorded disposable planning/build/finish acceptance
+### Recorded disposable completed-generation transitions
 
 From the repository root, the exact race-enabled command is:
 
 ```text
-GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerCompletesDisposableGenerationThroughAgentAndBuild$' -count=10 -timeout=180s
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerCompletesContinuesAndRollsBackDisposableGeneration$' -count=10 -timeout=180s
 ```
 
 `internal/operator/testdata/fakecodex` and
@@ -292,11 +293,13 @@ it does not claim that the fixture's synthetic ISO is independently bootable.
 The test requires exact handoff and source-snapshot preservation, matching
 materialized source, selected kernel/ISO artifacts, successful immutable build
 and candidate provenance, ordered lifecycle evidence, clean gate-session
-retirement, no live workspace, and explicit proof that every recorded QEMU and
-Codex child PID has been reaped. The short run root is intentional because Linux
-limits Unix-domain socket paths while the candidate validator adds nested
-temporary directories. No network, production QEMU, real Codex session, paid
-review, production telemetry, or live experiment state is used.
+retirement, a generation-one selected-successor boot and abort, a generation-two
+rollback boot from generation zero and abort, no live workspace, and explicit
+proof that every recorded QEMU and Codex child PID has been reaped. The short run
+root is intentional because Linux limits Unix-domain socket paths while the
+candidate validator adds nested temporary directories. No network, production
+QEMU, real Codex session, paid review, production telemetry, or live experiment
+state is used.
 
 ## Operational risks
 

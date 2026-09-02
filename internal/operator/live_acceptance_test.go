@@ -26,7 +26,7 @@ import (
 
 const disposableGenerationHandoff = "The disposable generation completed its validated build."
 
-func TestRunnerCompletesDisposableGenerationThroughAgentAndBuild(t *testing.T) {
+func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) {
 	t.Setenv("CODEXOS_DISPOSABLE_QEMU_LIFECYCLE", "lifecycle")
 	processRecords := t.TempDir()
 	t.Setenv("CODEXOS_DISPOSABLE_PROCESS_RECORDS", processRecords)
@@ -110,6 +110,34 @@ func TestRunnerCompletesDisposableGenerationThroughAgentAndBuild(t *testing.T) {
 		}
 		t.Fatalf("runner did not reach the completed gate: %v\n%s", runnerErr, output.String())
 	}
+
+	// The completion report is emitted just before the console releases its
+	// asynchronous turn reservation. Probe through the public status command
+	// until the gate reports the retained session as idle, then transition.
+	for attempts := 0; attempts < 100 && !strings.Contains(output.String(), "Codex turn: idle"); attempts++ {
+		if _, err := io.WriteString(inputWriter, "status\n"); err != nil {
+			stopErr := stopDisposableRunner(cancel, inputWriter, result)
+			t.Fatalf("send gate status command: %v; stop runner: %v", err, stopErr)
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("runner stopped while waiting for the completed turn to settle: %v\n%s", err, output.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !strings.Contains(output.String(), "Codex turn: idle") {
+		stopErr := stopDisposableRunner(cancel, inputWriter, result)
+		t.Fatalf("completed turn did not settle at the gate: %v\n%s", stopErr, output.String())
+	}
+
+	sendDisposableCommand(t, cancel, inputWriter, result, "continue\n")
+	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 1: RUNNING")
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 1 aborted.")
+	sendDisposableCommand(t, cancel, inputWriter, result, "rollback 0\ny\n")
+	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 2 started from generation 0.")
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 2 aborted.")
 	if _, err := io.WriteString(inputWriter, "quit\n"); err != nil {
 		stopErr := stopDisposableRunner(cancel, inputWriter, result)
 		t.Fatalf("send quit command: %v; stop runner: %v", err, stopErr)
@@ -133,6 +161,10 @@ func TestRunnerCompletesDisposableGenerationThroughAgentAndBuild(t *testing.T) {
 		"Generation 0 completed cooperatively.",
 		"A successor is selected.",
 		disposableGenerationHandoff,
+		"Starting generation 1 from selected successor...",
+		"Generation 1 aborted.",
+		"Generation 2 started from generation 0.",
+		"Generation 2 aborted.",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("operator output missing %q:\n%s", want, output.String())
@@ -209,6 +241,21 @@ func TestRunnerCompletesDisposableGenerationThroughAgentAndBuild(t *testing.T) {
 	if len(workspaces) != 0 {
 		t.Fatalf("runner left generation workspaces: %v", workspaces)
 	}
+	for generation, want := range map[uint64]struct {
+		transition string
+		parent     uint64
+	}{
+		1: {transition: "successor", parent: 0},
+		2: {transition: "rollback", parent: 0},
+	} {
+		item, err := loaded.InspectGeneration(generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.Outcome != "aborted" || item.Transition != want.transition || item.ParentGeneration == nil || *item.ParentGeneration != want.parent {
+			t.Fatalf("generation %d archive = %#v", generation, item)
+		}
+	}
 	events, err := os.ReadFile(filepath.Join(runDirectory, observability.EventLogFilename))
 	if err != nil {
 		t.Fatal(err)
@@ -225,6 +272,39 @@ func TestRunnerCompletesDisposableGenerationThroughAgentAndBuild(t *testing.T) {
 			t.Fatalf("event %q missing or out of order:\n%s", event, events)
 		}
 		previous = index
+	}
+}
+
+func sendDisposableCommand(t *testing.T, cancel context.CancelFunc, input *os.File, result <-chan error, command string) {
+	t.Helper()
+	if _, err := io.WriteString(input, command); err != nil {
+		stopErr := stopDisposableRunner(cancel, input, result)
+		t.Fatalf("send disposable operator command %q: %v; stop runner: %v", strings.TrimSpace(command), err, stopErr)
+	}
+}
+
+func waitForDisposableOutput(
+	t *testing.T,
+	cancel context.CancelFunc,
+	input *os.File,
+	result <-chan error,
+	output *synchronizedBuffer,
+	wanted string,
+) {
+	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for !strings.Contains(output.String(), wanted) {
+		select {
+		case err := <-result:
+			t.Fatalf("runner stopped before output %q: %v\n%s", wanted, err, output.String())
+		case <-ticker.C:
+		case <-timer.C:
+			stopErr := stopDisposableRunner(cancel, input, result)
+			t.Fatalf("runner did not produce output %q: %v\n%s", wanted, stopErr, output.String())
+		}
 	}
 }
 
