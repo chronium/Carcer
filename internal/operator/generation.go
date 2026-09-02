@@ -68,6 +68,8 @@ type GenerationController struct {
 	active        *controlledTurn
 	resumeTurn    bool
 	interviewOpen bool
+	lastInterview provenance.ExitInterviewTranscriptSnapshot
+	interviewSet  bool
 	retirementErr error
 	runtimeClosed bool
 	closed        bool
@@ -202,12 +204,17 @@ func (c *GenerationController) finishTurn(turn *controlledTurn, session *agent.G
 		closeErr = session.Close()
 		outcome.Err = errors.Join(outcome.Err, closeErr)
 	}
+	transcript, transcriptOK := session.ExitInterviewTranscript()
 
 	c.mu.Lock()
 	if c.active == turn {
 		c.active = nil
 	}
 	if closeSession && c.session == session {
+		if transcriptOK {
+			c.lastInterview = transcript
+			c.interviewSet = true
+		}
 		c.session = nil
 		c.generationSet = false
 		c.interviewOpen = false
@@ -410,6 +417,8 @@ func (c *GenerationController) BeginExitInterview() error {
 		_ = session.Close()
 		return errors.New("retained Codex session changed unexpectedly")
 	}
+	c.lastInterview = provenance.ExitInterviewTranscriptSnapshot{}
+	c.interviewSet = false
 	c.interviewOpen = true
 	c.mu.Unlock()
 	return nil
@@ -461,12 +470,14 @@ func (c *GenerationController) ExitInterviewTranscript() (provenance.ExitIntervi
 		return provenance.ExitInterviewTranscriptSnapshot{}, false
 	}
 	c.mu.Lock()
-	session := c.session
+	session, cached, cachedOK := c.session, c.lastInterview, c.interviewSet
 	c.mu.Unlock()
-	if session == nil {
-		return provenance.ExitInterviewTranscriptSnapshot{}, false
+	if session != nil {
+		if transcript, ok := session.ExitInterviewTranscript(); ok {
+			return transcript, true
+		}
 	}
-	return session.ExitInterviewTranscript()
+	return cached, cachedOK
 }
 
 // EndExitInterview permanently retires the retained thread. Transcript
@@ -483,24 +494,73 @@ func (c *GenerationController) EndExitInterview() error {
 	c.mu.Lock()
 	session, active, interviewOpen := c.session, c.active, c.interviewOpen
 	c.mu.Unlock()
-	if active != nil {
-		return errors.New("exit interview turn is still active")
-	}
 	if session == nil || !interviewOpen {
 		return errors.New("exit interview is not active")
 	}
-	err := session.EndExitInterview()
+	if active != nil && !active.interview {
+		return errors.New("Codex implementor turn is still active")
+	}
+	if active != nil {
+		// Python treats explicit interview end as a hard, bounded retirement:
+		// interrupt the active answer, retain its partial transcript, and close
+		// the thread. Interrupt errors are recoverable if Close still succeeds.
+		_ = session.InterruptTurn(c.options.InterruptTimeout)
+		deadline := time.Now().Add(c.options.InterruptTimeout)
+		if err := waitControlledTurn(context.Background(), active.done, deadline); err != nil {
+			closeErr := session.Close()
+			c.finishInterviewRetirement(session)
+			if closeErr != nil {
+				c.rememberRetirementError(closeErr)
+			}
+			return errors.Join(err, closeErr)
+		}
+	}
+	transcript, transcriptOK := session.ExitInterviewTranscript()
+	endErr := session.EndExitInterview()
+	var closeErr error
+	if endErr != nil {
+		closeErr = session.Close()
+	}
 	c.mu.Lock()
 	if c.session == session {
+		if transcriptOK {
+			c.lastInterview = transcript
+			c.interviewSet = true
+		}
 		c.session = nil
 		c.generationSet = false
 		c.interviewOpen = false
 	}
-	if err != nil {
-		c.retirementErr = err
+	if closeErr != nil {
+		c.retirementErr = closeErr
 	}
 	c.mu.Unlock()
-	return err
+	return closeErr
+}
+
+func (c *GenerationController) finishInterviewRetirement(session *agent.GenerationSession) {
+	transcript, ok := session.ExitInterviewTranscript()
+	c.mu.Lock()
+	if c.session == session {
+		if ok {
+			c.lastInterview = transcript
+			c.interviewSet = true
+		}
+		c.session = nil
+		c.generationSet = false
+		c.interviewOpen = false
+		c.active = nil
+	}
+	c.mu.Unlock()
+}
+
+func (c *GenerationController) rememberRetirementError(err error) {
+	if err == nil {
+		return
+	}
+	c.mu.Lock()
+	c.retirementErr = err
+	c.mu.Unlock()
 }
 
 func (c *GenerationController) SessionPID() (int, bool) {
@@ -516,6 +576,17 @@ func (c *GenerationController) SessionPID() (int, bool) {
 	return session.ProcessPID()
 }
 
+// SessionOwned reports allocation independently of whether the subprocess has
+// progressed far enough to expose a PID.
+func (c *GenerationController) SessionOwned() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.session != nil
+}
+
 func (c *GenerationController) SessionThreadID() string {
 	if c == nil {
 		return ""
@@ -527,6 +598,33 @@ func (c *GenerationController) SessionThreadID() string {
 		return ""
 	}
 	return session.ThreadID()
+}
+
+// NextTurnKind reports how StartTurn would use the current generation session.
+// It is operator presentation state, not an admission reservation.
+func (c *GenerationController) NextTurnKind() string {
+	if c == nil {
+		return "initial"
+	}
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return "initial"
+	}
+	if !session.PlanningCompleted() {
+		return "planning"
+	}
+	return "continuation"
+}
+
+func (c *GenerationController) InterviewOpen() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.interviewOpen
 }
 
 func (c *GenerationController) retireIdleGateSession() error {
@@ -544,8 +642,13 @@ func (c *GenerationController) retireIdleGateSession() error {
 		return errors.New("previous generation Codex session is not idle at the gate")
 	}
 	closeErr := session.Close()
+	transcript, transcriptOK := session.ExitInterviewTranscript()
 	c.mu.Lock()
 	if c.session == session {
+		if transcriptOK {
+			c.lastInterview = transcript
+			c.interviewSet = true
+		}
 		c.session = nil
 		c.generationSet = false
 		c.interviewOpen = false
@@ -576,8 +679,13 @@ func (c *GenerationController) retireSession(interrupt bool) error {
 			closeErr = waitErr
 		}
 	}
+	transcript, transcriptOK := session.ExitInterviewTranscript()
 	c.mu.Lock()
 	if c.session == session {
+		if transcriptOK {
+			c.lastInterview = transcript
+			c.interviewSet = true
+		}
 		c.session = nil
 		c.generationSet = false
 		c.interviewOpen = false
@@ -612,6 +720,8 @@ func (c *GenerationController) clearGenerationOwnership() {
 	c.active = nil
 	c.resumeTurn = false
 	c.interviewOpen = false
+	c.lastInterview = provenance.ExitInterviewTranscriptSnapshot{}
+	c.interviewSet = false
 	c.mu.Unlock()
 }
 

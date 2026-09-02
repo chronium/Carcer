@@ -539,6 +539,13 @@ func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.
 	if _, err := session.RunContinuationTurn(); err == nil || !strings.Contains(err.Error(), "unavailable after finish") {
 		t.Fatalf("ordinary turn after retain error = %v", err)
 	}
+	runtime.ReleaseGenerationFinish(runtime.generation)
+	if err := session.BeginExitInterview(); err == nil || !strings.Contains(err.Error(), "not frozen") {
+		t.Fatalf("begin after gate lease loss error = %v", err)
+	}
+	runtime.mu.Lock()
+	runtime.finishRetained = true
+	runtime.mu.Unlock()
 	if err := session.BeginExitInterview(); err != nil {
 		t.Fatal(err)
 	}

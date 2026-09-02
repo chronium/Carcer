@@ -30,7 +30,7 @@ func runOperatorFakeAppServer() {
 		writeOperatorRecord(map[string]any{"mode": mode, "pid": os.Getpid()})
 		return
 	}
-	if mode != "pause" && mode != "admission-pause" && mode != "stuck-interrupt" && mode != "finish" {
+	if mode != "pause" && mode != "admission-pause" && mode != "stuck-interrupt" && mode != "finish" && mode != "interview" && mode != "interview-hold" {
 		os.Exit(30)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -163,6 +163,29 @@ func runOperatorFakeAppServer() {
 	writeOperatorRecord(map[string]any{
 		"mode": mode, "pid": os.Getpid(), "thread_id": threadID, "messages": messages,
 	})
+	if mode == "interview" {
+		completeTurn(2, "Retrospective answer.")
+		writeOperatorRecord(map[string]any{
+			"mode": mode, "pid": os.Getpid(), "thread_id": threadID, "messages": messages,
+		})
+	} else if mode == "interview-hold" {
+		interview := expect("turn/start")
+		interviewID := fmt.Sprintf("operator-turn-%d-2", os.Getpid())
+		respond(interview, map[string]any{"turn": map[string]any{"id": interviewID}})
+		writeOperatorReady()
+		send(map[string]any{"method": "item/reasoning/summaryTextDelta", "params": map[string]any{
+			"threadId": threadID, "turnId": interviewID, "itemId": "interview-reasoning", "summaryIndex": 0, "delta": "Partial retrospective.",
+		}})
+		interrupt := expect("turn/interrupt")
+		respond(interrupt, map[string]any{})
+		send(map[string]any{"method": "turn/completed", "params": map[string]any{
+			"threadId": threadID,
+			"turn":     map[string]any{"id": interviewID, "items": []any{}, "status": "interrupted"},
+		}})
+		writeOperatorRecord(map[string]any{
+			"mode": mode, "pid": os.Getpid(), "thread_id": threadID, "messages": messages,
+		})
+	}
 	select {}
 }
 

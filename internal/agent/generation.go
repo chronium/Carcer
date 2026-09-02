@@ -602,6 +602,11 @@ func (s *GenerationSession) BeginExitInterview() error {
 		s.mu.Unlock()
 		return &GenerationWorkerError{Reason: "exit interview is already active"}
 	}
+	gate, ok := any(s.runtime).(GenerationGateRuntime)
+	if !ok || !s.gateRetained || !gate.GenerationFinishRetained(s.generation) {
+		s.mu.Unlock()
+		return &GenerationWorkerError{Reason: "completed generation is not frozen at its gate"}
+	}
 	run := filepath.Base(filepath.Clean(s.runtime.RunDirectory()))
 	s.interviewStarted = true
 	s.interviewTranscript = provenance.NewExitInterviewTranscript(provenance.ExitInterviewMetadata{
