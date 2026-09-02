@@ -57,25 +57,35 @@ func TestRealSeedImageBuildsAndPassesCandidateValidation(t *testing.T) {
 		}
 	}
 
-	validator, err := NewCandidateBootValidator(CandidateBootConfig{
-		QEMUExecutable:  qemuExecutable,
-		HardwareProfile: qemu.TestHardwareProfile,
-		ReadyTimeout:    15 * time.Second,
-		TemporaryParent: root,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	validated := validator.Validate(ctx, built.ISO, nil, nil)
-	if validated.Status != BuildStatusSuccess {
-		t.Fatalf("real seed candidate validation = %s: %s", validated.Status, validated.Diagnostics)
-	}
-	workspaces, err := filepath.Glob(filepath.Join(root, "codexos-candidate-*"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(workspaces) != 0 {
-		t.Fatalf("real candidate workspaces survived: %v", workspaces)
+	for _, profile := range []qemu.HardwareProfile{
+		qemu.TestHardwareProfile,
+		qemu.ExperimentHardwareProfile,
+	} {
+		t.Run(profile.Profile, func(t *testing.T) {
+			if err := profile.RequireAvailable(); err != nil {
+				t.Skip(err)
+			}
+			validator, err := NewCandidateBootValidator(CandidateBootConfig{
+				QEMUExecutable:  qemuExecutable,
+				HardwareProfile: profile,
+				ReadyTimeout:    15 * time.Second,
+				TemporaryParent: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			validated := validator.Validate(ctx, built.ISO, nil, nil)
+			if validated.Status != BuildStatusSuccess {
+				t.Fatalf("real seed candidate validation = %s: %s", validated.Status, validated.Diagnostics)
+			}
+			workspaces, err := filepath.Glob(filepath.Join(root, "codexos-candidate-*"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(workspaces) != 0 {
+				t.Fatalf("real candidate workspaces survived: %v", workspaces)
+			}
+		})
 	}
 }
 

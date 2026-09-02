@@ -1,8 +1,9 @@
 # Go cutover readiness
 
-Status: **not ready for cutover**. The Python harness remains fully operational
-and is still the default and only approved live-experiment entry point. The
-side-by-side Go command now exists for disposable verification.
+Status: **ready for separately approved staged cutover evaluation**. The Python
+harness remains fully operational and is still the default and only approved
+live-experiment entry point. The side-by-side Go command has completed the
+required disposable verification; this report does not authorize a live cutover.
 
 ## Completed capabilities
 
@@ -122,7 +123,17 @@ before restoring the terminal and reaping every child.
 
 The current milestone passes both `go test ./... -count=1 -timeout=240s` and
 `go test -race ./... -count=1 -timeout=300s` with the disposable socket/QEMU
-tests enabled. The operator, TUI, and command packages also pass ten consecutive
+tests enabled. The final post-OOM regression sweep additionally limited package
+and test parallelism to one while retaining the complete ordinary and race test
+sets:
+
+```text
+GOMAXPROCS=2 GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -p=1 -parallel=1 ./... -count=1 -timeout=300s
+GOMAXPROCS=2 GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race -p=1 -parallel=1 ./... -count=1 -timeout=420s
+GOMAXPROCS=2 GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go vet ./...
+```
+
+The operator, TUI, and command packages also pass ten consecutive
 race-enabled runs, and process checks find no surviving `agent.test`, operator,
 or QEMU helpers. A process-free runner integration reopens an immutable aborted
 gate through the real plain frontend and verifies observable startup-before-stop
@@ -164,10 +175,10 @@ normal exit, duplicate start, cancellation, restart, log failures, and forced
 kill, while an optional disposable `-machine none` QEMU test exercises the real
 controller/QMP boundary without KVM or a guest image. An opt-in Linux acceptance
 uses the available real cross-toolchain, bubblewrap, xorriso, pinned Limine
-inputs, and QEMU to compile the canonical seed, boot its real ISO under the disposable
-`test-v1` profile, observe READY, complete the canonical list-tools exchange,
-and clean up the candidate workspace. It passes ten consecutive race-enabled
-runs under the available TCG fallback.
+inputs, and QEMU to compile the canonical seed, boot its real ISO under both the
+disposable `test-v1` profile and exact KVM-only `experiment-v1` profile, observe
+READY, complete the canonical list-tools exchange, and clean up each candidate
+workspace. Both profiles pass ten consecutive race-enabled runs.
 
 Serial verification includes fragmented READY and frames, read-before-write
 ordering, forced partial writes, nested host requests, response-timeout suspension,
@@ -175,29 +186,27 @@ scope routing, malformed-request recovery, cancellation, peer closure, write
 stall/failure, callback reentrancy, large host responses, progress events, and
 bounded shutdown through the concrete live guest lifecycle.
 
-The Python reference suite ran 281 tests under the locked `uv` environment. Its
-only failure was the following pre-existing candidate-validation timing
-condition; one paid reviewer smoke test was skipped by design. The Python
-harness/tests/lock files on this branch are byte-identical to `main`.
-The candidate-validation integration test has a pre-existing timing
-flake under the available TCG fallback: its 250 ms READY deadline can expire
-before serial diagnostics arrive. An isolated run can pass, while an unmodified
-`main` archive with the same pinned Limine fixture failed diagnostic assertions
-in five of the first six completed repetitions; candidate rejection and cleanup
-still occurred. This evidence is limited to that test and is not used to excuse
-unrelated Python failures.
+The complete Python reference suite passes all 281 tests under the locked,
+offline `uv` environment, including its real seed, candidate, exact
+`experiment-v1` KVM, generation, and TUI integrations. The paid real-reviewer
+smoke test is skipped by design. The Python harness, tests, and lock files on
+this branch remain byte-identical to `main`. A previously observed 250 ms READY
+timing flake remains a risk on slower TCG-only hosts, but did not occur in the
+final KVM-backed reference run and is not used to excuse any failure.
+
+```text
+PYTHONUNBUFFERED=1 timeout --signal=TERM --kill-after=10s 600s uv run --offline --frozen python -m unittest discover -v
+```
 
 ## Remaining gaps and known differences
 
-Required remaining work is operational verification rather than another missing
-owner layer: exercise the real seed image under the exact KVM-only
-`experiment-v1` profile when `/dev/kvm` is available, and rerun the complete
-reference suite when the documented TCG candidate timing test can succeed. The
-same real image has passed candidate validation under the disposable `test-v1`
-profile with TCG fallback. The plain frontend is exercised through a complete
-live planning/build/finish/continue/rollback scenario; the TUI and separately
-built Go command are exercised through a full planning/build/finish generation
-and completed gate. Go `ReadFrame` relies on
+No required implementation or disposable acceptance gap remains. An actual
+entry-point change still requires explicit human approval and should follow the
+staged procedure below; the migration has deliberately not been exercised on
+live experiment state. The plain frontend is exercised through a complete live
+planning/build/finish/continue/rollback scenario; the TUI and separately built
+Go command are exercised through a full planning/build/finish generation and
+completed gate. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -263,15 +272,15 @@ CODEXOS_REAL_IMAGE_ACCEPTANCE=1 GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/co
 
 `internal/build/real_image_acceptance_linux_test.go` reads the canonical seed
 inputs, encodes their real source snapshot, and invokes the production trusted
-build operation with explicitly resolved host utilities. It then boots the
-resulting ISO in a fresh real QEMU process under `qemu.TestHardwareProfile`,
-which falls back from KVM to TCG, and requires both the READY marker and the
-canonical list-tools response. Every build and candidate workspace is temporary;
+build operation with explicitly resolved host utilities. It then boots the same
+resulting ISO in fresh real QEMU processes under both `qemu.TestHardwareProfile`
+and `qemu.ExperimentHardwareProfile`, requiring the READY marker and canonical
+list-tools response from each. Every build and candidate workspace is temporary;
 the validator must stop QEMU and remove its workspace before returning. The test
-is opt-in so the standard offline suite does not acquire toolchain or QEMU
-requirements. It uses no network, credentials, Codex session, telemetry, or live
-experiment state. The exact `experiment-v1` profile remains separately gated on
-an accessible `/dev/kvm`.
+is opt-in so the standard offline suite does not acquire toolchain, QEMU, or KVM
+requirements; the exact experiment-profile subtest skips when `/dev/kvm` is not
+accessible. It uses no network, credentials, Codex session, telemetry, or live
+experiment state.
 
 ### Recorded disposable binary gate acceptance
 
@@ -401,24 +410,23 @@ state is used.
 
 ## Operational risks
 
-The highest risks are durable archive compatibility, fail-closed provenance,
-and real-image behavior under the exact KVM-only experiment profile. The
-terminal reader's unsafe
+The highest residual risks are applying the already conformance-tested durable
+formats to real operator state for the first time and Bubble Tea's upstream
+forced terminal-cancellation path. The terminal reader's unsafe
 forced-cancellation path is avoided by application-owned graceful shutdown and
 covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
 can still use its upstream forced path after an internal renderer/input error or
 panic; that residual dependency failure path should be removed by an upstream
 upgrade or re-evaluated before cutover. No Go component should be used on live
-experiment state before the remaining cutover verification and explicit human
-approval.
+experiment state before the staged procedure and explicit human approval.
 
 ## Recommended staged cutover
 
-After the parity matrix is complete: validate read-only loading against copies of
-Python runs; perform disposable Python-to-Go and Go-to-Python resumptions; run
-the recorded non-interactive and TUI scenarios; shadow structured output without
-controlling a live run; then require explicit human approval for any entry-point
-change. Keep the Python command available through the staged period.
+For any approved cutover, first validate read-only loading against copies of
+operator run state, then shadow structured output without controlling a live
+run. Re-run the recorded Python-to-Go, Go-to-Python, non-interactive, TUI, and
+real-image scenarios in the target environment before changing the entry point.
+Keep the Python command available throughout the staged period.
 
 ## Rollback procedure
 
