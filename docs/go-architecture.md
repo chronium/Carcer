@@ -151,8 +151,9 @@ selected successor before session retirement releases it; an admitted question
 is reserved before its app-server turn ID exists. Only renderable reasoning
 summaries and final answers enter the isolated transcript, while questions and
 answers never enter generation events or successor context. A mutex-protected
-one-shot worker owns fresh-session construction and bounded retirement. Live
-generation and operator orchestration remain separate.
+one-shot worker owns fresh-session construction and bounded retirement. The
+live runtime now satisfies its guest/runtime boundary, while ownership of the
+generation session itself remains to be joined to operator orchestration.
 `internal/build` performs the fixed trusted source-snapshot build in a fresh
 workspace. It copies pinned Limine inputs, discovers and validates the fixed
 toolchain, runs guest compilation and ISO construction under bubblewrap without
@@ -163,13 +164,19 @@ then requires canonical READY and list-tools proofs before success. Its bounded
 cleanup path quits or stops and reaps the child even after cancellation. The
 guest-facing host-service owner joins those operations, retains only the latest
 fully validated successor, freezes a matching finish request, records advisory
-feature requests, and routes explicitly configured provided assets. Live
-generation orchestration remains separate.
-`internal/experiment` can also publish and load immutable completed or aborted
-generation archives, validate their ancestry and exact contents, and reopen a
-stopped run at a gate without starting any process. Successor continuation and
-rollback selection require an explicit call and currently advance only the
-process-free decision model; QEMU and fresh-session startup are not yet wired.
+feature requests, and routes explicitly configured provided assets.
+`internal/experiment` publishes and loads immutable completed or aborted
+generation archives, validates their ancestry and exact contents, and can
+reopen a stopped run at a gate without starting any process. Its concrete live
+owner composes one QEMU child, QMP client, serial connection, dispatcher, tool
+client, candidate validator, and host-service session. It boots only after
+trusted cross-run and provided-asset state is restored; streams boot,
+successor, and log files into archives without collecting them in RAM; verifies
+the candidate-proven kernel and ISO identities during that copy; and supports
+pause/resume, completion, paused abort, boot-first continuation, and rollback.
+Run-owned cancellation interrupts blocked guest/build work before shutdown
+joins resources, while failed cleanup retains ownership and diagnostics for a
+retry. Fresh Codex-session and operator ownership remain unwired.
 `internal/operator` defines the Cobra startup surface and validates the same
 opening-mode, Git-provenance, cross-run inheritance, and display-mode
 relationships as the Python entry point before invoking a concrete runner.

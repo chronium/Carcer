@@ -11,12 +11,13 @@ results. Its sole-reader serial dispatcher owns canonical READY detection,
 read-first duplex pumping, ordered partial writes, nested host-service routing,
 tool response matching, and bounded write/shutdown deadlines. The tool client
 implements discovery, invocation, request-ID rollover, and response validation.
-These components are not yet wired into candidate boot or a generation runtime.
-Go also reads and writes the compatible feature-request store, including inherited
-sparse IDs and durable decisions; gate-only decision enforcement remains with the
-Python runtime. Provided-assets snapshots, deterministic PAX archives, append-only
-activation manifests, and bounded guest list/read handling are implemented;
-operator and generation routing remain unwired. The synchronous QMP client
+These components are now joined to candidate boot and the concrete generation
+runtime. Go also reads and writes the compatible feature-request store, including
+inherited sparse IDs, durable decisions, guest recording, and gate-only decision
+enforcement. Provided-assets snapshots, deterministic PAX archives, append-only
+activation manifests, and bounded guest list/read handling are routed through
+live startup, background, and exchange scopes; operator flag routing remains
+unwired. The synchronous QMP client
 implements Unix-socket retry, greeting and capability negotiation, status/control
 commands, event skipping, deadlines, and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
 archived manifest codec, KVM availability check, bounded QEMU version discovery,
@@ -48,7 +49,7 @@ session retirement, and turn admission is reserved before the app server
 returns an ID. The transcript accepts only renderable reasoning summaries and
 final answers; direct close preserves a failed partial turn without inventing a
 response. The single-flight compatibility worker always retires its fresh
-session. Generation/operator orchestration remains unimplemented. The local
+session. Generation-session/operator orchestration remains unimplemented. The local
 observability slice validates and appends sequenced JSONL events without allowing
 recording failures to control the experiment. Its bounded activity stream
 preserves concurrent ordering and excludes raw reasoning. The fixed
@@ -57,7 +58,8 @@ and an explicitly configured OTLP/HTTP exporter has bounded export and shutdown
 deadlines.
 Cross-run bootstrap can initialize and reload a fresh run from a validated latest
 completed generation, preserving exact successor-ISO, handoff, feature-ledger,
-and annotated Git-base identities. Generation lifecycle wiring remains separate.
+and annotated Git-base identities. The live runtime verifies and applies that
+bootstrap before generation zero; operator flag orchestration remains separate.
 The trusted build operation validates and materializes a source snapshot, uses
 only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bounds
 diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
@@ -70,11 +72,16 @@ routes frozen provided assets. The candidate validator boots only in a fresh
 workspace, establishes QMP and serial before continuing execution, proves READY
 and list-tools behavior, records forensic stages, and reaps the disposable QEMU
 on every tested outcome.
-The process-free lifecycle core writes and reloads immutable completed and
-aborted generation archives, rejects partial or inconsistent histories, restores
-an archived gate without booting, and requires an explicit successor or rollback
-selection. It does not yet perform the selected QEMU boot or create the required
-fresh Codex session.
+The lifecycle core writes and reloads immutable completed and aborted generation
+archives, rejects partial or inconsistent histories, restores an archived gate
+without booting, and requires an explicit successor or rollback selection. Its
+live owner now performs the selected boot, pause/resume, paused abort, completion,
+continuation, and rollback over one owned QEMU/QMP/serial stack. Large artifacts
+and logs are streamed into archive staging, and successor kernel/ISO identities
+are checked during the copy against the candidate proof. Run cancellation
+interrupts blocked guest/build work before joining resources; a shutdown failure
+keeps ownership instead of falsely reporting a stopped run. Creating and retiring
+the required fresh Codex session remains an operator-orchestration gap.
 The Cobra command surface validates the Python startup flags, mutually exclusive
 opening and display modes, paired Git and inheritance options, and automatic
 TUI selection before handing control to a runner. The concrete runner, operator
