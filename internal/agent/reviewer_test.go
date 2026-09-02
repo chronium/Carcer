@@ -32,6 +32,10 @@ const (
 
 func TestMain(tests *testing.M) {
 	if os.Getenv(reviewerHelperEnvironment) == "1" {
+		if os.Getenv(generationHelperMode) != "" {
+			runGenerationFakeAppServer()
+			os.Exit(0)
+		}
 		runReviewerFakeAppServer()
 		os.Exit(0)
 	}

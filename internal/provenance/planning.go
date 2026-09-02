@@ -109,21 +109,27 @@ func (e *PlanningEvidence) RecordStarted(turnID string) error {
 		return &PlanningEvidenceError{Reason: "planning evidence cannot start another attempt"}
 	}
 	attemptNumber := uint64(len(e.manifest.Attempts) + 1)
-	e.manifest.Attempts = append(e.manifest.Attempts, planningAttempt{
+	candidate := e.manifest
+	candidate.Attempts = append([]planningAttempt(nil), e.manifest.Attempts...)
+	candidate.Attempts = append(candidate.Attempts, planningAttempt{
 		Attempt: attemptNumber,
 		Outcome: "active",
 		TurnID:  stringPointer(turnID),
 	})
-	e.manifest.TurnID = stringPointer(turnID)
-	e.manifest.Stage = "started"
-	return writePlanningJSON(filepath.Join(e.directory, "manifest.json"), e.manifest)
+	candidate.TurnID = stringPointer(turnID)
+	candidate.Stage = "started"
+	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), candidate); err != nil {
+		return err
+	}
+	e.manifest = candidate
+	return nil
 }
 
 func (e *PlanningEvidence) Complete(outcome string, response *string) (PlanningResponseIdentity, error) {
 	if outcome != "completed" && outcome != "interrupted" {
 		return PlanningResponseIdentity{}, fmt.Errorf("planning completion outcome is invalid")
 	}
-	attempt, err := e.activeAttempt()
+	activeAttempt, err := e.activeAttempt()
 	if err != nil {
 		return PlanningResponseIdentity{}, err
 	}
@@ -139,31 +145,35 @@ func (e *PlanningEvidence) Complete(outcome string, response *string) (PlanningR
 	identity := PlanningResponseIdentity{SHA256: hex.EncodeToString(digest[:]), Size: uint64(len(encoded))}
 	responseFile := "response.txt"
 	if outcome == "interrupted" {
-		responseFile = fmt.Sprintf("attempt-%04d-response.txt", attempt.Attempt)
+		responseFile = fmt.Sprintf("attempt-%04d-response.txt", activeAttempt.Attempt)
 	}
 	if err := writePlanningBytes(filepath.Join(e.directory, responseFile), encoded); err != nil {
 		return PlanningResponseIdentity{}, err
 	}
 	present := response != nil
+	candidate := e.manifest
+	candidate.Attempts = append([]planningAttempt(nil), e.manifest.Attempts...)
+	attempt := &candidate.Attempts[len(candidate.Attempts)-1]
 	attempt.Outcome = outcome
 	attempt.ResponseBytes = uint64Pointer(identity.Size)
 	attempt.ResponseFile = responseFile
 	attempt.ResponsePresent = boolPointer(present)
 	attempt.ResponseSHA256 = identity.SHA256
 	if outcome == "completed" {
-		e.manifest.Stage = "completed"
-		e.manifest.Outcome = "completed"
-		e.manifest.ResponseBytes = uint64Pointer(identity.Size)
-		e.manifest.ResponseFile = responseFile
-		e.manifest.ResponsePresent = boolPointer(present)
-		e.manifest.ResponseSHA256 = identity.SHA256
+		candidate.Stage = "completed"
+		candidate.Outcome = "completed"
+		candidate.ResponseBytes = uint64Pointer(identity.Size)
+		candidate.ResponseFile = responseFile
+		candidate.ResponsePresent = boolPointer(present)
+		candidate.ResponseSHA256 = identity.SHA256
 	} else {
-		e.manifest.Stage = "awaiting_resume"
-		e.manifest.Outcome = "incomplete"
+		candidate.Stage = "awaiting_resume"
+		candidate.Outcome = "incomplete"
 	}
-	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), e.manifest); err != nil {
+	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), candidate); err != nil {
 		return PlanningResponseIdentity{}, err
 	}
+	e.manifest = candidate
 	return identity, nil
 }
 
@@ -171,21 +181,38 @@ func (e *PlanningEvidence) Fail() error {
 	if e.manifest.Outcome == "completed" || e.manifest.Outcome == "failed" {
 		return nil
 	}
-	if e.manifest.Stage == "started" {
-		attempt, err := e.activeAttempt()
+	candidate := e.manifest
+	candidate.Attempts = append([]planningAttempt(nil), e.manifest.Attempts...)
+	if candidate.Stage == "started" {
+		attempt, err := candidateActiveAttempt(candidate)
 		if err != nil {
 			return err
 		}
 		attempt.Outcome = "failed"
 	} else {
-		e.manifest.Attempts = append(e.manifest.Attempts, planningAttempt{
-			Attempt: uint64(len(e.manifest.Attempts) + 1),
+		candidate.Attempts = append(candidate.Attempts, planningAttempt{
+			Attempt: uint64(len(candidate.Attempts) + 1),
 			Outcome: "failed",
 		})
 	}
-	e.manifest.Stage = "completed"
-	e.manifest.Outcome = "failed"
-	return writePlanningJSON(filepath.Join(e.directory, "manifest.json"), e.manifest)
+	candidate.Stage = "completed"
+	candidate.Outcome = "failed"
+	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), candidate); err != nil {
+		return err
+	}
+	e.manifest = candidate
+	return nil
+}
+
+func candidateActiveAttempt(manifest planningManifest) (*planningAttempt, error) {
+	if manifest.Stage != "started" || len(manifest.Attempts) == 0 {
+		return nil, &PlanningEvidenceError{Reason: "planning evidence is not active"}
+	}
+	attempt := &manifest.Attempts[len(manifest.Attempts)-1]
+	if attempt.Outcome != "active" {
+		return nil, &PlanningEvidenceError{Reason: "planning evidence has no active attempt"}
+	}
+	return attempt, nil
 }
 
 func (e *PlanningEvidence) activeAttempt() (*planningAttempt, error) {
