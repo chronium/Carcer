@@ -21,7 +21,9 @@ import (
 	"codexos/internal/experiment"
 	"codexos/internal/guest"
 	"codexos/internal/observability"
+	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/store"
 )
 
 const disposableGenerationHandoff = "The disposable generation completed its validated build."
@@ -154,7 +156,7 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 	if ctx.Err() != nil {
 		t.Fatalf("runner exceeded acceptance deadline: %v", ctx.Err())
 	}
-	assertDisposableProcessesStopped(t, processRecords)
+	assertDisposableProcessesStopped(t, processRecords, 3)
 
 	for _, want := range []string{
 		"Codex planning and implementation started for generation 0.",
@@ -275,6 +277,151 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 	}
 }
 
+func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
+	processRecords := t.TempDir()
+	t.Setenv("CODEXOS_DISPOSABLE_PROCESS_RECORDS", processRecords)
+	qemuExecutable := buildDisposableRunnerQEMU(t)
+	root, err := os.MkdirTemp("/tmp", "co-xrun-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	sourceRun := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceRun, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hardware, err := qemu.TestHardwareProfile.Manifest("QEMU emulator version disposable-cross-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := guest.EncodeSourceSnapshot([]guest.SnapshotFile{{
+		Path: "seed/kernel.c", Content: []byte("inherited source\n"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := experiment.WriteCompletedArchive(sourceRun, experiment.CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: hardware,
+		BootISO: []byte("source boot image"), Handoff: "Inherited handoff λ.\n",
+		SourceSnapshot: snapshot, KernelELF: []byte("inherited kernel"),
+		SuccessorISO: []byte("inherited successor image"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	featureStore, err := store.NewFeatureRequestStore(sourceRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := featureStore.Create(0, "Pending inherited capability", "Keep this request pending."); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := featureStore.Create(0, "Approved inherited capability", "Preserve this decision.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := featureStore.Approve(approved.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	repository := filepath.Join(root, "repository")
+	initializeDisposableGitRepository(t, repository)
+	sourceRecorder, err := provenance.NewGenerationGitRecorder(repository, sourceRun, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := sourceRecorder.Reconcile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Tag != "source/generation-0000" {
+		t.Fatalf("source Git records = %#v", records)
+	}
+
+	initialISO := filepath.Join(sourceRun, "generation-0000", "successor", "codexos.iso")
+	destinationRun := filepath.Join(root, "destination")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var output bytes.Buffer
+	err = runWithIOConfigured(ctx, Options{
+		RunDirectory:          destinationRun,
+		InitialISO:            initialISO,
+		GitRepository:         repository,
+		GitBaseRef:            "source/generation-0000",
+		InheritFromRun:        sourceRun,
+		InheritFromGeneration: 0,
+	}, strings.NewReader("status\nfeatures\nfeature 1\nfeature 2\nabort\ny\nquit\n"), &output, runnerConfiguration{
+		live: experiment.LiveRunOptions{
+			QEMUExecutable: qemuExecutable, HardwareProfile: qemu.TestHardwareProfile,
+			ReadyTimeout: 3 * time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run inherited generation: %v\n%s", err, output.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("inherited runner exceeded acceptance deadline: %v", ctx.Err())
+	}
+	assertDisposableProcessesStopped(t, processRecords, 1)
+
+	for _, wanted := range []string{
+		"Generation 0: RUNNING",
+		"Pending feature requests: 1",
+		"Previous handoff:\n  Inherited handoff λ.",
+		"1    0     pending    Pending inherited capability",
+		"2    0     approved   Approved inherited capability",
+		"Feature request: #1",
+		"Feature request: #2",
+		"Generation 0 aborted.",
+	} {
+		if !strings.Contains(output.String(), wanted) {
+			t.Fatalf("inherited operator output missing %q:\n%s", wanted, output.String())
+		}
+	}
+	bootstrap, err := store.LoadCrossRunBootstrap(destinationRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap == nil || bootstrap.SourceRun != "source" || bootstrap.SourceGeneration != 0 ||
+		bootstrap.Handoff != "Inherited handoff λ.\n" || bootstrap.GitBaseRef != "source/generation-0000" ||
+		len(bootstrap.InheritedRequestIDs) != 2 || bootstrap.InheritedRequestIDs[0] != 1 || bootstrap.InheritedRequestIDs[1] != 2 {
+		t.Fatalf("destination bootstrap = %#v", bootstrap)
+	}
+	destinationFeatures, err := store.NewFeatureRequestStore(destinationRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := destinationFeatures.Requests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0].Status != store.FeaturePending || requests[1].Status != store.FeatureApproved {
+		t.Fatalf("destination feature requests = %#v", requests)
+	}
+	loaded, err := experiment.NewCodexOSRun(destinationRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := loaded.InspectGeneration(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.Outcome != "aborted" || archive.Transition != "initial" || archive.ParentGeneration != nil {
+		t.Fatalf("destination archive = %#v", archive)
+	}
+	bootISO, err := os.ReadFile(filepath.Join(archive.ArchivePath, "boot", "codexos.iso"))
+	if err != nil || string(bootISO) != "inherited successor image" {
+		t.Fatalf("destination boot ISO = %q, %v", bootISO, err)
+	}
+	workspaces, err := filepath.Glob(filepath.Join(destinationRun, ".generation-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 0 {
+		t.Fatalf("inherited runner left generation workspaces: %v", workspaces)
+	}
+}
+
 func sendDisposableCommand(t *testing.T, cancel context.CancelFunc, input *os.File, result <-chan error, command string) {
 	t.Helper()
 	if _, err := io.WriteString(input, command); err != nil {
@@ -319,14 +466,14 @@ func stopDisposableRunner(cancel context.CancelFunc, input *os.File, result <-ch
 	}
 }
 
-func assertDisposableProcessesStopped(t *testing.T, directory string) {
+func assertDisposableProcessesStopped(t *testing.T, directory string, minimum int) {
 	t.Helper()
 	records, err := filepath.Glob(filepath.Join(directory, "*.pid"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) < 3 {
-		t.Fatalf("disposable process records = %v, want active QEMU, candidate QEMU, and Codex", records)
+	if len(records) < minimum {
+		t.Fatalf("disposable process records = %v, want at least %d", records, minimum)
 	}
 	for _, record := range records {
 		encoded, err := os.ReadFile(record)
@@ -341,6 +488,35 @@ func assertDisposableProcessesStopped(t *testing.T, directory string) {
 			t.Fatalf("disposable process %d from %s survived runner shutdown: %v", pid, record, err)
 		}
 	}
+}
+
+func initializeDisposableGitRepository(t *testing.T, repository string) {
+	t.Helper()
+	if err := os.Mkdir(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"init", "-q"},
+		{"config", "user.name", "Disposable acceptance"},
+		{"config", "user.email", "disposable@example.invalid"},
+	} {
+		runDisposableGit(t, repository, arguments...)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("trusted base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDisposableGit(t, repository, "add", "README.md")
+	runDisposableGit(t, repository, "commit", "-q", "-m", "Trusted disposable base")
+}
+
+func runDisposableGit(t *testing.T, repository string, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", arguments, err, output)
+	}
+	return string(output)
 }
 
 type synchronizedBuffer struct {

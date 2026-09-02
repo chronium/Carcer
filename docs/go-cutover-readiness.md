@@ -142,7 +142,10 @@ freeze the exact successful snapshot, publish the completed generation-zero
 archive, retain and then retire the same healthy Codex session at the gate, boot
 the selected successor, archive its abort, roll back to generation zero's
 successor in a later generation, archive that abort, and leave no child or live
-workspace. Tests cover exact bytes,
+workspace. A third runner scenario creates a completed source generation and
+annotated Git provenance, atomically bootstraps a fresh destination from its
+selected successor, exposes the inherited handoff and pending/approved feature
+requests, archives an abort, and reaps its QEMU child. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -177,8 +180,8 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: exercise cross-run bootstrap and large-transfer shutdown, repeat a
-complete live generation through the TUI and the separately built Go command
+owner layer: exercise large-transfer shutdown, repeat a complete live generation
+through the TUI and the separately built Go command
 boundary, perform the corresponding real-image candidate acceptance when the
 pinned guest/toolchain environment is available, and rerun the complete reference
 suite when the documented TCG candidate timing test can succeed. Both frontends
@@ -271,6 +274,24 @@ boundary. The ordinary plain console drives `status`, `pause`, confirmed
 immutable aborted generation-zero archive, and removal of the live generation
 workspace. It invokes no Codex session, compiler, candidate VM, telemetry
 endpoint, or live state.
+
+### Recorded disposable cross-run bootstrap acceptance
+
+From the repository root, the exact race-enabled command is:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerBootsCrossRunInheritanceWithGitProvenance$' -count=10 -timeout=180s
+```
+
+The test creates an immutable completed source generation, pending and approved
+feature requests, and its annotated generation Git tag. It then drives the real
+plain runner to atomically initialize a fresh destination, verify and boot the
+source successor ISO, expose the inherited handoff and feature ledger, archive a
+confirmed abort, and quit. The assertions cover the persisted bootstrap
+identities, exact boot bytes, feature statuses, archive metadata, removal of the
+live workspace, and reaping of the separately built standalone QEMU peer. No
+network, Codex session, compiler, candidate VM, paid review, production telemetry,
+or live experiment state is used.
 
 ### Recorded disposable completed-generation transitions
 
