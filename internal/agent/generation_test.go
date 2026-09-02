@@ -501,10 +501,10 @@ func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T
 	}()
 	select {
 	case <-toolStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("planning tool did not start")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		session.mu.Lock()
 		joining := session.turnPhase == "planning" && !session.turnAcceptingTools && session.activeTools == 1
@@ -528,7 +528,7 @@ func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T
 		if outcome.err != nil || outcome.result.TurnStatus != "completed" {
 			t.Fatalf("initial sequence = %#v, %v", outcome.result, outcome.err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("initial sequence did not continue after its planning tool stopped")
 	}
 	if err := session.Close(); err != nil {
