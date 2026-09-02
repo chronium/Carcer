@@ -1,8 +1,11 @@
 package experiment
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"codexos/internal/guest"
+	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 )
 
@@ -51,6 +55,33 @@ type AbortedArchive struct {
 type AbortedSuccessEvidence struct {
 	Manifest []byte
 	Snapshot []byte
+}
+
+type completedArchiveFiles struct {
+	Generation       uint64
+	ParentGeneration *uint64
+	Transition       string
+	Hardware         qemu.HardwareManifest
+	BootISO          string
+	Handoff          string
+	SourceSnapshot   []byte
+	KernelELF        string
+	SuccessorISO     string
+	KernelIdentity   provenance.FileIdentity
+	ISOIdentity      provenance.FileIdentity
+	QEMUStdout       string
+	QEMUStderr       string
+}
+
+type abortedArchiveFiles struct {
+	Generation       uint64
+	ParentGeneration *uint64
+	Transition       string
+	Hardware         qemu.HardwareManifest
+	BootISO          string
+	QEMUStdout       string
+	QEMUStderr       string
+	LatestSuccess    *AbortedSuccessEvidence
 }
 
 // WriteCompletedArchive validates and durably publishes one immutable
@@ -109,6 +140,64 @@ func WriteCompletedArchive(runDirectory string, input CompletedArchive) (Archive
 	})
 }
 
+// writeCompletedArchiveFiles is the live-runtime archive path. Large boot,
+// successor, and log files are streamed into the staging tree instead of
+// being retained together in memory.
+func writeCompletedArchiveFiles(runDirectory string, input completedArchiveFiles) (ArchivedGeneration, error) {
+	if err := validateArchiveMetadataInput(input.Generation, input.ParentGeneration, input.Transition); err != nil {
+		return ArchivedGeneration{}, err
+	}
+	if err := qemu.ValidateHardwareManifest(input.Hardware); err != nil {
+		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
+	}
+	if !utf8.ValidString(input.Handoff) {
+		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation handoff is not valid UTF-8"}
+	}
+	if _, err := guest.DecodeSourceSnapshot(input.SourceSnapshot); err != nil {
+		return ArchivedGeneration{}, err
+	}
+	return publishArchive(runDirectory, input.Generation, func(staging string) error {
+		if err := makeArchiveLayout(staging, true); err != nil {
+			return err
+		}
+		if err := writeArchiveMetadata(staging, input.Generation, "completed", input.ParentGeneration, input.Transition); err != nil {
+			return err
+		}
+		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
+		if err != nil {
+			return &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
+		}
+		for relative, contents := range map[string][]byte{
+			hardwareManifestName: hardware,
+			handoffName:          []byte(input.Handoff),
+			sourceSnapshotName:   input.SourceSnapshot,
+		} {
+			if err := writeArchiveFile(staging, relative, contents); err != nil {
+				return err
+			}
+		}
+		if err := materializeSnapshot(input.SourceSnapshot, filepath.Join(staging, sourceName)); err != nil {
+			return err
+		}
+		for destination, source := range map[string]string{
+			filepath.Join(archiveBootName, "codexos.iso"): input.BootISO,
+			stdoutName: input.QEMUStdout,
+			stderrName: input.QEMUStderr,
+		} {
+			if err := copyArchiveFile(staging, destination, source); err != nil {
+				return err
+			}
+		}
+		if err := copyArchiveFileVerified(staging, filepath.Join(successorName, "kernel.elf"), input.KernelELF, &input.KernelIdentity); err != nil {
+			return err
+		}
+		if err := copyArchiveFileVerified(staging, filepath.Join(successorName, "codexos.iso"), input.SuccessorISO, &input.ISOIdentity); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // WriteAbortedArchive validates and durably publishes one immutable aborted
 // archive.  The optional forensic pair is checked before publication.
 func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGeneration, error) {
@@ -148,6 +237,56 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 		}
 		if err := writeArchiveFile(staging, stderrName, input.QEMUStderr); err != nil {
 			return err
+		}
+		if input.LatestSuccess != nil {
+			if err := writeArchiveFile(staging, latestSuccessManifestName, input.LatestSuccess.Manifest); err != nil {
+				return err
+			}
+			if err := writeArchiveFile(staging, latestSuccessSnapshotName, input.LatestSuccess.Snapshot); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (ArchivedGeneration, error) {
+	if err := validateArchiveMetadataInput(input.Generation, input.ParentGeneration, input.Transition); err != nil {
+		return ArchivedGeneration{}, err
+	}
+	if err := qemu.ValidateHardwareManifest(input.Hardware); err != nil {
+		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
+	}
+	if input.LatestSuccess != nil {
+		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation); err != nil {
+			return ArchivedGeneration{}, err
+		}
+	}
+	return publishArchive(runDirectory, input.Generation, func(staging string) error {
+		if err := makeArchiveLayout(staging, false); err != nil {
+			return err
+		}
+		if err := writeArchiveMetadata(staging, input.Generation, "aborted", input.ParentGeneration, input.Transition); err != nil {
+			return err
+		}
+		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
+		if err != nil {
+			return &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
+		}
+		if err := writeArchiveFile(staging, hardwareManifestName, hardware); err != nil {
+			return err
+		}
+		if err := writeArchiveFile(staging, abortedMarkerName, []byte(AbortMarker)); err != nil {
+			return err
+		}
+		for destination, source := range map[string]string{
+			filepath.Join(archiveBootName, "codexos.iso"): input.BootISO,
+			stdoutName: input.QEMUStdout,
+			stderrName: input.QEMUStderr,
+		} {
+			if err := copyArchiveFile(staging, destination, source); err != nil {
+				return err
+			}
 		}
 		if input.LatestSuccess != nil {
 			if err := writeArchiveFile(staging, latestSuccessManifestName, input.LatestSuccess.Manifest); err != nil {
@@ -280,6 +419,51 @@ func writeArchiveFile(staging, relative string, contents []byte) error {
 		return &GenerationRuntimeError{Reason: "could not persist generation archive artifact: " + relative, Err: err}
 	}
 	remove = false
+	return nil
+}
+
+func copyArchiveFile(staging, relative, source string) error {
+	return copyArchiveFileVerified(staging, relative, source, nil)
+}
+
+func copyArchiveFileVerified(staging, relative, source string, expected *provenance.FileIdentity) error {
+	if filepath.IsAbs(relative) || stringsContainsDotDot(relative) {
+		return &GenerationRuntimeError{Reason: "unsafe generation archive path: " + relative}
+	}
+	input, err := openRegularNoFollow(source)
+	if err != nil {
+		return &GenerationRuntimeError{Reason: "could not open generation archive source: " + source, Err: err}
+	}
+	defer input.Close()
+	destination := filepath.Join(staging, relative)
+	if !pathWithin(staging, destination) {
+		return &GenerationRuntimeError{Reason: "unsafe generation archive path: " + relative}
+	}
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return &GenerationRuntimeError{Reason: "could not create generation archive artifact", Err: err}
+	}
+	writer := io.Writer(output)
+	var digest hash.Hash
+	if expected != nil {
+		digest = sha256.New()
+		writer = io.MultiWriter(output, digest)
+	}
+	written, copyErr := io.CopyBuffer(writer, input, make([]byte, 1024*1024))
+	if copyErr == nil && expected != nil &&
+		(uint64(written) != expected.Size || hex.EncodeToString(digest.Sum(nil)) != expected.SHA256) {
+		copyErr = &GenerationRuntimeError{Reason: "validated successor artifact changed before archival: " + source}
+	}
+	if copyErr == nil {
+		copyErr = output.Sync()
+	}
+	closeErr := output.Close()
+	if copyErr != nil {
+		return &GenerationRuntimeError{Reason: "could not persist generation archive artifact: " + relative, Err: copyErr}
+	}
+	if closeErr != nil {
+		return &GenerationRuntimeError{Reason: "could not persist generation archive artifact: " + relative, Err: closeErr}
+	}
 	return nil
 }
 

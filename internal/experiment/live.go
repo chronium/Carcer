@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"codexos/internal/build"
@@ -40,6 +41,8 @@ type LiveRunOptions struct {
 type liveRun struct {
 	operationMu sync.Mutex
 	resourceMu  sync.RWMutex
+	context     context.Context
+	cancel      context.CancelFunc
 
 	options      LiveRunOptions
 	featureStore *store.FeatureRequestStore
@@ -47,6 +50,8 @@ type liveRun struct {
 	provided     *store.ProvidedAssets
 	assetsReady  bool
 	generation   *liveGeneration
+	closed       bool
+	started      bool
 }
 
 type liveGeneration struct {
@@ -61,6 +66,7 @@ type liveGeneration struct {
 	hostServices *build.CodexOSHostServices
 	toolClient   *guest.ToolClient
 	cancel       context.CancelFunc
+	startedAt    time.Time
 }
 
 // NewLiveCodexOSRun creates a concrete process owner. It does not start QEMU.
@@ -94,8 +100,10 @@ func NewLiveCodexOSRun(runDirectory string, options LiveRunOptions) (*CodexOSRun
 	forensics := provenance.NewBuildReviewProvenance(run.runDirectory, func(event string, generation uint64, data map[string]any) {
 		run.recordLive(event, &generation, data)
 	})
+	liveContext, cancelLive := context.WithCancel(context.Background())
 	run.live = &liveRun{
 		options: options, featureStore: features, provenance: forensics,
+		context: liveContext, cancel: cancelLive,
 	}
 	if options.Metrics != nil {
 		requests, requestErr := features.Requests()
@@ -127,6 +135,9 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	}
 	r.live.operationMu.Lock()
 	defer r.live.operationMu.Unlock()
+	if r.live.closed {
+		return &GenerationRuntimeError{Reason: "CodexOS run is closed"}
+	}
 	r.gateMu.Lock()
 	if r.state != RuntimeStateStopped {
 		r.gateMu.Unlock()
@@ -143,7 +154,9 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	if err := r.configureLiveAssets(0); err != nil {
 		return err
 	}
-	generation, hardware, err := r.bootLiveGeneration(ctx, 0, initialISO)
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
+	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, initialISO)
 	if err != nil {
 		return err
 	}
@@ -158,6 +171,7 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	r.gateMu.Unlock()
 	r.setObservedLiveState()
 	r.recordLive("run_started", nil, map[string]any{})
+	r.live.started = true
 	r.recordLiveGenerationStarted(0, nil, "initial", generation.controller)
 	return nil
 }
@@ -203,6 +217,8 @@ func (r *CodexOSRun) FeatureRequests() ([]store.FeatureRequest, error) {
 	if r == nil || r.live == nil || r.live.featureStore == nil {
 		return []store.FeatureRequest{}, nil
 	}
+	r.live.operationMu.Lock()
+	defer r.live.operationMu.Unlock()
 	return r.live.featureStore.Requests()
 }
 
@@ -219,12 +235,17 @@ func (r *CodexOSRun) ListTools(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	r.recordLive("tool_guest_invocation_started", &number, map[string]any{"tool": "list_tools"})
-	tools, err := generation.toolClient.ListTools(ctx)
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
+	tools, err := generation.toolClient.ListTools(operationContext)
 	if err != nil {
 		r.recordLive("tool_guest_invocation_failed", &number, map[string]any{"tool": "list_tools"})
 		return nil, err
 	}
 	r.recordLive("tool_guest_invocation_completed", &number, map[string]any{"tool": "list_tools"})
+	if err := r.finishLiveIfRequested(generation, number); err != nil {
+		return nil, err
+	}
 	return tools, nil
 }
 
@@ -240,7 +261,9 @@ func (r *CodexOSRun) InvokeTool(ctx context.Context, name string, arguments [][]
 		return guest.ToolResult{}, err
 	}
 	r.recordLive("tool_guest_invocation_started", &number, map[string]any{"tool": name})
-	result, err := generation.toolClient.InvokeTool(ctx, name, arguments)
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
+	result, err := generation.toolClient.InvokeTool(operationContext, name, arguments)
 	if err != nil {
 		r.recordLive("tool_guest_invocation_failed", &number, map[string]any{"tool": name})
 		return guest.ToolResult{}, err
@@ -248,6 +271,9 @@ func (r *CodexOSRun) InvokeTool(ctx context.Context, name string, arguments [][]
 	r.recordLive("tool_guest_invocation_completed", &number, map[string]any{
 		"tool": name, "status": result.Status, "output_bytes": len(result.Output),
 	})
+	if err := r.finishLiveIfRequested(generation, number); err != nil {
+		return guest.ToolResult{}, err
+	}
 	return result, nil
 }
 
@@ -260,24 +286,26 @@ func (r *CodexOSRun) Pause(ctx context.Context) error {
 	}
 	r.live.operationMu.Lock()
 	defer r.live.operationMu.Unlock()
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
 	generation, number, err := r.requireRunningLiveGeneration()
 	if err != nil {
 		return err
 	}
-	if err := generation.qmp.Stop(ctx); err != nil {
+	if err := generation.qmp.Stop(operationContext); err != nil {
 		return err
 	}
-	status, err := generation.qmp.QueryStatus(ctx)
+	r.gateMu.Lock()
+	r.state = RuntimeStatePaused
+	r.gateMu.Unlock()
+	r.setObservedLiveState()
+	status, err := generation.qmp.QueryStatus(operationContext)
 	if err != nil {
 		return err
 	}
 	if status != "paused" {
 		return &GenerationRuntimeError{Reason: fmt.Sprintf("QEMU did not pause; status is %q", status)}
 	}
-	r.gateMu.Lock()
-	r.state = RuntimeStatePaused
-	r.gateMu.Unlock()
-	r.setObservedLiveState()
 	r.recordLive("generation_paused", &number, map[string]any{})
 	return nil
 }
@@ -291,6 +319,8 @@ func (r *CodexOSRun) Resume(ctx context.Context) error {
 	}
 	r.live.operationMu.Lock()
 	defer r.live.operationMu.Unlock()
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
 	r.gateMu.Lock()
 	if r.state != RuntimeStatePaused || r.generationNumber == nil {
 		r.gateMu.Unlock()
@@ -302,10 +332,10 @@ func (r *CodexOSRun) Resume(ctx context.Context) error {
 	if generation == nil {
 		return &GenerationRuntimeError{Reason: "CodexOS QMP connection is unavailable"}
 	}
-	if err := generation.qmp.Continue(ctx); err != nil {
+	if err := generation.qmp.Continue(operationContext); err != nil {
 		return err
 	}
-	status, err := generation.qmp.QueryStatus(ctx)
+	status, err := generation.qmp.QueryStatus(operationContext)
 	if err != nil {
 		return err
 	}
@@ -343,11 +373,14 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 		stdoutPath: filepath.Join(workspace, stdoutName),
 		stderrPath: filepath.Join(workspace, stderrName),
 	}
-	dispatcherContext, cancelDispatcher := context.WithCancel(context.Background())
+	dispatcherContext, cancelDispatcher := context.WithCancel(r.live.context)
 	generation.cancel = cancelDispatcher
 	defer func() {
 		if resultErr != nil {
-			_ = closeLiveGeneration(generation, defaultGenerationStopTimeout)
+			if closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout); closeErr != nil {
+				resultErr = errors.Join(resultErr, closeErr)
+				return
+			}
 			_ = os.RemoveAll(workspace)
 		}
 	}()
@@ -409,6 +442,7 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 		return nil, qemu.HardwareManifest{}, err
 	}
 	generation.toolClient = guest.NewToolClient(generation.dispatcher)
+	generation.startedAt = time.Now()
 	return generation, hardware, nil
 }
 
@@ -460,15 +494,17 @@ func (r *CodexOSRun) liveGeneration() *liveGeneration {
 	return r.live.generation
 }
 
-func (r *CodexOSRun) detachLiveGeneration() *liveGeneration {
+func (r *CodexOSRun) detachExpectedLiveGeneration(expected *liveGeneration) bool {
 	if r == nil || r.live == nil {
-		return nil
+		return false
 	}
 	r.live.resourceMu.Lock()
-	generation := r.live.generation
+	defer r.live.resourceMu.Unlock()
+	if r.live.generation != expected {
+		return false
+	}
 	r.live.generation = nil
-	r.live.resourceMu.Unlock()
-	return generation
+	return true
 }
 
 func closeLiveGeneration(generation *liveGeneration, timeout time.Duration) error {
@@ -518,17 +554,50 @@ func closeLiveGeneration(generation *liveGeneration, timeout time.Duration) erro
 	return errors.Join(errorsSeen...)
 }
 
-func (r *CodexOSRun) stopLive() {
+func (r *CodexOSRun) stopLive() error {
 	if r == nil || r.live == nil {
-		return
+		return nil
 	}
+	r.live.cancel()
 	r.live.operationMu.Lock()
-	generation := r.detachLiveGeneration()
-	_ = closeLiveGeneration(generation, defaultGenerationStopTimeout)
-	if generation != nil {
+	r.live.closed = true
+	generation := r.liveGeneration()
+	err := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+	if generation != nil && err == nil {
+		_ = r.detachExpectedLiveGeneration(generation)
 		_ = os.RemoveAll(generation.workspace)
 	}
+	if err == nil && r.live.started {
+		r.recordLive("run_stopped", nil, map[string]any{})
+		r.live.started = false
+	}
 	r.live.operationMu.Unlock()
+	return err
+}
+
+// Close cancels active guest/build work, then joins the live QEMU and serial
+// owners. A cleanup error leaves the workspace in place for diagnosis.
+func (r *CodexOSRun) Close() error {
+	if r == nil {
+		return nil
+	}
+	err := r.stopLive()
+	if err == nil {
+		r.clearStoppedState()
+	}
+	return err
+}
+
+func (r *CodexOSRun) liveOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationContext, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.live.context, cancel)
+	return operationContext, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (r *CodexOSRun) recordLive(event string, generation *uint64, data map[string]any) {
@@ -584,7 +653,7 @@ func providedAssetsHandler(assets *store.ProvidedAssets) guest.HostServiceHandle
 }
 
 func copyLiveFile(source, destination string) error {
-	input, err := os.Open(source)
+	input, err := openRegularNoFollow(source)
 	if err != nil {
 		return err
 	}
@@ -599,4 +668,22 @@ func copyLiveFile(source, destination string) error {
 		return copyErr
 	}
 	return closeErr
+}
+
+func openRegularNoFollow(path string) (*os.File, error) {
+	fileDescriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fileDescriptor), path)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("source is not a regular file: %s", path)
+	}
+	return file, nil
 }

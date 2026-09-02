@@ -5,6 +5,7 @@ package experiment
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"codexos/internal/guest"
@@ -107,10 +109,9 @@ func (e *GenerationRuntimeError) Error() string {
 
 func (e *GenerationRuntimeError) Unwrap() error { return e.Err }
 
-// CodexOSRun is the recoverable state of one run.  It intentionally contains
-// no QEMU, Codex, serial, or background-process owner.  A future runtime can
-// attach those resources around these gate decisions without changing the
-// durable archive contract.
+// CodexOSRun is the recoverable state of one run. NewCodexOSRun constructs the
+// process-free archive/gate model; NewLiveCodexOSRun attaches concrete QEMU,
+// serial, build, and guest-tool ownership to the same durable contract.
 type CodexOSRun struct {
 	gateMu       sync.Mutex
 	runDirectory string
@@ -126,6 +127,7 @@ type CodexOSRun struct {
 	currentBootImage  string
 	currentHardware   qemu.HardwareManifest
 	retainedFinish    *uint64
+	transitioning     bool
 }
 
 // NewCodexOSRun opens a stopped run object.  Creating the run directory is
@@ -234,7 +236,7 @@ func (r *CodexOSRun) GenerationFinishFrozen() bool {
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
-	return r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+	return !r.transitioning && r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
 }
 
 // RetainGenerationFinish atomically leases one frozen completed-generation
@@ -246,7 +248,7 @@ func (r *CodexOSRun) RetainGenerationFinish(generation uint64) bool {
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
-	if r.retainedFinish != nil || r.state != RuntimeStateAwaitingNextGeneration ||
+	if r.transitioning || r.retainedFinish != nil || r.state != RuntimeStateAwaitingNextGeneration ||
 		r.pendingFinish == nil || r.generationNumber == nil || *r.generationNumber != generation {
 		return false
 	}
@@ -261,7 +263,7 @@ func (r *CodexOSRun) GenerationFinishRetained(generation uint64) bool {
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
 	return r.retainedFinish != nil && *r.retainedFinish == generation &&
-		r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
+		!r.transitioning && r.state == RuntimeStateAwaitingNextGeneration && r.pendingFinish != nil
 }
 
 func (r *CodexOSRun) ReleaseGenerationFinish(generation uint64) {
@@ -295,12 +297,24 @@ func (r *CodexOSRun) InspectGeneration(generation uint64) (ArchivedGeneration, e
 
 // ReopenAtGate validates the complete archive history and restores only the
 // gate state.  It never starts QEMU, Codex, or any other process.
-func (r *CodexOSRun) ReopenAtGate() error {
+func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
+	if r.live != nil {
+		r.live.operationMu.Lock()
+		defer r.live.operationMu.Unlock()
+		if r.live.closed {
+			return &GenerationRuntimeError{Reason: "CodexOS run is closed"}
+		}
+	}
 	r.gateMu.Lock()
-	defer r.gateMu.Unlock()
+	defer func() {
+		r.gateMu.Unlock()
+		if resultErr == nil && r.live != nil {
+			r.setObservedLiveState()
+		}
+	}()
 	if r.state != RuntimeStateStopped {
 		return &GenerationRuntimeError{Reason: "CodexOS run is not stopped"}
 	}
@@ -326,6 +340,15 @@ func (r *CodexOSRun) ReopenAtGate() error {
 	}
 
 	latest := archives[len(archives)-1]
+	if r.live != nil {
+		effectiveGeneration := latest.Generation
+		if effectiveGeneration != ^uint64(0) {
+			effectiveGeneration++
+		}
+		if err := r.configureLiveAssets(effectiveGeneration); err != nil {
+			return err
+		}
+	}
 	var pending *PendingGenerationFinish
 	var previous *string
 	if latest.Outcome == "completed" {
@@ -350,11 +373,24 @@ func (r *CodexOSRun) ReopenAtGate() error {
 	r.generationNumber = cloneUint64Pointer(&latest.Generation)
 	r.pendingFinish = pending
 	r.previousHandoff = previous
-	r.currentParent = cloneUint64Pointer(latest.ParentGeneration)
-	r.currentTransition = latest.Transition
-	r.currentBootImage = filepath.Join(latest.ArchivePath, archiveBootName, "codexos.iso")
-	r.currentHardware = latest.Hardware
+	if r.live != nil {
+		r.currentParent = nil
+		r.currentTransition = ""
+		r.currentBootImage = ""
+		r.currentHardware = qemu.HardwareManifest{}
+	} else {
+		r.currentParent = cloneUint64Pointer(latest.ParentGeneration)
+		r.currentTransition = latest.Transition
+		r.currentBootImage = filepath.Join(latest.ArchivePath, archiveBootName, "codexos.iso")
+		r.currentHardware = latest.Hardware
+	}
 	r.state = RuntimeStateAwaitingNextGeneration
+	if r.live != nil {
+		r.live.started = true
+		r.recordLive("run_reopened_at_gate", &latest.Generation, map[string]any{
+			"latest_outcome": latest.Outcome, "successor_selected": pending != nil,
+		})
+	}
 	return nil
 }
 
@@ -366,7 +402,9 @@ func (r *CodexOSRun) ContinueGeneration() error {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
 	if r.live != nil {
-		return &GenerationRuntimeError{Reason: "live generation continuation is not yet available"}
+		ctx, cancel := context.WithTimeout(context.Background(), r.live.options.ReadyTimeout+15*time.Second)
+		defer cancel()
+		return r.continueLiveGeneration(ctx)
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
@@ -408,7 +446,9 @@ func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
 	if r.live != nil {
-		return &GenerationRuntimeError{Reason: "live generation rollback is not yet available"}
+		ctx, cancel := context.WithTimeout(context.Background(), r.live.options.ReadyTimeout+15*time.Second)
+		defer cancel()
+		return r.forkLiveGeneration(ctx, generation)
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
@@ -466,7 +506,7 @@ func (r *CodexOSRun) AbortGeneration() error {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
 	if r.live != nil {
-		return &GenerationRuntimeError{Reason: "live generation abort is not yet available"}
+		return r.abortLiveGeneration()
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
@@ -505,7 +545,15 @@ func (r *CodexOSRun) Stop() {
 	if r == nil {
 		return
 	}
-	r.stopLive()
+	if err := r.stopLive(); err == nil {
+		r.clearStoppedState()
+	}
+}
+
+func (r *CodexOSRun) clearStoppedState() {
+	if r == nil {
+		return
+	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
 	r.pendingFinish = nil
@@ -515,6 +563,7 @@ func (r *CodexOSRun) Stop() {
 	r.currentTransition = ""
 	r.currentBootImage = ""
 	r.currentHardware = qemu.HardwareManifest{}
+	r.transitioning = false
 	r.state = RuntimeStateStopped
 }
 
