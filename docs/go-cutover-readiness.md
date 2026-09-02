@@ -62,8 +62,10 @@ selection. It does not yet perform the selected QEMU boot or create the required
 fresh Codex session.
 The Cobra command surface validates the Python startup flags, mutually exclusive
 opening and display modes, paired Git and inheritance options, and automatic
-TUI selection before handing control to a runner. The concrete runner, terminal
-probe, operator commands, and Go process entry point are not yet implemented.
+TUI selection before handing control to a runner. The concrete runner, operator
+commands, and Go process entry point are not yet implemented. The
+display probe itself requires both streams to be TTYs and rejects empty or
+`dumb` terminals, matching Python.
 
 ## Verification performed
 
