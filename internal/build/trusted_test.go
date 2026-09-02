@@ -109,6 +109,7 @@ func TestBuildSourceSnapshotDoesNotOverwriteExistingArtifacts(t *testing.T) {
 
 func TestBuildSourceSnapshotBoundsGuestDiagnostics(t *testing.T) {
 	config, files := syntheticBuildFixture(t)
+	config.DiagnosticLimit = defaultDiagnosticLimit * 2
 	compiler := config.Tools.CrossCompiler
 	if err := os.WriteFile(compiler, []byte(`#!/bin/sh
 case "$1" in

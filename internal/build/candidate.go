@@ -44,6 +44,11 @@ type CandidateBootConfig struct {
 type CandidateBootResult struct {
 	Status      BuildStatus
 	Diagnostics string
+
+	// provenanceFailure means the validator could not persist trusted evidence.
+	// The host service must leave that attempt incomplete rather than recording
+	// the failure as an ordinary candidate result.
+	provenanceFailure bool
 }
 
 // CandidateBootValidator owns the ephemeral QEMU, QMP, serial, and temporary
@@ -99,11 +104,13 @@ func (v *CandidateBootValidator) Validate(
 		identity := identityData(evidence, isoIdentity)
 		v.publishCandidateFailure(result, identity)
 		if evidence != nil {
-			_ = evidence.RecordCandidateStage(
+			if err := evidence.RecordCandidateStage(
 				"build_candidate_validation_completed",
 				"candidate_completed",
 				map[string]any{"outcome": "harness_failure"},
-			)
+			); err != nil {
+				result = candidateProvenanceFailure(err)
+			}
 		}
 		return result
 	}
@@ -117,7 +124,7 @@ func (v *CandidateBootValidator) Validate(
 				"expected_iso_bytes":  identityValue(identity, "iso_bytes"),
 			},
 		); err != nil {
-			result := harnessCandidateFailure(err)
+			result := candidateProvenanceFailure(err)
 			v.publishCandidateFailure(result, identity)
 			return result
 		}
@@ -139,7 +146,9 @@ func (v *CandidateBootValidator) Validate(
 	result := v.validateInWorkspace(ctx, workspace, candidateISO, evidence, identity)
 	removeErr := os.RemoveAll(workspace)
 	if removeErr != nil {
+		provenanceFailure := result.provenanceFailure
 		result = harnessCandidateFailure(fmt.Errorf("could not remove candidate workspace: %w", removeErr))
+		result.provenanceFailure = provenanceFailure
 	}
 	if result.Status != BuildStatusSuccess {
 		v.publishCandidateFailure(result, identity)
@@ -186,7 +195,9 @@ func (v *CandidateBootValidator) validateInWorkspace(
 			cleanupErrors = append(cleanupErrors, "candidate QEMU remained running")
 		}
 		if len(cleanupErrors) != 0 {
+			provenanceFailure := result.provenanceFailure
 			result = harnessCandidateFailure(errors.New(strings.Join(cleanupErrors, "; ")))
+			result.provenanceFailure = provenanceFailure
 		}
 	}()
 
@@ -208,7 +219,7 @@ func (v *CandidateBootValidator) validateInWorkspace(
 	}
 	if evidence != nil {
 		if err := evidence.RecordCandidateStage("build_candidate_qemu_started", "candidate_qemu_started"); err != nil {
-			return harnessCandidateFailure(err)
+			return candidateProvenanceFailure(err)
 		}
 	}
 
@@ -240,7 +251,10 @@ func (v *CandidateBootValidator) validateInWorkspace(
 		if ctx.Err() != nil {
 			return harnessCandidateFailure(ctx.Err())
 		}
-		return guestCandidateFailure(candidateReadyDiagnostic(err, dispatcher.StartupDiagnostic()))
+		if candidateGuestProtocolError(err, true) {
+			return guestCandidateFailure(candidateReadyDiagnostic(err, dispatcher.StartupDiagnostic()))
+		}
+		return harnessCandidateFailure(fmt.Errorf("candidate protocol validator failed internally: %w", err))
 	}
 	if evidence != nil {
 		if err := evidence.RecordCandidateStage(
@@ -248,14 +262,14 @@ func (v *CandidateBootValidator) validateInWorkspace(
 			"ready_observed",
 			map[string]any{"ready": true},
 		); err != nil {
-			return harnessCandidateFailure(err)
+			return candidateProvenanceFailure(err)
 		}
 	}
 	v.publish(observability.ActivityBuildCandidateReady, identity)
 
 	if evidence != nil {
 		if err := evidence.RecordCandidateStage("build_protocol_validation_started", "protocol_validation_started"); err != nil {
-			return harnessCandidateFailure(err)
+			return candidateProvenanceFailure(err)
 		}
 	}
 	client := guest.NewToolClient(dispatcher)
@@ -267,21 +281,28 @@ func (v *CandidateBootValidator) validateInWorkspace(
 					"protocol_validation_failed",
 					map[string]any{"outcome": "harness_failure"},
 				); evidenceErr != nil {
-					return harnessCandidateFailure(evidenceErr)
+					return candidateProvenanceFailure(evidenceErr)
 				}
 			}
 			return harnessCandidateFailure(errors.New("canonical list-tools exchange failed: " + err.Error()))
+		}
+		guestFailure := candidateGuestProtocolError(err, false)
+		failureStatus := "harness_failure"
+		failure := harnessCandidateFailure(fmt.Errorf("candidate protocol validator failed internally: %w", err))
+		if guestFailure {
+			failureStatus = "build_failure"
+			failure = guestCandidateFailure("canonical list-tools exchange failed: " + err.Error())
 		}
 		if evidence != nil {
 			if evidenceErr := evidence.RecordCandidateStage(
 				"build_protocol_validation_completed",
 				"protocol_validation_failed",
-				map[string]any{"outcome": "build_failure"},
+				map[string]any{"outcome": failureStatus},
 			); evidenceErr != nil {
-				return harnessCandidateFailure(evidenceErr)
+				return candidateProvenanceFailure(evidenceErr)
 			}
 		}
-		return guestCandidateFailure("canonical list-tools exchange failed: " + err.Error())
+		return failure
 	}
 	if evidence != nil {
 		if err := evidence.RecordCandidateStage(
@@ -289,7 +310,7 @@ func (v *CandidateBootValidator) validateInWorkspace(
 			"protocol_validated",
 			map[string]any{"outcome": "success", "protocol_validated": true},
 		); err != nil {
-			return harnessCandidateFailure(err)
+			return candidateProvenanceFailure(err)
 		}
 	}
 	v.publish(observability.ActivityBuildProtocolValidated, identity)
@@ -333,7 +354,7 @@ func (v *CandidateBootValidator) complete(
 			"candidate_completed",
 			map[string]any{"outcome": string(outcome)},
 		); err != nil {
-			result = harnessCandidateFailure(err)
+			result = candidateProvenanceFailure(err)
 		}
 	}
 	return result
@@ -355,6 +376,39 @@ func guestCandidateFailure(detail string) CandidateBootResult {
 	return CandidateBootResult{
 		Status:      BuildStatusBuildFailure,
 		Diagnostics: boundCandidateDiagnostics("Trusted compilation succeeded.\nCandidate boot validation failed:\n" + detail),
+	}
+}
+
+func candidateProvenanceFailure(detail error) CandidateBootResult {
+	result := harnessCandidateFailure(detail)
+	result.provenanceFailure = true
+	return result
+}
+
+func candidateGuestProtocolError(err error, readiness bool) bool {
+	var serialErr *guest.SerialError
+	if errors.As(err, &serialErr) {
+		return true
+	}
+	var framingErr *guest.FramingError
+	if errors.As(err, &framingErr) {
+		return true
+	}
+	var toolErr *guest.ToolProtocolError
+	if errors.As(err, &toolErr) {
+		return true
+	}
+	var dispatcherErr *guest.DispatcherError
+	if !errors.As(err, &dispatcherErr) {
+		return false
+	}
+	switch dispatcherErr.Reason {
+	case "timed out waiting for CODEXOS-SEED-READY":
+		return readiness
+	case "timed out waiting for tool response", "timed out writing serial protocol frame":
+		return !readiness
+	default:
+		return false
 	}
 }
 

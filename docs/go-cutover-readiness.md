@@ -26,7 +26,8 @@ exit-interview capture, and immutable Markdown publication are implemented.
 Build and review evidence includes immutable sequence allocation, exact byte
 identities, incomplete-attempt preservation, source-read capture, and
 fail-closed latest-success publication. Review evidence is wired to the isolated
-Go reviewer; build-service and other Codex-session wiring remains incomplete.
+Go reviewer, and build evidence is wired to the joined trusted compile and
+candidate-validation host service. Other Codex-session wiring remains incomplete.
 Generation Git reconciliation preserves the
 configured base commit, exact source trees/messages/annotations, rollback
 lineages, immutable conflicts, and the developer worktree; operator integration
@@ -50,11 +51,15 @@ and annotated Git-base identities. Generation lifecycle wiring remains separate.
 The trusted build operation validates and materializes a source snapshot, uses
 only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bounds
 diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
-without overwriting an existing result. The guest build service and candidate
-boot proof are not yet joined by the guest-facing build service. The standalone
-candidate validator boots only in a fresh workspace, establishes QMP and serial
-before continuing execution, proves READY and list-tools behavior, records
-forensic stages, and reaps the disposable QEMU on every tested outcome.
+without overwriting an existing result. The guest-facing build service creates a
+fresh attempt, records fail-closed provenance, compiles the exact snapshot,
+requires the disposable candidate proof, and retains only the most recent
+validated success. The concrete host-service owner also freezes a finish request
+only when its exact snapshot matches that success, records feature requests, and
+routes frozen provided assets. The candidate validator boots only in a fresh
+workspace, establishes QMP and serial before continuing execution, proves READY
+and list-tools behavior, records forensic stages, and reaps the disposable QEMU
+on every tested outcome.
 The process-free lifecycle core writes and reloads immutable completed and
 aborted generation archives, rejects partial or inconsistent histories, restores
 an archived gate without booting, and requires an explicit successor or rollback
@@ -99,7 +104,7 @@ lifecycle.
 
 ## Remaining gaps and known differences
 
-Generation orchestration, guest build/finish services, implementor/planning and
+Generation orchestration, live build/finish routing, implementor/planning and
 interview Codex sessions, concrete CLI startup,
 operator commands, and the interactive TUI application remain to be
 implemented. Go `ReadFrame` relies on

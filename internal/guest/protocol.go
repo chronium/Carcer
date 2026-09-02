@@ -78,7 +78,12 @@ func DecodeHostServiceRequest(frame Frame) (HostRequest, error) {
 		if err != nil {
 			return HostRequest{}, err
 		}
-		arguments = append(arguments, append([]byte(nil), argument...))
+		// Preserve the distinction between an absent argument slice and an
+		// explicitly present empty argument. Provenance uses that distinction
+		// when recording the source snapshot supplied to the build service.
+		copied := make([]byte, len(argument))
+		copy(copied, argument)
+		arguments = append(arguments, copied)
 	}
 	if !decoder.done() {
 		return HostRequest{}, &HostServiceProtocolError{Reason: "unexpected trailing data in host-service request"}

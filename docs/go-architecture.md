@@ -145,11 +145,14 @@ and operator orchestration remain separate.
 workspace. It copies pinned Limine inputs, discovers and validates the fixed
 toolchain, runs guest compilation and ISO construction under bubblewrap without
 interpreting guest commands, bounds diagnostics, kills cancelled process groups,
-and publishes only non-colliding artifacts. Candidate boot validation and the
-guest-facing build service remain separate slices. The candidate validator owns
-one disposable QEMU, establishes QMP and serial controls while execution is
-paused, then requires canonical READY and list-tools proofs before success. Its
-bounded cleanup path quits or stops and reaps the child even after cancellation.
+and publishes only non-colliding artifacts. The candidate validator owns one
+disposable QEMU, establishes QMP and serial controls while execution is paused,
+then requires canonical READY and list-tools proofs before success. Its bounded
+cleanup path quits or stops and reaps the child even after cancellation. The
+guest-facing host-service owner joins those operations, retains only the latest
+fully validated successor, freezes a matching finish request, records advisory
+feature requests, and routes explicitly configured provided assets. Live
+generation orchestration remains separate.
 `internal/experiment` can also publish and load immutable completed or aborted
 generation archives, validate their ancestry and exact contents, and reopen a
 stopped run at a gate without starting any process. Successor continuation and

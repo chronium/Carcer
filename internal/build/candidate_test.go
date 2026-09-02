@@ -200,6 +200,67 @@ func TestCandidateBootValidationInfrastructureFailureUsesHarnessStatus(t *testin
 	}
 }
 
+func TestCandidateBootValidationLeavesEvidenceIncompleteWhenStageWriteFails(t *testing.T) {
+	root := candidateRoot(t)
+	generation := uint64(5)
+	evidence, err := newTestCandidateEvidence(filepath.Join(root, "run"), generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(
+		root,
+		"run",
+		"build-review-provenance",
+		"generation-0005",
+		evidence.AttemptID(),
+		"manifest.json",
+	)
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(manifestPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	validator, err := NewCandidateBootValidator(CandidateBootConfig{
+		QEMUExecutable:  filepath.Join(root, "missing-qemu"),
+		HardwareProfile: qemu.TestHardwareProfile,
+		TemporaryParent: root,
+		Generation:      &generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := validator.Validate(context.Background(), filepath.Join(root, "missing.iso"), evidence, nil)
+	if !result.provenanceFailure || result.Status != BuildStatusHarnessFailure {
+		t.Fatalf("stage write failure = %#v, want an unfinalized provenance failure", result)
+	}
+}
+
+func TestCandidateProtocolErrorsUsePythonFailureCategories(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		readiness bool
+		guest     bool
+	}{
+		{name: "serial", err: &guest.SerialError{Reason: "closed"}, guest: true},
+		{name: "framing", err: &guest.FramingError{Reason: "bad frame"}, guest: true},
+		{name: "tool protocol", err: &guest.ToolProtocolError{Reason: "bad response"}, guest: true},
+		{name: "ready timeout", err: &guest.DispatcherError{Reason: "timed out waiting for CODEXOS-SEED-READY"}, readiness: true, guest: true},
+		{name: "ready timeout in exchange", err: &guest.DispatcherError{Reason: "timed out waiting for CODEXOS-SEED-READY"}, guest: false},
+		{name: "response timeout", err: &guest.DispatcherError{Reason: "timed out waiting for tool response"}, guest: true},
+		{name: "write timeout", err: &guest.DispatcherError{Reason: "timed out writing serial protocol frame"}, guest: true},
+		{name: "dispatcher state", err: &guest.DispatcherError{Reason: "guest serial protocol is not ready"}, guest: false},
+		{name: "unknown", err: errors.New("internal failure"), guest: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := candidateGuestProtocolError(test.err, test.readiness); got != test.guest {
+				t.Fatalf("candidateGuestProtocolError() = %v, want %v", got, test.guest)
+			}
+		})
+	}
+}
+
 var testFileIdentity = provenance.FileIdentity{SHA256: strings.Repeat("a", 64), Size: 12}
 
 func candidateRoot(t *testing.T) string {

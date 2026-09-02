@@ -277,6 +277,11 @@ func (c Config) normalized() (normalizedConfig, error) {
 	diagnosticLimit := c.DiagnosticLimit
 	if diagnosticLimit == 0 {
 		diagnosticLimit = defaultDiagnosticLimit
+	} else if diagnosticLimit > defaultDiagnosticLimit {
+		// The Python reference exposes a fixed 64 KiB diagnostic bound. Keep
+		// trusted build responses bounded even when a caller supplies a larger
+		// harness configuration value.
+		diagnosticLimit = defaultDiagnosticLimit
 	}
 
 	tools := c.Tools

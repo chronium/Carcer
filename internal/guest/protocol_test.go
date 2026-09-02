@@ -34,6 +34,9 @@ func TestHostServiceRequestAndResponseCodecs(t *testing.T) {
 			t.Fatalf("argument %d differs", index)
 		}
 	}
+	if request.Arguments[0] == nil {
+		t.Fatal("explicitly empty argument was decoded as absent")
+	}
 
 	response, err := CreateHostServiceResponse(37, 0xa0b0c0d0, []byte{0, 255})
 	if err != nil {
