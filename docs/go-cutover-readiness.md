@@ -66,6 +66,13 @@ TUI selection before handing control to a runner. The concrete runner, operator
 commands, and Go process entry point are not yet implemented. The
 display probe itself requires both streams to be TTYs and rejects empty or
 `dumb` terminals, matching Python.
+The pure TUI activity model preserves attribution and semantic coalescing for
+messages, exposed reasoning summaries, tools, feature requests, build phases,
+operator output, interview questions, and abnormal lifecycle events. Its typed
+snapshots are immutable to callers, its scrollback and payload display are
+independently bounded, and hostile terminal controls are escaped. The Bubble
+Tea application and interactive selection, prompts, and shutdown behavior are
+not yet implemented.
 
 ## Verification performed
 
@@ -94,7 +101,7 @@ lifecycle.
 
 Generation orchestration, guest build/finish services, implementor/planning and
 interview Codex sessions, concrete CLI startup,
-operator commands, and TUI capabilities remain to be
+operator commands, and the interactive TUI application remain to be
 implemented. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production

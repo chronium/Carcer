@@ -163,3 +163,9 @@ terminal controls inert, and parses the exact plain-console `ask TEXT` form
 without changing the question body. Operator commands, runtime construction,
 and `cmd/codexos` remain separate, so Python is still the only operational
 entry point.
+`internal/tui` provides the frontend-independent operator activity model. It
+coalesces attributed message, reasoning, tool, feature-request, build,
+operator, interview, and abnormal-lifecycle events into typed immutable
+snapshots; applies independent entry, byte, and payload bounds; and makes all
+untrusted terminal controls inert. The Bubble Tea application, selection and
+prompt interaction, and terminal restoration remain separate.
