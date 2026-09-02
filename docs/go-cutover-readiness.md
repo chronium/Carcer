@@ -114,8 +114,9 @@ Streaming agent messages remain literal and finalized messages are rendered by
 bounded Glamour Markdown without changing canonical activity text or enabling
 terminal hyperlinks. Caller cancellation and external shutdown cancel command
 work but send Bubble Tea a graceful quit, so its Linux terminal reader is joined
-before descriptor close. A complete disposable live TUI acceptance run remains
-outstanding.
+before descriptor close. The separately built command completes a disposable
+generation through that TUI boundary and renders the frozen completed gate
+before restoring the terminal and reaping every child.
 
 ## Verification performed
 
@@ -161,7 +162,12 @@ exact command arguments and archived manifest bytes with the Python module;
 malformed manifest parsing also has a fuzz target. Synthetic subprocesses cover
 normal exit, duplicate start, cancellation, restart, log failures, and forced
 kill, while an optional disposable `-machine none` QEMU test exercises the real
-controller/QMP boundary without KVM or a guest image.
+controller/QMP boundary without KVM or a guest image. An opt-in Linux acceptance
+uses the available real cross-toolchain, bubblewrap, xorriso, pinned Limine
+inputs, and QEMU to compile the canonical seed, boot its real ISO under the disposable
+`test-v1` profile, observe READY, complete the canonical list-tools exchange,
+and clean up the candidate workspace. It passes ten consecutive race-enabled
+runs under the available TCG fallback.
 
 Serial verification includes fragmented READY and frames, read-before-write
 ordering, forced partial writes, nested host requests, response-timeout suspension,
@@ -184,12 +190,14 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: perform real-image candidate acceptance when the pinned
-guest/toolchain environment is available, and rerun the complete reference suite
-when the documented TCG candidate timing test can succeed. The plain frontend is
-exercised through a complete live planning/build/finish/continue/rollback
-scenario; the TUI and separately built Go command are exercised through a full
-planning/build/finish generation and completed gate. Go `ReadFrame` relies on
+owner layer: exercise the real seed image under the exact KVM-only
+`experiment-v1` profile when `/dev/kvm` is available, and rerun the complete
+reference suite when the documented TCG candidate timing test can succeed. The
+same real image has passed candidate validation under the disposable `test-v1`
+profile with TCG fallback. The plain frontend is exercised through a complete
+live planning/build/finish/continue/rollback scenario; the TUI and separately
+built Go command are exercised through a full planning/build/finish generation
+and completed gate. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -243,6 +251,27 @@ focuses, operator actions, and token roles to fixed fallback values. Python
 passes those trusted strings through unchanged. Current harness catalogs and
 event producers use the preserved values; normalization prevents malformed
 telemetry from creating unbounded label cardinality.
+
+### Recorded real-image candidate acceptance
+
+From the repository root, with the required cross-toolchain and QEMU available,
+the exact race-enabled command is:
+
+```text
+CODEXOS_REAL_IMAGE_ACCEPTANCE=1 GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/build -run '^TestRealSeedImageBuildsAndPassesCandidateValidation$' -count=10 -timeout=300s
+```
+
+`internal/build/real_image_acceptance_linux_test.go` reads the canonical seed
+inputs, encodes their real source snapshot, and invokes the production trusted
+build operation with explicitly resolved host utilities. It then boots the
+resulting ISO in a fresh real QEMU process under `qemu.TestHardwareProfile`,
+which falls back from KVM to TCG, and requires both the READY marker and the
+canonical list-tools response. Every build and candidate workspace is temporary;
+the validator must stop QEMU and remove its workspace before returning. The test
+is opt-in so the standard offline suite does not acquire toolchain or QEMU
+requirements. It uses no network, credentials, Codex session, telemetry, or live
+experiment state. The exact `experiment-v1` profile remains separately gated on
+an accessible `/dev/kvm`.
 
 ### Recorded disposable binary gate acceptance
 
@@ -373,13 +402,15 @@ state is used.
 ## Operational risks
 
 The highest risks are durable archive compatibility, fail-closed provenance,
-and real-image candidate behavior. The terminal reader's unsafe
+and real-image behavior under the exact KVM-only experiment profile. The
+terminal reader's unsafe
 forced-cancellation path is avoided by application-owned graceful shutdown and
 covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
 can still use its upstream forced path after an internal renderer/input error or
 panic; that residual dependency failure path should be removed by an upstream
 upgrade or re-evaluated before cutover. No Go component should be used on live
-experiment state while the remaining lifecycle scenarios remain unverified.
+experiment state before the remaining cutover verification and explicit human
+approval.
 
 ## Recommended staged cutover
 
