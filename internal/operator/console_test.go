@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,17 @@ type consoleTestRuntime struct {
 	archives []experiment.ArchivedGeneration
 	features []store.FeatureRequest
 	pid      int
+}
+
+type signalingReadCloser struct {
+	io.ReadCloser
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *signalingReadCloser) Read(buffer []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	return r.ReadCloser.Read(buffer)
 }
 
 func newConsoleTestRuntime(t *testing.T) *consoleTestRuntime {
@@ -270,6 +283,99 @@ func TestPlainConsoleRunExecutesUnterminatedFinalCommand(t *testing.T) {
 	runtime.mu.Unlock()
 	if closeCalls != 1 {
 		t.Fatalf("console shutdown calls = %d, want 1", closeCalls)
+	}
+}
+
+func TestPlainConsoleCancellationUnblocksInputAndShutsDown(t *testing.T) {
+	runtime := newConsoleTestRuntime(t)
+	pipeReader, inputWriter := io.Pipe()
+	input := &signalingReadCloser{ReadCloser: pipeReader, started: make(chan struct{})}
+	t.Cleanup(func() { _ = inputWriter.Close() })
+	var output bytes.Buffer
+	console, err := newPlainConsole(runtime, PlainConsoleOptions{Input: input, Output: &output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- console.Run(ctx)
+	}()
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("console did not begin reading input")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancelled console: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled console remained blocked on input")
+	}
+	if !strings.Contains(output.String(), "Interrupted; stopping CodexOS run.") {
+		t.Fatalf("cancellation output missing interruption message:\n%s", output.String())
+	}
+	runtime.mu.Lock()
+	closeCalls := runtime.closeCalls
+	runtime.mu.Unlock()
+	if closeCalls != 1 {
+		t.Fatalf("console shutdown calls = %d, want 1", closeCalls)
+	}
+}
+
+func TestConsoleFrontendHandlersOwnOutputAndConfirmation(t *testing.T) {
+	runtime := newConsoleTestRuntime(t)
+	runtime.mu.Lock()
+	runtime.state = string(experiment.RuntimeStateAwaitingNextGeneration)
+	runtime.mu.Unlock()
+	runtime.features = []store.FeatureRequest{{
+		ID: 4, Generation: 12, Status: store.FeaturePending, Title: "device", Description: "capability",
+	}}
+	var lines []string
+	confirmations := 0
+	var fallback bytes.Buffer
+	console, err := newPlainConsole(runtime, PlainConsoleOptions{
+		Input:  strings.NewReader("not used\n"),
+		Output: &fallback,
+		OutputHandler: func(line string) {
+			lines = append(lines, line)
+		},
+		ConfirmationHandler: func(prompt string) bool {
+			confirmations++
+			return strings.Contains(prompt, "#4")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = console.Shutdown() })
+	if _, err := console.ExecuteLine(context.Background(), "feature-approve 4"); err != nil {
+		t.Fatal(err)
+	}
+	console.reportInterviewOutcome(TurnOutcome{Result: agent.GenerationResult{FinalMessage: "already visible through activity"}})
+	if confirmations != 1 {
+		t.Fatalf("confirmation handler calls = %d, want 1", confirmations)
+	}
+	request, err := runtime.FeatureRequest(4)
+	if err != nil || request.Status != store.FeatureApproved {
+		t.Fatalf("feature request = %#v, %v", request, err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Feature request #4 approved.") {
+		t.Fatalf("handler output = %q", joined)
+	}
+	if strings.Contains(joined, "already visible through activity") {
+		t.Fatalf("TUI output duplicated an activity-stream final message: %q", joined)
+	}
+	if fallback.Len() != 0 {
+		t.Fatalf("handler output leaked to fallback writer: %q", fallback.String())
+	}
+	status := tuiStatus(console)
+	if status.RuntimeState != "AWAITING_NEXT_GENERATION" || status.RunName != filepath.Base(runtime.root) || status.PendingFeatures != 0 {
+		t.Fatalf("TUI status = %#v", status)
 	}
 }
 

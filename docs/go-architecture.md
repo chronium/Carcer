@@ -129,7 +129,8 @@ set with bounded low-cardinality attributes and optionally adds a bounded
 OTLP/HTTP exporter; telemetry failures never control the experiment.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. Candidate
 validation can start only a disposable QEMU, and reviewer tests contact only a
-synthetic app server. No Go code changes the operational entry point.
+synthetic app server. The side-by-side Go command does not change the Python
+default or access live experiment state.
 `internal/codexapp` owns an isolated one-shot app-server process, sole JSONL
 reader, ordered writer, concurrent request routing, bounded notification and
 server-request queues, catalog/policy validation, interrupts, and TERM/KILL
@@ -152,8 +153,9 @@ is reserved before its app-server turn ID exists. Only renderable reasoning
 summaries and final answers enter the isolated transcript, while questions and
 answers never enter generation events or successor context. A mutex-protected
 one-shot worker owns fresh-session construction and bounded retirement. The
-live runtime now satisfies its guest/runtime boundary, while ownership of the
-generation session itself remains to be joined to operator orchestration.
+operator controller joins this session to the live runtime, preserves it across
+pause/resume, and retires it before continuation, rollback, abort completion, or
+shutdown.
 `internal/build` performs the fixed trusted source-snapshot build in a fresh
 workspace. It copies pinned Limine inputs, discovers and validates the fixed
 toolchain, runs guest compilation and ISO construction under bubblewrap without
@@ -176,22 +178,26 @@ the candidate-proven kernel and ISO identities during that copy; and supports
 pause/resume, completion, paused abort, boot-first continuation, and rollback.
 Run-owned cancellation interrupts blocked guest/build work before shutdown
 joins resources, while failed cleanup retains ownership and diagnostics for a
-retry. Fresh Codex-session and operator ownership remain unwired.
+retry.
 `internal/operator` defines the Cobra startup surface and validates the same
 opening-mode, Git-provenance, cross-run inheritance, and display-mode
-relationships as the Python entry point before invoking a concrete runner.
+relationships as the Python entry point before invoking its concrete runner.
 The same package checks both terminal streams and `TERM`, makes untrusted
 terminal controls inert, and parses the exact plain-console `ask TEXT` form
-without changing the question body. Operator commands, runtime construction,
-and `cmd/codexos` remain separate, so Python is still the only operational
-entry point.
+without changing the question body. One console/controller owns all operator
+commands and the generation session for both frontends. The runner initializes
+cross-run state before observability, validates recorded Git identity before
+boot, constructs the live runtime, and shuts down runtime, event log, then
+metrics. `cmd/codexos` remains a thin side-by-side process entry point; Python
+remains the default and only approved live entry point.
 `internal/tui` provides the frontend-independent operator activity model. It
 coalesces attributed message, reasoning, tool, feature-request, build,
 operator, interview, and abnormal-lifecycle events into typed immutable
 snapshots; applies independent entry, byte, and payload bounds; and makes all
 untrusted terminal controls inert. Its Bubble Tea v2 application uses the
 cursed renderer for one full-screen session, owns line-based scroll/follow and
-tool-detail presentation, serializes prompts and confirmations, cancels command
-work on shutdown, and invokes integration cleanup only after Bubble Tea returns.
-Finalized Markdown rendering and concrete operator/runtime integration remain
-separate.
+tool-detail presentation, serializes prompts and confirmations, routes
+asynchronous operator output, cancels command work on shutdown, boundedly joins
+the active command, and invokes integration cleanup only after Bubble Tea
+returns. It delegates command meaning, session ownership, interview Markdown,
+and runtime shutdown to the same console used by plain mode.

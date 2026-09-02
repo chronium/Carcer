@@ -35,28 +35,34 @@ type consoleRuntime interface {
 var _ consoleRuntime = (*experiment.CodexOSRun)(nil)
 
 type PlainConsoleOptions struct {
-	Input          io.Reader
-	Output         io.Writer
-	Controller     GenerationControllerOptions
-	GitRecorder    *provenance.GenerationGitRecorder
-	InterviewStore *provenance.ExitInterviewArtifactStore
+	Input               io.Reader
+	Output              io.Writer
+	OutputHandler       func(string)
+	ConfirmationHandler func(string) bool
+	Controller          GenerationControllerOptions
+	GitRecorder         *provenance.GenerationGitRecorder
+	InterviewStore      *provenance.ExitInterviewArtifactStore
 }
 
 type consoleTurn struct {
 	done      chan struct{}
 	interview bool
+	phase     string
 }
 
 // PlainConsole owns the line-oriented operator interaction and one
 // GenerationController. Command errors are recoverable; shutdown errors are
 // returned to the process boundary.
 type PlainConsole struct {
-	runtime    consoleRuntime
-	controller *GenerationController
-	input      *bufio.Reader
-	output     io.Writer
-	git        *provenance.GenerationGitRecorder
-	interviews *provenance.ExitInterviewArtifactStore
+	runtime             consoleRuntime
+	controller          *GenerationController
+	input               *bufio.Reader
+	inputCloser         io.Closer
+	output              io.Writer
+	outputHandler       func(string)
+	confirmationHandler func(string) bool
+	git                 *provenance.GenerationGitRecorder
+	interviews          *provenance.ExitInterviewArtifactStore
 
 	outputMu sync.Mutex
 	turnMu   sync.Mutex
@@ -89,11 +95,14 @@ func newPlainConsole(runtime consoleRuntime, options PlainConsoleOptions) (*Plai
 	if err != nil {
 		return nil, err
 	}
-	return &PlainConsole{
+	console := &PlainConsole{
 		runtime: runtime, controller: controller,
 		input: bufio.NewReader(options.Input), output: options.Output,
+		outputHandler: options.OutputHandler, confirmationHandler: options.ConfirmationHandler,
 		git: options.GitRecorder, interviews: options.InterviewStore,
-	}, nil
+	}
+	console.inputCloser, _ = options.Input.(io.Closer)
+	return console, nil
 }
 
 func (c *PlainConsole) Run(ctx context.Context) (resultErr error) {
@@ -103,16 +112,29 @@ func (c *PlainConsole) Run(ctx context.Context) (resultErr error) {
 	if ctx == nil {
 		return errors.New("CodexOS console context is nil")
 	}
+	stopInputClose := func() bool { return false }
+	if c.inputCloser != nil {
+		stopInputClose = context.AfterFunc(ctx, func() {
+			_ = c.inputCloser.Close()
+		})
+	}
+	defer stopInputClose()
 	defer func() {
 		resultErr = errors.Join(resultErr, c.Shutdown())
 	}()
-	c.showStartup()
+	if err := c.ShowStartup(); err != nil {
+		return err
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			c.printLine("Interrupted; stopping CodexOS run.")
 			return nil
 		}
 		line, err := c.readLine(c.prompt())
+		if ctx.Err() != nil {
+			c.printLine("Interrupted; stopping CodexOS run.")
+			return nil
+		}
 		if errors.Is(err, io.EOF) && line == "" {
 			c.printLine("Input closed; stopping CodexOS run.")
 			return nil
@@ -282,11 +304,11 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 }
 
 func (c *PlainConsole) startAgent(prompt string) error {
-	turn, err := c.reserveTurn(false)
+	phase := c.controller.NextTurnKind()
+	turn, err := c.reserveTurn(false, phase)
 	if err != nil {
 		return err
 	}
-	phase := c.controller.NextTurnKind()
 	outcomes, err := c.controller.StartTurn(prompt)
 	if err != nil {
 		c.releaseReservedTurn(turn)
@@ -305,13 +327,13 @@ func (c *PlainConsole) startAgent(prompt string) error {
 	return nil
 }
 
-func (c *PlainConsole) reserveTurn(interview bool) (*consoleTurn, error) {
+func (c *PlainConsole) reserveTurn(interview bool, phase string) (*consoleTurn, error) {
 	c.turnMu.Lock()
 	defer c.turnMu.Unlock()
 	if c.turn != nil {
 		return nil, errors.New("Codex turn is already active")
 	}
-	turn := &consoleTurn{done: make(chan struct{}), interview: interview}
+	turn := &consoleTurn{done: make(chan struct{}), interview: interview, phase: phase}
 	c.turn = turn
 	return turn, nil
 }
@@ -382,7 +404,7 @@ func (c *PlainConsole) reportInterviewOutcome(outcome TurnOutcome) {
 	}
 	if outcome.Result.TurnStatus == "interrupted" {
 		c.printLine("Exit interview turn interrupted.")
-	} else if outcome.Result.FinalMessage != "" {
+	} else if outcome.Result.FinalMessage != "" && c.outputHandler == nil {
 		c.printLine("Sol:")
 		c.printIndented(outcome.Result.FinalMessage)
 	}
@@ -407,7 +429,7 @@ func (c *PlainConsole) pause(ctx context.Context) error {
 }
 
 func (c *PlainConsole) resume(ctx context.Context) error {
-	turn, reserveErr := c.reserveTurn(false)
+	turn, reserveErr := c.reserveTurn(false, c.controller.NextTurnKind())
 	if reserveErr != nil {
 		c.recordOperator("resume", "failed", nil)
 		return reserveErr
@@ -529,7 +551,7 @@ func (c *PlainConsole) beginInterview() error {
 }
 
 func (c *PlainConsole) askInterview(question string) error {
-	turn, err := c.reserveTurn(true)
+	turn, err := c.reserveTurn(true, "interview")
 	if err != nil {
 		return err
 	}
@@ -598,18 +620,26 @@ func (c *PlainConsole) Shutdown() error {
 	return errors.Join(controllerErr, waitErr)
 }
 
-func (c *PlainConsole) showStartup() {
+// ShowStartup reports the opened run and validates the gate state needed to
+// render it. TUI and plain frontends share this one authoritative path.
+func (c *PlainConsole) ShowStartup() error {
+	if c == nil {
+		return errors.New("CodexOS plain console is nil")
+	}
 	c.printLine("CodexOS operator console")
 	c.printLine("")
 	c.printLine("Run directory: " + c.runtime.RunDirectory())
 	c.reconcileGit()
 	if c.runtime.State() == experiment.RuntimeStateAwaitingNextGeneration {
-		_ = c.printGate()
+		if err := c.printGate(); err != nil {
+			return err
+		}
 	} else {
 		c.printRunningSummary()
 	}
 	c.printLine("")
 	c.printLine("Type 'help' for commands.")
+	return nil
 }
 
 func (c *PlainConsole) printHelp() {
@@ -1002,6 +1032,9 @@ func (c *PlainConsole) unsignedArgument(words []string, command string) (uint64,
 }
 
 func (c *PlainConsole) confirm(prompt string) bool {
+	if c.confirmationHandler != nil {
+		return c.confirmationHandler(prompt)
+	}
 	line, err := c.readLine(prompt)
 	return err == nil && (strings.TrimSpace(line) == "y" || strings.TrimSpace(line) == "Y")
 }
@@ -1029,9 +1062,20 @@ func (c *PlainConsole) readLine(prompt string) (string, error) {
 }
 
 func (c *PlainConsole) printLine(text string) {
+	if c.outputHandler != nil {
+		callConsoleOutputHandler(c.outputHandler, text)
+		return
+	}
 	c.outputMu.Lock()
 	_, _ = fmt.Fprintln(c.output, text)
 	c.outputMu.Unlock()
+}
+
+func callConsoleOutputHandler(handler func(string), text string) {
+	defer func() {
+		_ = recover()
+	}()
+	handler(text)
 }
 
 func (c *PlainConsole) printIndented(text string) {
@@ -1076,6 +1120,32 @@ func (c *PlainConsole) exitInterviewState() string {
 		return "available"
 	}
 	return "unavailable"
+}
+
+// CodexTurnState is the compact operator presentation state used by the TUI.
+func (c *PlainConsole) CodexTurnState() string {
+	if c == nil {
+		return "stopped"
+	}
+	if turn := c.currentTurn(); turn != nil {
+		if turn.phase == "initial" || turn.phase == "planning" {
+			return "planning"
+		}
+		return "working"
+	}
+	if c.controller.SessionOwned() {
+		return "idle"
+	}
+	return "stopped"
+}
+
+// ExitInterviewState reports the compact interview presentation state used by
+// the TUI without exposing mutable session ownership.
+func (c *PlainConsole) ExitInterviewState() string {
+	if c == nil {
+		return "unavailable"
+	}
+	return c.exitInterviewState()
 }
 
 func waitConsoleTurn(ctx context.Context, done <-chan struct{}) error {

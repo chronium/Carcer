@@ -1,7 +1,8 @@
 # Go cutover readiness
 
 Status: **not ready for cutover**. The Python harness remains fully operational
-and is still the only operational entry point.
+and is still the default and only approved live-experiment entry point. The
+side-by-side Go command now exists for disposable verification.
 
 ## Completed capabilities
 
@@ -16,27 +17,30 @@ runtime. Go also reads and writes the compatible feature-request store, includin
 inherited sparse IDs, durable decisions, guest recording, and gate-only decision
 enforcement. Provided-assets snapshots, deterministic PAX archives, append-only
 activation manifests, and bounded guest list/read handling are routed through
-live startup, background, and exchange scopes; operator flag routing remains
-unwired. The synchronous QMP client
-implements Unix-socket retry, greeting and capability negotiation, status/control
-commands, event skipping, deadlines, and cancellation. The two fixed hardware profiles, exact QEMU arguments, strict
-archived manifest codec, KVM availability check, bounded QEMU version discovery,
-and direct-child QEMU controller are implemented. Planning evidence allocation,
+operator flags, live startup, background, and exchange scopes. The synchronous
+QMP client implements Unix-socket retry, greeting and capability negotiation,
+status/control commands, event skipping, deadlines, and cancellation. The two
+fixed hardware profiles, exact QEMU arguments, strict archived manifest codec,
+KVM availability check, bounded QEMU version discovery, and direct-child QEMU
+controller are implemented. Planning evidence allocation,
 attempt history, exact private responses, digest publication, filtered
 exit-interview capture, and immutable Markdown publication are implemented.
 Build and review evidence includes immutable sequence allocation, exact byte
 identities, incomplete-attempt preservation, source-read capture, and
 fail-closed latest-success publication. Review evidence is wired to the isolated
-Go reviewer, and build evidence is wired to the joined trusted compile and
-candidate-validation host service. Other Codex-session wiring remains incomplete.
+Go reviewer, build evidence is wired to the joined trusted compile and
+candidate-validation host service, and the operator owns one fresh generation
+session across planning, implementation, pause/resume, and the frozen gate.
 Generation Git reconciliation preserves the
 configured base commit, exact source trees/messages/annotations, rollback
-lineages, immutable conflicts, and the developer worktree; operator integration
-remains unwired. The app-server client owns an isolated one-shot process,
-concurrent JSONL request routing, notifications and server requests, catalog and
-thread/turn policy validation, interrupts, bounded diagnostics/queues, and
-TERM/KILL reaping. The isolated reviewer creates a fresh process, workspace, and
-thread per consultation, exposes only dynamically discovered read-only guest
+lineages, immutable conflicts, and the developer worktree. Startup validates a
+cross-run bootstrap's literal base ref and resolved commit before boot, while
+operator commands reconcile immutable generation records. The app-server client
+owns an isolated one-shot process, concurrent JSONL request routing,
+notifications and server requests, catalog and thread/turn policy validation,
+interrupts, bounded diagnostics/queues, and TERM/KILL reaping. The isolated
+reviewer creates a fresh process, workspace, and thread per consultation,
+exposes only dynamically discovered read-only guest
 tools, records source-read evidence, publishes activity and bounded token
 metrics, and cleans up on cancellation. The isolated generation session runs
 planning and implementation in one ephemeral app-server thread, enforces their
@@ -48,8 +52,11 @@ dynamic tools. A runtime-held gate lease blocks continuation and rollback until
 session retirement, and turn admission is reserved before the app server
 returns an ID. The transcript accepts only renderable reasoning summaries and
 final answers; direct close preserves a failed partial turn without inventing a
-response. The single-flight compatibility worker always retires its fresh
-session. Generation-session/operator orchestration remains unimplemented. The local
+response. The concrete operator controller owns that session, reserves turns
+before subprocess admission, reuses it only within one generation, persists
+completed or partial exit interviews, and retires it before every gate transition
+or shutdown. The single-flight compatibility worker remains available for its
+isolated compatibility boundary. The local
 observability slice validates and appends sequenced JSONL events without allowing
 recording failures to control the experiment. Its bounded activity stream
 preserves concurrent ordering and excludes raw reasoning. The fixed
@@ -59,7 +66,8 @@ deadlines.
 Cross-run bootstrap can initialize and reload a fresh run from a validated latest
 completed generation, preserving exact successor-ISO, handoff, feature-ledger,
 and annotated Git-base identities. The live runtime verifies and applies that
-bootstrap before generation zero; operator flag orchestration remains separate.
+bootstrap before generation zero; the concrete runner performs initialization,
+recorded-Git validation, and initial-ISO verification before starting the runtime.
 The trusted build operation validates and materializes a source snapshot, uses
 only fixed host compiler/linker/Limine/xorriso commands inside bubblewrap, bounds
 diagnostics and subprocess lifetime, and publishes kernel and ISO artifacts
@@ -80,14 +88,17 @@ continuation, and rollback over one owned QEMU/QMP/serial stack. Large artifacts
 and logs are streamed into archive staging, and successor kernel/ISO identities
 are checked during the copy against the candidate proof. Run cancellation
 interrupts blocked guest/build work before joining resources; a shutdown failure
-keeps ownership instead of falsely reporting a stopped run. Creating and retiring
-the required fresh Codex session remains an operator-orchestration gap.
+keeps ownership instead of falsely reporting a stopped run. The operator now
+creates and retires the required fresh Codex session and preserves it across a
+pause without allowing it to cross a generation boundary.
 The Cobra command surface validates the Python startup flags, mutually exclusive
 opening and display modes, paired Git and inheritance options, and automatic
-TUI selection before handing control to a runner. The concrete runner, operator
-commands, and Go process entry point are not yet implemented. The
-display probe itself requires both streams to be TTYs and rejects empty or
-`dumb` terminals, matching Python.
+TUI selection before handing control to the concrete runner. `cmd/codexos`
+preserves parser-versus-startup exit classification and startup output streams;
+the runner orders bootstrap, observability, runtime, Git, frontend, and cleanup
+ownership without changing the Python default entry point. The line frontend
+implements the complete operator command set. The display probe requires both
+streams to be TTYs and rejects empty or `dumb` terminals, matching Python.
 The TUI activity model preserves attribution and semantic coalescing for
 messages, exposed reasoning summaries, tools, feature requests, build phases,
 operator output, interview questions, and abnormal lifecycle events. Its typed
@@ -95,17 +106,23 @@ snapshots are immutable to callers, its scrollback and payload display are
 independently bounded, and hostile terminal controls are escaped. The Bubble
 Tea v2 cursed application adds line-based live-follow, clickable bounded tool
 details, single-line command/paste input, confirmations, the two-Escape pause
-gesture, recoverable command errors, and cancellable post-restoration shutdown.
-Finalized Markdown rendering, setup-failure restoration coverage, the upstream
-terminal-reader shutdown race, and concrete operator/runtime wiring remain
-incomplete.
+gesture, recoverable command errors, asynchronous console output, and cancellable
+post-restoration shutdown. It uses the same authoritative console/controller as
+plain mode and boundedly joins an active command before integration cleanup.
+Immutable interview Markdown is finalized by the console's provenance owner.
+Finalized agent-message Markdown presentation, the upstream terminal-reader
+shutdown race, and a complete disposable interactive acceptance run remain
+unresolved.
 
 ## Verification performed
 
-The current milestone passes both `go test ./... -timeout=180s` and
-`go test -race ./... -timeout=240s` with external hard timeouts. The retained
-session packages also pass five consecutive race-enabled runs, and process
-checks find no surviving `agent.test` helpers. Tests cover exact bytes,
+The current milestone passes both `go test ./... -count=1 -timeout=240s` and
+`go test -race ./... -count=1 -timeout=300s` with the disposable socket/QEMU
+tests enabled. The operator, TUI, and command packages also pass ten consecutive
+race-enabled runs, and process checks find no surviving `agent.test`, operator,
+or QEMU helpers. A process-free runner integration reopens an immutable aborted
+gate through the real plain frontend and verifies observable startup-before-stop
+ordering. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -123,10 +140,13 @@ Serial verification includes fragmented READY and frames, read-before-write
 ordering, forced partial writes, nested host requests, response-timeout suspension,
 scope routing, malformed-request recovery, cancellation, peer closure, write
 stall/failure, callback reentrancy, large host responses, progress events, and
-bounded shutdown. The dispatcher and tool client are not yet wired into a guest
-lifecycle.
+bounded shutdown through the concrete live guest lifecycle.
 
-The Python candidate-validation integration test has a pre-existing timing
+The Python reference suite ran 281 tests under the locked `uv` environment. Its
+only failure was the following pre-existing candidate-validation timing
+condition; one paid reviewer smoke test was skipped by design. The Python
+harness/tests/lock files on this branch are byte-identical to `main`.
+The candidate-validation integration test has a pre-existing timing
 flake under the available TCG fallback: its 250 ms READY deadline can expire
 before serial diagnostics arrive. An isolated run can pass, while an unmodified
 `main` archive with the same pinned Limine fixture failed diagnostic assertions
@@ -136,10 +156,14 @@ unrelated Python failures.
 
 ## Remaining gaps and known differences
 
-Generation orchestration, live build/finish routing, exit-interview artifact
-finalization in the operator flow, concrete CLI startup, operator commands,
-finalized TUI Markdown, and concrete TUI integration remain to be implemented.
-Go `ReadFrame` relies on
+Required remaining work is operational verification rather than another missing
+owner layer: run and record the complete disposable Go-binary scenarios for new
+run, live planning/build/finish, abort, gate resume, continue/rollback, cross-run
+bootstrap, large-transfer shutdown, and both frontends; complete finalized
+agent-message Markdown rendering; rerun the complete reference suite when the
+documented TCG candidate timing test can succeed; and resolve or safely work
+around Bubble Tea v2.0.9's Linux terminal-reader race before any interactive
+cutover. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.

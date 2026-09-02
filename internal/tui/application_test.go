@@ -318,6 +318,8 @@ func TestApplicationRunRestoresThroughBubbleTeaOnNonInteractiveContextCancel(t *
 func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
 	handlerStarted := make(chan struct{})
 	handlerCanceled := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	handlerExited := make(chan struct{})
 	shutdownHook := make(chan struct{})
 	var hookState atomic.Value
 	var app *Application
@@ -327,6 +329,8 @@ func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
 			close(handlerStarted)
 			<-ctx.Done()
 			close(handlerCanceled)
+			<-releaseHandler
+			close(handlerExited)
 			return CommandResult{}, ctx.Err()
 		},
 		OnShutdown: func() {
@@ -387,6 +391,17 @@ func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
 		t.Fatal("Shutdown did not cancel the command handler context")
 	}
 	select {
+	case <-shutdownHook:
+		t.Fatal("shutdown hook ran before the command handler exited")
+	default:
+	}
+	close(releaseHandler)
+	select {
+	case <-handlerExited:
+	case <-time.After(time.Second):
+		t.Fatal("command handler did not exit")
+	}
+	select {
 	case runErr := <-runDone:
 		if runErr == nil || !errors.Is(runErr, tea.ErrProgramKilled) {
 			t.Fatalf("Run error = %v, want Bubble Tea killed error", runErr)
@@ -403,6 +418,50 @@ func TestApplicationShutdownCancelsCommandBeforePostRunHook(t *testing.T) {
 		t.Fatalf("shutdown hook observed application state %v", got)
 	}
 	app.Shutdown()
+}
+
+func TestApplicationPostsAsynchronousOperatorOutputOnlyWhileRunning(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	if app.PostOperatorOutput("before") {
+		t.Fatal("operator output was accepted before Run")
+	}
+	var output bytes.Buffer
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- app.Run(context.Background(), nil, &output)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		app.stateMu.Lock()
+		started := app.started && app.program != nil
+		app.stateMu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !app.PostOperatorOutput("asynchronous completion") {
+		t.Fatal("operator output was not accepted while Run was active")
+	}
+	deadline = time.Now().Add(time.Second)
+	for !strings.Contains(app.ActivityModel().RenderText(), "asynchronous completion") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(app.ActivityModel().RenderText(), "asynchronous completion") {
+		t.Fatal("asynchronous operator output did not reach the model")
+	}
+	app.Shutdown()
+	select {
+	case err := <-runDone:
+		if err == nil || !errors.Is(err, tea.ErrProgramKilled) {
+			t.Fatalf("Run error = %v, want Bubble Tea killed error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop")
+	}
+	if app.PostOperatorOutput("after") {
+		t.Fatal("operator output was accepted after shutdown")
+	}
 }
 
 func TestApplicationPublicStateAccessIsRaceSafe(t *testing.T) {

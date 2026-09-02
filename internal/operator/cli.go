@@ -12,16 +12,20 @@ import (
 // operator console. Paths remain uninterpreted until the concrete runtime owns
 // their validation.
 type Options struct {
-	RunDirectory          string
-	InitialISO            string
-	ResumeAtGate          bool
-	GitRepository         string
-	GitBaseRef            string
-	InheritFromRun        string
-	InheritFromGeneration int64
-	ProvidedAssets        string
-	OTLPEndpoint          string
-	UseTUI                bool
+	RunDirectory             string
+	InitialISO               string
+	InitialISOConfigured     bool
+	ResumeAtGate             bool
+	GitRepository            string
+	GitBaseRef               string
+	GitConfigured            bool
+	InheritFromRun           string
+	InheritFromGeneration    int64
+	InheritanceRequested     bool
+	ProvidedAssets           string
+	ProvidedAssetsConfigured bool
+	OTLPEndpoint             string
+	UseTUI                   bool
 }
 
 // NewCommand constructs the compatible Cobra command and invokes run only
@@ -65,6 +69,9 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 			if inheritanceRequested && !gitRepositorySet {
 				return errors.New("cross-run inheritance requires Git provenance options")
 			}
+			if inheritanceRequested && options.InheritFromGeneration < 0 {
+				return errors.New("--inherit-from-generation must not be negative")
+			}
 
 			if plain && tui {
 				return errors.New("--plain and --tui are mutually exclusive")
@@ -73,6 +80,10 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 				return errors.New("--tui requires interactive stdin/stdout and a supported terminal")
 			}
 			options.ResumeAtGate = resumeSet
+			options.InitialISOConfigured = initialSet
+			options.GitConfigured = gitRepositorySet
+			options.InheritanceRequested = inheritanceRequested
+			options.ProvidedAssetsConfigured = flags.Changed("provided-assets")
 			options.UseTUI = tui || (terminalSupported && !plain)
 			if run == nil {
 				return errors.New("CodexOS operator runner is unavailable")

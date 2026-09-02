@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	defaultActivityPoll = 50 * time.Millisecond
-	defaultStatusPoll   = 250 * time.Millisecond
-	pauseConfirmation   = 2500 * time.Millisecond
+	defaultActivityPoll           = 50 * time.Millisecond
+	defaultStatusPoll             = 250 * time.Millisecond
+	defaultCommandShutdownTimeout = 10 * time.Second
+	pauseConfirmation             = 2500 * time.Millisecond
 )
 
 // InterviewState is the small amount of interview state needed by the view.
@@ -77,14 +78,15 @@ type StatusProvider func() StatusSnapshot
 
 // ApplicationOptions configures one Bubble Tea application instance.
 type ApplicationOptions struct {
-	Activity      *observability.ActivityStream
-	Status        StatusProvider
-	Execute       CommandHandler
-	OnShutdown    func()
-	StartupOutput string
-	ModelOptions  ActivityModelOptions
-	ActivityPoll  time.Duration
-	StatusPoll    time.Duration
+	Activity               *observability.ActivityStream
+	Status                 StatusProvider
+	Execute                CommandHandler
+	OnShutdown             func()
+	StartupOutput          string
+	ModelOptions           ActivityModelOptions
+	ActivityPoll           time.Duration
+	StatusPoll             time.Duration
+	CommandShutdownTimeout time.Duration
 }
 
 // Application is a Bubble Tea v2 model and the concrete full-screen operator
@@ -100,9 +102,10 @@ type Application struct {
 	model  *OperatorActivityModel
 	follow ActivityFollowState
 
-	activityPoll time.Duration
-	statusPoll   time.Duration
-	startup      string
+	activityPoll           time.Duration
+	statusPoll             time.Duration
+	commandShutdownTimeout time.Duration
+	startup                string
 
 	status StatusSnapshot
 	input  string
@@ -135,16 +138,19 @@ type Application struct {
 	started      bool
 	done         chan struct{}
 	confirmation *confirmationRequest
+	commandDone  chan struct{}
 	shutdownOnce sync.Once
 	hookOnce     sync.Once
 }
 
 type activityPollMsg struct{}
 type statusPollMsg struct{}
+type operatorOutputMsg string
 
 type commandResultMsg struct {
 	result CommandResult
 	err    error
+	done   chan struct{}
 }
 
 type confirmationRequest struct {
@@ -167,6 +173,10 @@ func NewApplication(options ApplicationOptions) (*Application, error) {
 	if statusPoll <= 0 {
 		statusPoll = defaultStatusPoll
 	}
+	commandShutdownTimeout := options.CommandShutdownTimeout
+	if commandShutdownTimeout <= 0 {
+		commandShutdownTimeout = defaultCommandShutdownTimeout
+	}
 	status := StatusSnapshot{
 		RunName:      "CodexOS",
 		RuntimeState: "unknown",
@@ -178,22 +188,23 @@ func NewApplication(options ApplicationOptions) (*Application, error) {
 	}
 	status = normalizeStatus(status)
 	return &Application{
-		activity:     options.Activity,
-		statusFn:     options.Status,
-		execute:      options.Execute,
-		onClose:      options.OnShutdown,
-		model:        model,
-		follow:       NewActivityFollowState(),
-		activityPoll: activityPoll,
-		statusPoll:   statusPoll,
-		startup:      options.StartupOutput,
-		status:       status,
-		prompt:       "codexos>",
-		height:       24,
-		width:        80,
-		expanded:     make(map[string]bool),
-		context:      context.Background(),
-		done:         make(chan struct{}),
+		activity:               options.Activity,
+		statusFn:               options.Status,
+		execute:                options.Execute,
+		onClose:                options.OnShutdown,
+		model:                  model,
+		follow:                 NewActivityFollowState(),
+		activityPoll:           activityPoll,
+		statusPoll:             statusPoll,
+		commandShutdownTimeout: commandShutdownTimeout,
+		startup:                options.StartupOutput,
+		status:                 status,
+		prompt:                 "codexos>",
+		height:                 24,
+		width:                  80,
+		expanded:               make(map[string]bool),
+		context:                context.Background(),
+		done:                   make(chan struct{}),
 	}, nil
 }
 
@@ -402,6 +413,25 @@ func (a *Application) RequestConfirmation(prompt string) bool {
 	}
 }
 
+// PostOperatorOutput safely delivers asynchronous console output to the
+// Bubble Tea event loop. Output produced before Run starts or after shutdown
+// is rejected so a console watcher can never block on an absent frontend.
+func (a *Application) PostOperatorOutput(output string) bool {
+	if a == nil || output == "" {
+		return false
+	}
+	a.stateMu.Lock()
+	program := a.program
+	started := a.started
+	closed := a.closed
+	a.stateMu.Unlock()
+	if program == nil || !started || closed {
+		return false
+	}
+	program.Send(operatorOutputMsg(output))
+	return true
+}
+
 // Init starts bounded one-shot poll commands.  A tick schedules its own next
 // tick, so there is no long-lived TUI goroutine to leak at shutdown.
 func (a *Application) Init() tea.Cmd {
@@ -436,6 +466,9 @@ func (a *Application) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshStatus()
 		a.expirePauseArm()
 		return a, a.statusTick()
+	case operatorOutputMsg:
+		a.appendOperatorOutput(string(value))
+		return a, nil
 	case commandResultMsg:
 		return a, a.applyCommandResult(value)
 	case *confirmationRequest:
@@ -490,7 +523,7 @@ func (a *Application) View() tea.View {
 // shutdown hook after Bubble Tea restores terminal state.  Passing a nil input
 // disables input (useful for bounded non-interactive tests); output defaults
 // to stdout when nil.
-func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer) error {
+func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer) (resultErr error) {
 	if a == nil {
 		return errors.New("nil TUI application")
 	}
@@ -530,6 +563,7 @@ func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer
 		// final cleanup for both paths.
 		program.Kill()
 		a.close()
+		resultErr = errors.Join(resultErr, a.waitForCommand())
 		a.stateMu.Lock()
 		a.program = nil
 		a.cancel = nil
@@ -537,8 +571,8 @@ func (a *Application) Run(ctx context.Context, input io.Reader, output io.Writer
 		a.stateMu.Unlock()
 		a.finishShutdown()
 	}()
-	_, err := program.Run()
-	return err
+	_, resultErr = program.Run()
+	return resultErr
 }
 
 func (a *Application) activityTick() tea.Cmd {
@@ -787,22 +821,30 @@ func (a *Application) submitCommand(command string, preserveInput bool) tea.Cmd 
 		a.input = ""
 	}
 	handler := a.execute
+	done := make(chan struct{})
 	a.stateMu.Lock()
 	ctx := a.context
+	a.commandDone = done
 	a.stateMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return func() tea.Msg {
+		defer close(done)
 		if handler == nil {
-			return commandResultMsg{err: errors.New("operator command handler is unavailable")}
+			return commandResultMsg{err: errors.New("operator command handler is unavailable"), done: done}
 		}
 		result, err := handler(ctx, command, a.RequestConfirmation)
-		return commandResultMsg{result: result, err: err}
+		return commandResultMsg{result: result, err: err, done: done}
 	}
 }
 
 func (a *Application) applyCommandResult(message commandResultMsg) tea.Cmd {
+	a.stateMu.Lock()
+	if a.commandDone == message.done {
+		a.commandDone = nil
+	}
+	a.stateMu.Unlock()
 	if message.result.Output != "" {
 		a.model.AppendOperatorOutput(message.result.Output)
 	}
@@ -829,6 +871,24 @@ func (a *Application) applyCommandResult(message commandResultMsg) tea.Cmd {
 	}
 	a.refreshStatus()
 	return nil
+}
+
+func (a *Application) appendOperatorOutput(output string) {
+	if output == "" {
+		return
+	}
+	before := a.model.Entries()
+	anchorKey, anchorLine := a.scrollAnchor(before)
+	if !a.model.AppendOperatorOutput(output) {
+		return
+	}
+	if a.follow.Following {
+		a.scrollTop = 0
+	} else {
+		a.restoreScrollAnchor(anchorKey, anchorLine)
+		a.follow.Arrived(1)
+		a.clampScroll()
+	}
 }
 
 func (a *Application) showConfirmation(request *confirmationRequest) {
@@ -897,6 +957,24 @@ func (a *Application) finishShutdown() {
 			a.onClose()
 		}
 	})
+}
+
+func (a *Application) waitForCommand() error {
+	a.stateMu.Lock()
+	done := a.commandDone
+	timeout := a.commandShutdownTimeout
+	a.stateMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return errors.New("operator command did not stop before the TUI shutdown deadline")
+	}
 }
 
 func (a *Application) pageSize() int {

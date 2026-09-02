@@ -26,15 +26,19 @@ func TestCommandPreservesValidatedStartupOptions(t *testing.T) {
 		t.Fatalf("execute command: %v", err)
 	}
 	want := Options{
-		RunDirectory:          "new-run",
-		InitialISO:            "successor.iso",
-		GitRepository:         "repository",
-		GitBaseRef:            "old-run/generation-0007",
-		InheritFromRun:        "old-run",
-		InheritFromGeneration: 7,
-		ProvidedAssets:        "assets",
-		OTLPEndpoint:          "http://127.0.0.1:4318",
-		UseTUI:                true,
+		RunDirectory:             "new-run",
+		InitialISO:               "successor.iso",
+		InitialISOConfigured:     true,
+		GitRepository:            "repository",
+		GitBaseRef:               "old-run/generation-0007",
+		GitConfigured:            true,
+		InheritFromRun:           "old-run",
+		InheritFromGeneration:    7,
+		InheritanceRequested:     true,
+		ProvidedAssets:           "assets",
+		ProvidedAssetsConfigured: true,
+		OTLPEndpoint:             "http://127.0.0.1:4318",
+		UseTUI:                   true,
 	}
 	if received != want {
 		t.Fatalf("options = %#v, want %#v", received, want)
@@ -54,6 +58,7 @@ func TestCommandOpeningDisplayAndPairingValidation(t *testing.T) {
 		{"inheritance pair", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old"}, "--inherit-from-run and --inherit-from-generation must be supplied together"},
 		{"inheritance opening", []string{"--run-directory", "run", "--resume-at-gate", "--inherit-from-run", "old", "--inherit-from-generation", "1", "--git-repository", "repo", "--git-base-ref", "base"}, "cross-run inheritance is valid only with --initial-iso"},
 		{"inheritance provenance", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "1"}, "cross-run inheritance requires Git provenance options"},
+		{"negative inherited generation", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "-1", "--git-repository", "repo", "--git-base-ref", "base"}, "--inherit-from-generation must not be negative"},
 		{"display exclusive", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--plain", "--tui"}, "--plain and --tui are mutually exclusive"},
 		{"positional arguments rejected", []string{"--run-directory", "run", "--resume-at-gate", "extra"}, "unknown command \"extra\""},
 	}
@@ -122,5 +127,28 @@ func TestCommandDisplaySelectionMatchesTerminalSupport(t *testing.T) {
 				t.Fatal("runner was not called")
 			}
 		})
+	}
+}
+
+func TestCommandPreservesExplicitEmptyPathFlagPresence(t *testing.T) {
+	var received Options
+	command := NewCommand(false, func(_ context.Context, options Options) error {
+		received = options
+		return nil
+	})
+	command.SetArgs([]string{
+		"--run-directory", "run",
+		"--initial-iso", "image",
+		"--git-repository", "",
+		"--git-base-ref", "",
+		"--inherit-from-run", "",
+		"--inherit-from-generation", "0",
+		"--provided-assets", "",
+	})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("execute command: %v", err)
+	}
+	if !received.GitConfigured || !received.InheritanceRequested || !received.ProvidedAssetsConfigured {
+		t.Fatalf("explicit flag presence was lost: %#v", received)
 	}
 }
