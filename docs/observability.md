@@ -142,4 +142,6 @@ app-server `item/completed` notification is the delivery evidence. Reviewer
 execution may therefore complete even though its
 outer result was orphaned; the two outcomes are never conflated, and review text
 is not included in these events. A planning turn with an orphaned call is recorded
-as failed and remains retryable instead of advancing to implementation.
+as failed and remains retryable instead of advancing to implementation. The
+isolated reviewer applies the same delivery proof to its own read-only calls and
+quiesces them before its process and workspace are retired.
