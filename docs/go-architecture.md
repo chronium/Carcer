@@ -134,13 +134,25 @@ synthetic app server. No Go code changes the operational entry point.
 reader, ordered writer, concurrent request routing, bounded notification and
 server-request queues, catalog/policy validation, interrupts, and TERM/KILL
 shutdown. It also validates cumulative token usage and derives non-duplicating
-metric deltas; implementor/planning sessions are not yet wired to it.
+metric deltas. The generation session uses that client for same-thread planning
+and implementation turns with per-turn cancellation and bounded callback joins.
 `internal/agent` also owns a fresh, isolated reviewer process, workspace, and
 thread for each consultation. The reviewer exposes only dynamically discovered
 read-only guest tools through a narrow cycle-free runtime boundary, records
 source reads and immutable review evidence, attributes activity and token
 metrics, and has a bounded cancellation and process-reaping path. Generation
-and operator orchestration remain separate.
+sessions expose the distinct planning and implementation permission profiles,
+freeze their discovered dynamic-tool set for one ephemeral thread, retain
+private planning evidence, and keep planning continuations in that thread.
+After a matching frozen finish, that same healthy thread may be retained at the
+gate for tool-less read-only exit-interview turns. Retention leases the exact
+completed-generation gate, so continuation and rollback cannot invalidate the
+selected successor before session retirement releases it; an admitted question
+is reserved before its app-server turn ID exists. Only renderable reasoning
+summaries and final answers enter the isolated transcript, while questions and
+answers never enter generation events or successor context. A mutex-protected
+one-shot worker owns fresh-session construction and bounded retirement. Live
+generation and operator orchestration remain separate.
 `internal/build` performs the fixed trusted source-snapshot build in a fresh
 workspace. It copies pinned Limine inputs, discovers and validates the fixed
 toolchain, runs guest compilation and ISO construction under bubblewrap without
@@ -170,5 +182,9 @@ entry point.
 coalesces attributed message, reasoning, tool, feature-request, build,
 operator, interview, and abnormal-lifecycle events into typed immutable
 snapshots; applies independent entry, byte, and payload bounds; and makes all
-untrusted terminal controls inert. The Bubble Tea application, selection and
-prompt interaction, and terminal restoration remain separate.
+untrusted terminal controls inert. Its Bubble Tea v2 application uses the
+cursed renderer for one full-screen session, owns line-based scroll/follow and
+tool-detail presentation, serializes prompts and confirmations, cancels command
+work on shutdown, and invokes integration cleanup only after Bubble Tea returns.
+Finalized Markdown rendering and concrete operator/runtime integration remain
+separate.

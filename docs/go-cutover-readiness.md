@@ -37,8 +37,18 @@ thread/turn policy validation, interrupts, bounded diagnostics/queues, and
 TERM/KILL reaping. The isolated reviewer creates a fresh process, workspace, and
 thread per consultation, exposes only dynamically discovered read-only guest
 tools, records source-read evidence, publishes activity and bounded token
-metrics, and cleans up on cancellation. Implementor, planning, interview, and
-generation/operator orchestration remain unimplemented. The local
+metrics, and cleans up on cancellation. The isolated generation session runs
+planning and implementation in one ephemeral app-server thread, enforces their
+distinct permission and dynamic-tool policies, records fail-closed private
+planning evidence, supports interrupted planning continuation, and bounds turn,
+tool, and process shutdown. A matching frozen finish can retain that same
+healthy thread for read-only exit-interview turns with no workspace roots or
+dynamic tools. A runtime-held gate lease blocks continuation and rollback until
+session retirement, and turn admission is reserved before the app server
+returns an ID. The transcript accepts only renderable reasoning summaries and
+final answers; direct close preserves a failed partial turn without inventing a
+response. The single-flight compatibility worker always retires its fresh
+session. Generation/operator orchestration remains unimplemented. The local
 observability slice validates and appends sequenced JSONL events without allowing
 recording failures to control the experiment. Its bounded activity stream
 preserves concurrent ordering and excludes raw reasoning. The fixed
@@ -71,17 +81,24 @@ TUI selection before handing control to a runner. The concrete runner, operator
 commands, and Go process entry point are not yet implemented. The
 display probe itself requires both streams to be TTYs and rejects empty or
 `dumb` terminals, matching Python.
-The pure TUI activity model preserves attribution and semantic coalescing for
+The TUI activity model preserves attribution and semantic coalescing for
 messages, exposed reasoning summaries, tools, feature requests, build phases,
 operator output, interview questions, and abnormal lifecycle events. Its typed
 snapshots are immutable to callers, its scrollback and payload display are
 independently bounded, and hostile terminal controls are escaped. The Bubble
-Tea application and interactive selection, prompts, and shutdown behavior are
-not yet implemented.
+Tea v2 cursed application adds line-based live-follow, clickable bounded tool
+details, single-line command/paste input, confirmations, the two-Escape pause
+gesture, recoverable command errors, and cancellable post-restoration shutdown.
+Finalized Markdown rendering, setup-failure restoration coverage, the upstream
+terminal-reader shutdown race, and concrete operator/runtime wiring remain
+incomplete.
 
 ## Verification performed
 
-The current milestone is verified with `go test ./...`. Tests cover exact bytes,
+The current milestone passes both `go test ./... -timeout=180s` and
+`go test -race ./... -timeout=240s` with external hard timeouts. The retained
+session packages also pass five consecutive race-enabled runs, and process
+checks find no surviving `agent.test` helpers. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -102,12 +119,20 @@ stall/failure, callback reentrancy, large host responses, progress events, and
 bounded shutdown. The dispatcher and tool client are not yet wired into a guest
 lifecycle.
 
+The Python candidate-validation integration test has a pre-existing timing
+flake under the available TCG fallback: its 250 ms READY deadline can expire
+before serial diagnostics arrive. An isolated run can pass, while an unmodified
+`main` archive with the same pinned Limine fixture failed diagnostic assertions
+in five of the first six completed repetitions; candidate rejection and cleanup
+still occurred. This evidence is limited to that test and is not used to excuse
+unrelated Python failures.
+
 ## Remaining gaps and known differences
 
-Generation orchestration, live build/finish routing, implementor/planning and
-interview Codex sessions, concrete CLI startup,
-operator commands, and the interactive TUI application remain to be
-implemented. Go `ReadFrame` relies on
+Generation orchestration, live build/finish routing, exit-interview artifact
+finalization in the operator flow, concrete CLI startup, operator commands,
+finalized TUI Markdown, and concrete TUI integration remain to be implemented.
+Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -166,8 +191,12 @@ telemetry from creating unbounded label cardinality.
 
 The highest risks are durable archive compatibility, fail-closed provenance,
 single-reader duplex serial behavior during large nested responses, generation
-gate semantics, and same-thread planning-to-implementation continuity. No Go
-component should be used on live experiment state while these remain unverified.
+gate semantics, and same-thread planning-to-implementation continuity. Bubble
+Tea v2.0.9's Linux terminal reader also races its cancel-reader cleanup under a
+real pseudo-terminal; the non-race PTY test proves restoration, but interactive
+cutover remains blocked until that dependency race is fixed or safely worked
+around. No Go component should be used on live experiment state while these
+remain unverified.
 
 ## Recommended staged cutover
 
