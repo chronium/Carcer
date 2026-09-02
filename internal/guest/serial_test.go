@@ -282,6 +282,12 @@ func TestSerialPumpPerformsPartialNonblockingWrite(t *testing.T) {
 		t.Fatalf("Pump sent %d of %d bytes; want one partial write", result.Sent, len(outgoing))
 	}
 	_ = serial.Close()
+	// Resolve and close the accepted peer before closing the listener. Without
+	// this join, cleanup can win the accept race and leave deferredConn holding
+	// a nil connection.
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	wait()
 }
 
