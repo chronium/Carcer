@@ -460,6 +460,57 @@ func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
 	}
 }
 
+func TestLiveRunRestoresProvidedAssetsAtReopenedGate(t *testing.T) {
+	t.Setenv(liveQEMUHelperEnvironment, "1")
+	assets := filepath.Join(t.TempDir(), "assets")
+	assetDirectory := filepath.Join(assets, "manual")
+	if err := os.MkdirAll(assetDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDirectory, "manual.txt"), []byte("trusted bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDirectory := liveTestRunDirectory(t)
+	options := LiveRunOptions{
+		QEMUExecutable: os.Args[0], HardwareProfile: qemu.TestHardwareProfile,
+		ReadyTimeout: 2 * time.Second, ProvidedAssetsDirectory: &assets,
+	}
+	run, err := NewLiveCodexOSRun(runDirectory, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialISO := filepath.Join(t.TempDir(), "initial.iso")
+	if err := os.WriteFile(initialISO, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := run.Start(ctx, initialISO); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.AbortGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewLiveCodexOSRun(runDirectory, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(reopened.Stop)
+	if err := reopened.ReopenAtGate(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.live.provided == nil || reopened.live.provided.Provenance == nil {
+		t.Fatal("provided assets were not restored")
+	}
+	got, err := reopened.live.provided.ReadAsset("manual", 0, uint64(len("trusted bytes")))
+	if err != nil || string(got) != "trusted bytes" {
+		t.Fatalf("restored asset = %q, %v", got, err)
+	}
+}
+
 func startLiveTestRun(t *testing.T, readyTimeout time.Duration) *CodexOSRun {
 	return startLiveTestRunMode(t, readyTimeout, "1")
 }
