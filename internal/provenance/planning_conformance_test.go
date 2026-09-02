@@ -29,6 +29,11 @@ evidence.record_started("turn-2")
 evidence.complete("completed", "Final plan.\n次")
 failed = module.PlanningEvidenceStore(run).begin(5, "thread-failed")
 failed.fail()
+retry = module.PlanningEvidenceStore(run).begin(6, "thread-retry")
+retry.record_started("turn-orphaned")
+retry.record_retryable_failure()
+retry.record_started("turn-retry")
+retry.complete("completed", "Retried plan.")
 `
 	command := exec.Command("python3", "-c", script, root, pythonRun)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -58,6 +63,23 @@ failed.fail()
 		t.Fatal(err)
 	}
 	if err := failed.Fail(); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := NewPlanningEvidenceStore(goRun).Begin(6, "thread-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.RecordStarted("turn-orphaned"); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.RecordRetryableFailure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.RecordStarted("turn-retry"); err != nil {
+		t.Fatal(err)
+	}
+	retriedPlan := "Retried plan."
+	if _, err := retry.Complete("completed", &retriedPlan); err != nil {
 		t.Fatal(err)
 	}
 

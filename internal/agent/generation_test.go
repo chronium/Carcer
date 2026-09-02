@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	generationHelperMode     = "CODEXOS_GO_GENERATION_MODE"
-	generationHelperRecord   = "CODEXOS_GO_GENERATION_RECORD"
-	generationHelperPlan     = "CODEXOS_GO_GENERATION_PLAN"
-	generationHelperSentinel = "CODEXOS_GO_GENERATION_SUITE_SENTINEL"
+	generationHelperMode      = "CODEXOS_GO_GENERATION_MODE"
+	generationHelperRecord    = "CODEXOS_GO_GENERATION_RECORD"
+	generationHelperPlan      = "CODEXOS_GO_GENERATION_PLAN"
+	generationHelperSentinel  = "CODEXOS_GO_GENERATION_SUITE_SENTINEL"
+	generationHelperToolReady = "CODEXOS_GO_GENERATION_TOOL_READY"
 )
 
 type generationTestCall struct {
@@ -221,7 +222,7 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 		"namespace": "codexos", "tool": "write", "arguments": map[string]any{
 			"path": "seed/kernel.c", "offset": 0, "data": "x",
 		},
-	}, "thread", "turn", true)
+	}, "thread", "turn", true, nil)
 	if denied["success"] != false || len(runtime.calls) != 0 {
 		t.Fatalf("planning mutation response = %#v, calls = %#v", denied, runtime.calls)
 	}
@@ -233,7 +234,7 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	allowed := session.dynamicToolResponse(map[string]any{
 		"callId": "call-list", "threadId": "thread", "turnId": "turn",
 		"namespace": "codexos", "tool": "list", "arguments": map[string]any{},
-	}, "thread", "turn", true)
+	}, "thread", "turn", true, nil)
 	if allowed["success"] != true || len(runtime.calls) != 1 || runtime.calls[0].name != "list" {
 		t.Fatalf("planning read response = %#v, calls = %#v", allowed, runtime.calls)
 	}
@@ -467,7 +468,9 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 
 func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T) {
 	recordPath := filepath.Join(t.TempDir(), "generation-terminal-tool.json")
+	toolReadyPath := filepath.Join(t.TempDir(), "tool-ready")
 	setGenerationHelper(t, "terminal-before-tool-result", recordPath)
+	t.Setenv(generationHelperToolReady, toolReadyPath)
 	runtime := newGenerationTestRuntime(t)
 	toolStarted := make(chan struct{})
 	releaseTool := make(chan struct{})
@@ -476,6 +479,9 @@ func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T
 		blocked := false
 		firstTool.Do(func() {
 			blocked = true
+			if err := os.WriteFile(toolReadyPath, []byte("ready"), 0o600); err != nil {
+				t.Errorf("write tool-ready marker: %v", err)
+			}
 			close(toolStarted)
 		})
 		if blocked {
@@ -525,11 +531,101 @@ func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T
 	close(releaseTool)
 	select {
 	case outcome := <-resultChannel:
-		if outcome.err != nil || outcome.result.TurnStatus != "completed" {
+		if outcome.err != nil || outcome.result.TurnStatus != "failed" {
 			t.Fatalf("initial sequence = %#v, %v", outcome.result, outcome.err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("initial sequence did not continue after its planning tool stopped")
+		t.Fatal("initial sequence did not report the orphaned planning result")
+	}
+	if !session.Healthy() || !session.PlanningRetryRequired() || session.PlanningCompleted() {
+		t.Fatalf("retry state: healthy=%t required=%t completed=%t", session.Healthy(), session.PlanningRetryRequired(), session.PlanningCompleted())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	session.mu.Unlock()
+	if turnNumber != 1 {
+		t.Fatalf("implementation started before planning retry: turn number = %d", turnNumber)
+	}
+	eventsFile, err := os.Open(runtime.eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eventsFile.Close()
+	scanner := bufio.NewScanner(eventsFile)
+	foundOrphan, foundRetryableFailure := false, false
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := event["data"].(map[string]any)
+		switch event["event"] {
+		case "tool_result_orphaned":
+			foundOrphan = data["request_id"] == "generation-call-0" && data["call_id"] == "generation-call-0" && data["turn_phase"] == "planning" && data["tool"] == "list"
+		case "planning_failed":
+			foundRetryableFailure = data["failure_kind"] == "orphaned_dynamic_call"
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !foundOrphan || !foundRetryableFailure {
+		t.Fatalf("delivery evidence: orphan=%t retryable_failure=%t", foundOrphan, foundRetryableFailure)
+	}
+	manifestPath := filepath.Join(runtime.root, "planning-evidence", "generation-0012", "manifest.json")
+	failedManifest := readReviewerJSON(t, manifestPath)
+	attempts, _ := failedManifest["attempts"].([]any)
+	if failedManifest["stage"] != "awaiting_resume" || failedManifest["outcome"] != "incomplete" || len(attempts) != 1 || attempts[0].(map[string]any)["outcome"] != "failed" {
+		t.Fatalf("retryable planning manifest = %#v", failedManifest)
+	}
+	result, err := session.RunPlanningContinuationTurn()
+	if err != nil || result.TurnStatus != "completed" || !session.PlanningCompleted() {
+		t.Fatalf("planning retry sequence = %#v, %v", result, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionDoesNotImplementUndeliveredReview(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-orphaned-review.json")
+	setGenerationHelper(t, "orphaned-review", recordPath)
+	t.Setenv(reviewerHelperMode, "success")
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	result, err := session.RunInitialTurn()
+	if err != nil || result.TurnStatus != "failed" {
+		t.Fatalf("orphaned review planning result = %#v, %v", result, err)
+	}
+	if !session.Healthy() || !session.PlanningRetryRequired() || session.PlanningCompleted() {
+		t.Fatalf("orphaned review retry state: healthy=%t required=%t completed=%t", session.Healthy(), session.PlanningRetryRequired(), session.PlanningCompleted())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	session.mu.Unlock()
+	if turnNumber != 1 {
+		t.Fatalf("implementation started after undelivered review: turn number = %d", turnNumber)
+	}
+	events, err := os.ReadFile(runtime.eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(events, []byte(`"event":"review_completed"`)) ||
+		!bytes.Contains(events, []byte(`"event":"tool_response_write_attempted"`)) ||
+		!bytes.Contains(events, []byte(`"event":"tool_result_orphaned"`)) ||
+		!bytes.Contains(events, []byte(`"call_id":"generation-call-0"`)) {
+		t.Fatalf("missing review delivery lifecycle evidence:\n%s", events)
+	}
+	result, err = session.RunPlanningContinuationTurn()
+	if err != nil || result.TurnStatus != "completed" || !session.PlanningCompleted() {
+		t.Fatalf("review planning retry sequence = %#v, %v", result, err)
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -1694,7 +1790,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -1757,6 +1853,12 @@ func runGenerationFakeAppServer() {
 		select {}
 	}
 	turnCount := 2
+	if mode == "terminal-before-tool-result" {
+		turnCount = 3
+	}
+	if mode == "orphaned-review" {
+		turnCount = 3
+	}
 	if mode == "interview" {
 		turnCount = 4
 	}
@@ -1799,7 +1901,13 @@ func runGenerationFakeAppServer() {
 			}})
 		}
 		tool := "list"
+		namespace := any("codexos")
 		arguments := map[string]any{}
+		if mode == "orphaned-review" && index == 0 {
+			tool = "review"
+			namespace = nil
+			arguments = map[string]any{"focus": "general"}
+		}
 		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			tool = "write"
 			arguments = map[string]any{"path": "seed/kernel.c", "offset": 0, "data": "x"}
@@ -1807,10 +1915,20 @@ func runGenerationFakeAppServer() {
 		callID := fmt.Sprintf("generation-call-%d", index)
 		send(map[string]any{"id": callID, "method": "item/tool/call", "params": map[string]any{
 			"callId": callID, "threadId": threadID, "turnId": turnID,
-			"namespace": "codexos", "tool": tool, "arguments": arguments,
+			"namespace": namespace, "tool": tool, "arguments": arguments,
 		}})
 		terminalBeforeToolResult := mode == "terminal-before-tool-result" && index == 0
 		if terminalBeforeToolResult {
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				if _, err := os.Stat(os.Getenv(generationHelperToolReady)); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					os.Exit(26)
+				}
+				time.Sleep(time.Millisecond)
+			}
 			item := map[string]any{"id": "message-0", "type": "agentMessage", "text": "Planning complete."}
 			send(map[string]any{"method": "item/completed", "params": map[string]any{
 				"threadId": threadID, "turnId": turnID, "item": item,
@@ -1818,6 +1936,7 @@ func runGenerationFakeAppServer() {
 			send(map[string]any{"method": "turn/completed", "params": map[string]any{
 				"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"},
 			}})
+			continue
 		}
 		interrupted := false
 		for {
@@ -1856,8 +1975,12 @@ func runGenerationFakeAppServer() {
 			}
 			os.Exit(25)
 		}
-		if terminalBeforeToolResult {
-			continue
+		if !interrupted && !(mode == "orphaned-review" && index == 0) {
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": map[string]any{
+					"id": callID, "type": "dynamicToolCall", "tool": tool, "status": "completed",
+				},
+			}})
 		}
 		interruptAt := -1
 		if mode == "interrupt" || mode == "interrupt-failed" {

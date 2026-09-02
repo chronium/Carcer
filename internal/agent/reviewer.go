@@ -74,6 +74,7 @@ type ReviewOptions struct {
 	ReasoningEffort  string
 	ReasoningSummary string
 	ServiceTier      string
+	Origin           map[string]any
 }
 
 // ReviewWorkerError reports a failed isolated reviewer consultation.
@@ -196,6 +197,52 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 	outcome := "failed"
 	serviceTierName := ""
 	runContext, stop := context.WithCancel(ctx)
+	router := newDynamicCallRouter(func(event string, data map[string]any) {
+		w.record(runtime, event, generationPointer, data)
+	})
+	turnReady := make(chan struct{})
+	var turnReadyOnce sync.Once
+	var routeMu sync.Mutex
+	var routeThreadID, routeTurnID, terminalStatus string
+	setRoute := func(threadID, turnID string) {
+		routeMu.Lock()
+		routeThreadID, routeTurnID = threadID, turnID
+		routeMu.Unlock()
+	}
+	setTerminalStatus := func(status string) {
+		routeMu.Lock()
+		terminalStatus = status
+		routeMu.Unlock()
+	}
+	currentRoute := func() (string, string, string) {
+		routeMu.Lock()
+		defer routeMu.Unlock()
+		return routeThreadID, routeTurnID, terminalStatus
+	}
+	var toolsMu sync.Mutex
+	activeTools := 0
+	toolIdle := closedChannel()
+	beginTool := func() {
+		toolsMu.Lock()
+		activeTools++
+		if activeTools == 1 {
+			toolIdle = make(chan struct{})
+		}
+		toolsMu.Unlock()
+	}
+	finishTool := func() {
+		toolsMu.Lock()
+		activeTools--
+		if activeTools == 0 {
+			closeGenerationChannel(toolIdle)
+		}
+		toolsMu.Unlock()
+	}
+	currentToolIdle := func() <-chan struct{} {
+		toolsMu.Lock()
+		defer toolsMu.Unlock()
+		return toolIdle
+	}
 
 	// A child context gives explicit cancellation and caller cancellation the
 	// same bounded app-server shutdown path. The monitor is joined before this
@@ -206,6 +253,31 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		TemporaryPrefix: "codexos-reviewer-",
 		ConfigText:      reviewerConfig,
 		StopTimeout:     w.options.StopTimeout,
+		ServerRequestObserver: func(message map[string]any) {
+			if message["method"] != "item/tool/call" {
+				return
+			}
+			select {
+			case <-turnReady:
+			case <-runContext.Done():
+				return
+			}
+			threadID, turnID, _ := currentRoute()
+			routing := router.ensure(message, threadID, turnID, "review")
+			if router.reserveHandler(routing) {
+				beginTool()
+			}
+			data := dynamicToolActivityData(message["params"])
+			tool, ok := data["tool"].(string)
+			if !ok {
+				tool = "unknown"
+			}
+			queued := map[string]any{"tool": tool, "turn_phase": "review"}
+			if routing != nil {
+				queued = mergeMaps(queued, router.identity(routing))
+			}
+			w.record(runtime, "tool_app_server_queued", generationPointer, queued)
+		},
 	})
 	if err := w.install(server, stop); err != nil {
 		stop()
@@ -222,6 +294,7 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		}
 	}()
 	defer func() {
+		turnReadyOnce.Do(func() { close(turnReady) })
 		stop()
 		_ = server.Close()
 		close(monitorStop)
@@ -232,7 +305,7 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 	// cancellation state is still observable while lifecycle events are
 	// finalized. The cleanup defer then cancels the child context.
 	defer func() {
-		if w.isCancelled(runContext) && outcome != "completed" {
+		if (w.wasCancelled() || ctx.Err() != nil) && outcome != "completed" {
 			outcome = "cancelled"
 		}
 		w.finish(runtime, generationPointer, evidence, outcome, options, serviceTierName, options.Focus, startedAt)
@@ -275,6 +348,7 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 	if id := evidenceID(evidence); id != "" {
 		startedData["review_id"] = id
 	}
+	startedData = mergeMaps(startedData, options.Origin)
 	w.record(runtime, "review_started", generationPointer, startedData)
 	w.publish(generationPointer, observability.ActivityReviewer, observability.ActivityReviewStarted, map[string]any{
 		"model":            options.Model,
@@ -297,7 +371,6 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		return "", reviewError(err)
 	}
 
-	turnReady := make(chan struct{})
 	var turnID string
 	server.SetServerRequestHandler(func(message map[string]any) {
 		select {
@@ -310,12 +383,26 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 			_ = server.RejectServerRequest(message)
 			return
 		}
-		w.handleServerRequest(runContext, server, runtime, message, threadID, turnID, evidence)
+		routing := router.ensure(message, threadID, turnID, "review")
+		if routing == nil {
+			_ = server.RejectServerRequest(message)
+			return
+		}
+		if router.reserveHandler(routing) {
+			beginTool()
+		}
+		if !router.startHandler(routing) {
+			_ = server.RejectServerRequest(message)
+			return
+		}
+		defer finishTool()
+		defer router.finishHandler(routing)
+		w.handleServerRequest(runContext, server, runtime, message, threadID, turnID, evidence, router, routing, currentRoute)
 	})
 	turnStarted := false
 	defer func() {
 		if !turnStarted {
-			close(turnReady)
+			turnReadyOnce.Do(func() { close(turnReady) })
 		}
 	}()
 	turnID, err = server.StartTurn(runContext, codexapp.StartTurnOptions{
@@ -327,7 +414,8 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		ServiceTier:       options.ServiceTier,
 		PermissionProfile: reviewerPermissionProfile,
 	})
-	close(turnReady)
+	setRoute(threadID, turnID)
+	turnReadyOnce.Do(func() { close(turnReady) })
 	turnStarted = true
 	if err != nil {
 		if w.isCancelled(runContext) {
@@ -339,9 +427,22 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		"focus": options.Focus,
 	}, threadID, turnID, "")
 
-	result, err := w.waitForTurn(runContext, runtime, server, generationPointer, threadID, turnID, options.Model)
+	result, err := w.waitForTurn(runContext, runtime, server, generationPointer, threadID, turnID, options.Model, router, setTerminalStatus)
 	if err != nil {
-		if w.isCancelled(runContext) {
+		stop()
+	}
+	for released := router.releaseUnstarted(threadID, turnID); released > 0; released-- {
+		finishTool()
+	}
+	joinTimer := time.NewTimer(w.stopTimeout())
+	select {
+	case <-currentToolIdle():
+	case <-joinTimer.C:
+		err = errors.Join(err, &ReviewWorkerError{Reason: "reviewer dynamic tool call did not quiesce after the turn ended"})
+	}
+	joinTimer.Stop()
+	if err != nil {
+		if w.wasCancelled() || ctx.Err() != nil {
 			return "", &ReviewWorkerError{Reason: "Codex reviewer consultation was cancelled", Err: err}
 		}
 		return "", err
@@ -386,13 +487,39 @@ func (w *ReviewWorker) isCancelled(ctx context.Context) bool {
 	return w.wasCancelled() || ctx.Err() != nil
 }
 
-func (w *ReviewWorker) handleServerRequest(ctx context.Context, server *codexapp.CodexAppServer, runtime ReviewRuntime, message map[string]any, threadID, turnID string, evidence *provenance.ReviewEvidence) {
+func (w *ReviewWorker) stopTimeout() time.Duration {
+	if w.options.StopTimeout > 0 {
+		return w.options.StopTimeout
+	}
+	return 2 * time.Second
+}
+
+func (w *ReviewWorker) handleServerRequest(ctx context.Context, server *codexapp.CodexAppServer, runtime ReviewRuntime, message map[string]any, threadID, turnID string, evidence *provenance.ReviewEvidence, router *dynamicCallRouter, routing *dynamicCallRouting, currentRoute func() (string, string, string)) {
 	if message["method"] != "item/tool/call" {
 		_ = server.RejectServerRequest(message)
 		return
 	}
 	response := w.dynamicToolResponse(ctx, runtime, message["params"], threadID, turnID, evidence)
-	_ = server.WriteResult(message["id"], response)
+	if routing != nil {
+		router.markResultReady(routing)
+		currentThread, currentTurn, terminalStatus := currentRoute()
+		interrupted := terminalStatus == "interrupted"
+		if !router.mayWrite(routing, currentThread, currentTurn, "review", interrupted) {
+			router.finish(routing, "orphaned", "")
+			return
+		}
+		router.markResponseWriteAttempted(routing)
+	}
+	if err := server.WriteResult(message["id"], response); err != nil {
+		router.finish(routing, "rejected", "")
+		return
+	}
+	if routing != nil {
+		_, _, terminalStatus := currentRoute()
+		if terminalStatus == "interrupted" {
+			router.finish(routing, "rejected", "")
+		}
+	}
 }
 
 func (w *ReviewWorker) dynamicToolResponse(ctx context.Context, runtime ReviewRuntime, params any, threadID, turnID string, evidence *provenance.ReviewEvidence) map[string]any {
@@ -455,7 +582,7 @@ func (w *ReviewWorker) dynamicToolResponse(ctx context.Context, runtime ReviewRu
 	}
 }
 
-func (w *ReviewWorker) waitForTurn(ctx context.Context, runtime ReviewRuntime, server *codexapp.CodexAppServer, generation *uint64, threadID, turnID, model string) (string, error) {
+func (w *ReviewWorker) waitForTurn(ctx context.Context, runtime ReviewRuntime, server *codexapp.CodexAppServer, generation *uint64, threadID, turnID, model string, router *dynamicCallRouter, setTerminalStatus func(string)) (string, error) {
 	var lastAgentMessage string
 	var haveLastAgentMessage bool
 	var total codexapp.CumulativeTokenUsage
@@ -485,10 +612,15 @@ func (w *ReviewWorker) waitForTurn(ctx context.Context, runtime ReviewRuntime, s
 		}
 		if method == "item/completed" {
 			if values, ok := params.(map[string]any); ok {
-				if item, ok := values["item"].(map[string]any); ok && item["type"] == "agentMessage" {
-					if text, ok := item["text"].(string); ok {
-						lastAgentMessage = text
-						haveLastAgentMessage = true
+				if item, ok := values["item"].(map[string]any); ok {
+					switch item["type"] {
+					case "agentMessage":
+						if text, ok := item["text"].(string); ok {
+							lastAgentMessage = text
+							haveLastAgentMessage = true
+						}
+					case "dynamicToolCall":
+						router.recordDelivery(values, item, threadID, turnID)
 					}
 				}
 			}
@@ -514,6 +646,11 @@ func (w *ReviewWorker) waitForTurn(ctx context.Context, runtime ReviewRuntime, s
 		status, ok := turn["status"].(string)
 		if !ok || (status != "completed" && status != "interrupted" && status != "failed") {
 			return "", &ReviewWorkerError{Reason: fmt.Sprintf("review turn has invalid status %#v", turn["status"])}
+		}
+		setTerminalStatus(status)
+		pending := router.orphanUnresolved(threadID, turnID, "review", status)
+		if status == "completed" && len(pending) != 0 {
+			return "", &ReviewWorkerError{Reason: "review turn completed before its dynamic tool results were delivered"}
 		}
 		if status != "completed" {
 			kind := observability.ActivityTurnFailed
@@ -554,6 +691,7 @@ func (w *ReviewWorker) finish(runtime ReviewRuntime, generation *uint64, evidenc
 	if id := evidenceID(evidence); id != "" {
 		data["review_id"] = id
 	}
+	data = mergeMaps(data, options.Origin)
 	w.record(runtime, "review_"+outcome, generation, data)
 	if evidence != nil {
 		if err := evidence.Complete(outcome); err != nil {

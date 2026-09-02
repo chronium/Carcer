@@ -145,6 +145,11 @@ metrics, and has a bounded cancellation and process-reaping path. Generation
 sessions expose the distinct planning and implementation permission profiles,
 freeze their discovered dynamic-tool set for one ephemeral thread, retain
 private planning evidence, and keep planning continuations in that thread.
+Implementor and reviewer sessions share one turn-scoped dynamic-call router:
+writing a JSON-RPC result is only an attempt, while a matching terminal
+`dynamicToolCall` item proves delivery. Unresolved planning calls fail the
+attempt retryably and block implementation, and both session types join their
+tool callbacks before advancing or removing isolated state.
 After a matching frozen finish, that same healthy thread may be retained at the
 gate for tool-less read-only exit-interview turns. Retention leases the exact
 completed-generation gate, so continuation and rollback cannot invalidate the

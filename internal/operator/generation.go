@@ -612,6 +612,9 @@ func (c *GenerationController) NextTurnKind() string {
 	if session == nil {
 		return "initial"
 	}
+	if session.PlanningRetryRequired() {
+		return "planning failed"
+	}
 	if !session.PlanningCompleted() {
 		return "planning"
 	}

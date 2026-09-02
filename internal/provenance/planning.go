@@ -204,6 +204,29 @@ func (e *PlanningEvidence) Fail() error {
 	return nil
 }
 
+// RecordRetryableFailure records a failed planning attempt while preserving
+// the evidence object for a later planning turn on the same Codex thread.
+func (e *PlanningEvidence) RecordRetryableFailure() error {
+	activeAttempt, err := e.activeAttempt()
+	if err != nil {
+		return err
+	}
+	candidate := e.manifest
+	candidate.Attempts = append([]planningAttempt(nil), e.manifest.Attempts...)
+	attempt := &candidate.Attempts[len(candidate.Attempts)-1]
+	if attempt.Attempt != activeAttempt.Attempt {
+		return &PlanningEvidenceError{Reason: "planning evidence active attempt changed"}
+	}
+	attempt.Outcome = "failed"
+	candidate.Stage = "awaiting_resume"
+	candidate.Outcome = "incomplete"
+	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), candidate); err != nil {
+		return err
+	}
+	e.manifest = candidate
+	return nil
+}
+
 func candidateActiveAttempt(manifest planningManifest) (*planningAttempt, error) {
 	if manifest.Stage != "started" || len(manifest.Attempts) == 0 {
 		return nil, &PlanningEvidenceError{Reason: "planning evidence is not active"}

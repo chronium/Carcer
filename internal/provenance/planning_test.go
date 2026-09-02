@@ -144,6 +144,38 @@ func TestPlanningEvidenceNonDirectoryRootMatchesAllocationConflict(t *testing.T)
 	}
 }
 
+func TestRetryablePlanningFailurePreservesLaterAttempt(t *testing.T) {
+	run := t.TempDir()
+	evidence, err := NewPlanningEvidenceStore(run).Begin(8, "thread-8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.RecordStarted("turn-abandoned"); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.RecordRetryableFailure(); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(run, "planning-evidence", "generation-0008", "manifest.json")
+	failed := readManifest(t, manifestPath)
+	if failed.Stage != "awaiting_resume" || failed.Outcome != "incomplete" || len(failed.Attempts) != 1 || failed.Attempts[0].Outcome != "failed" {
+		t.Fatalf("retryable manifest = %#v", failed)
+	}
+	if failed.Attempts[0].ResponseFile != "" {
+		t.Fatalf("retryable attempt has response file %q", failed.Attempts[0].ResponseFile)
+	}
+	if err := evidence.RecordStarted("turn-retry"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evidence.Complete("completed", stringPointer("Exact successful plan.")); err != nil {
+		t.Fatal(err)
+	}
+	completed := readManifest(t, manifestPath)
+	if len(completed.Attempts) != 2 || completed.Attempts[0].Outcome != "failed" || completed.Attempts[1].Outcome != "completed" {
+		t.Fatalf("completed manifest = %#v", completed)
+	}
+}
+
 func readManifest(t *testing.T, path string) planningManifest {
 	t.Helper()
 	contents, err := os.ReadFile(path)

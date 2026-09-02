@@ -28,6 +28,7 @@ const (
 	reviewerHelperRecord      = "CODEXOS_GO_REVIEWER_RECORD"
 	reviewerHelperReady       = "CODEXOS_GO_REVIEWER_READY"
 	reviewerHelperSentinel    = "CODEXOS_GO_REVIEWER_SUITE_SENTINEL"
+	reviewerHelperToolReady   = "CODEXOS_GO_REVIEWER_TOOL_READY"
 )
 
 func TestMain(tests *testing.M) {
@@ -147,6 +148,41 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	activities := stream.Drain()
 	if !hasReviewerActivity(activities, observability.ActivityReviewStarted) || !hasReviewerActivity(activities, observability.ActivityReviewCompleted) || !hasReviewerActivity(activities, observability.ActivityToolStarted) {
 		t.Fatalf("review activities = %#v", activities)
+	}
+}
+
+func TestReviewWorkerRejectsTerminalTurnWithUnresolvedSourceRead(t *testing.T) {
+	runtime := newFakeReviewRuntime(t)
+	toolReady := filepath.Join(t.TempDir(), "tool-ready")
+	readStarted := make(chan struct{})
+	readCancelled := make(chan struct{})
+	runtime.invoke = func(ctx context.Context, _ string, _ [][]byte) (guest.ToolResult, error) {
+		if err := os.WriteFile(toolReady, []byte("ready"), 0o600); err != nil {
+			return guest.ToolResult{}, err
+		}
+		close(readStarted)
+		<-ctx.Done()
+		close(readCancelled)
+		return guest.ToolResult{}, ctx.Err()
+	}
+	worker := NewReviewWorker(ReviewWorkerOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	setReviewerHelper(t, "terminal-before-tool-result", "", "")
+	t.Setenv(reviewerHelperToolReady, toolReady)
+	result, err := worker.RunReview(context.Background(), runtime, ReviewOptions{})
+	if err == nil || !strings.Contains(err.Error(), "before its dynamic tool results were delivered") {
+		t.Fatalf("review result = %q, %v", result, err)
+	}
+	select {
+	case <-readStarted:
+	default:
+		t.Fatal("review source read did not start")
+	}
+	select {
+	case <-readCancelled:
+	default:
+		t.Fatal("review source read was not cancelled and quiesced")
 	}
 }
 
@@ -458,6 +494,13 @@ func runReviewerFakeAppServer() {
 		}
 		send(map[string]any{"id": callID, "method": "item/tool/call", "params": params})
 		_ = read()
+		if includeCallID && thread == threadID && turn == turnID {
+			send(map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": threadID, "turnId": turnID, "item": map[string]any{
+					"id": callID, "type": "dynamicToolCall", "tool": tool, "status": "completed",
+				},
+			}})
+		}
 	}
 	mode := os.Getenv(reviewerHelperMode)
 	switch mode {
@@ -474,6 +517,29 @@ func runReviewerFakeAppServer() {
 		send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": threadID, "turnId": turnID, "tokenUsage": map[string]any{"total": map[string]any{"inputTokens": 1}}}})
 	case "tokens":
 		send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": threadID, "turnId": turnID, "tokenUsage": map[string]any{"total": map[string]any{"inputTokens": 80, "cachedInputTokens": 25, "outputTokens": 30, "reasoningOutputTokens": 12}}}})
+	case "terminal-before-tool-result":
+		callID := "call-unresolved"
+		send(map[string]any{"id": callID, "method": "item/tool/call", "params": map[string]any{
+			"callId": callID, "threadId": threadID, "turnId": turnID,
+			"namespace": "codexos", "tool": "read",
+			"arguments": map[string]any{"path": "seed/kernel.c", "offset": 0, "length": 1},
+		}})
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if _, err := os.Stat(os.Getenv(reviewerHelperToolReady)); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				os.Exit(9)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		item := map[string]any{"id": "message", "type": "agentMessage", "text": "Review finished early."}
+		send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": threadID, "turnId": turnID, "item": item}})
+		send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"}}})
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "hold":
 		for {
 			time.Sleep(time.Hour)

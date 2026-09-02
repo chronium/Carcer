@@ -280,6 +280,12 @@ func (e *GenerationWorkerError) Unwrap() error {
 // Python implementation.
 type CodexGenerationWorkerError = GenerationWorkerError
 
+type planningDynamicCallLifecycleError struct{}
+
+func (*planningDynamicCallLifecycleError) Error() string {
+	return "planning turn completed before its dynamic tool results were delivered"
+}
+
 // GenerationSessionOptions configures one app-server process and thread.
 // Empty serving fields select the contract defaults. AuthFile and Executable
 // are trusted harness configuration, never guest input.
@@ -348,6 +354,7 @@ type GenerationSession struct {
 	closed                   bool
 	initialStarted           bool
 	planningCompleted        bool
+	planningRetryRequired    bool
 	initialActive            bool
 	initialDone              chan struct{}
 	stopBeforeImplementation bool
@@ -369,6 +376,7 @@ type GenerationSession struct {
 	interviewTurnNumber      int
 	interviewTranscript      *provenance.ExitInterviewTranscript
 	gateRetained             bool
+	dynamicCalls             *dynamicCallRouter
 }
 
 // NewGenerationSession constructs an idle session. It does not start Codex.
@@ -409,7 +417,7 @@ func NewGenerationSession(runtime GenerationRuntime, options GenerationSessionOp
 	if options.StopTimeout == 0 {
 		options.StopTimeout = 2 * time.Second
 	}
-	return &GenerationSession{
+	session := &GenerationSession{
 		runtime:        runtime,
 		options:        options,
 		healthy:        true,
@@ -419,6 +427,8 @@ func NewGenerationSession(runtime GenerationRuntime, options GenerationSessionOp
 		initialDone:    closedChannel(),
 		availableTools: make(map[string]struct{}),
 	}
+	session.dynamicCalls = newDynamicCallRouter(session.record)
+	return session
 }
 
 // NewImplementorSession is an equivalent constructor with role-oriented
@@ -540,6 +550,15 @@ func (s *GenerationSession) PlanningCompleted() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.planningCompleted
+}
+
+func (s *GenerationSession) PlanningRetryRequired() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.planningRetryRequired
 }
 
 func (s *GenerationSession) Mode() GenerationSessionMode {
@@ -1051,6 +1070,7 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 		return GenerationResult{}, &GenerationWorkerError{Reason: "planning has already completed"}
 	}
 	s.initialActive = true
+	s.planningRetryRequired = false
 	done := make(chan struct{})
 	s.initialDone = done
 	s.stopBeforeImplementation = false
@@ -1069,6 +1089,7 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 	}
 	s.mu.Lock()
 	s.planningCompleted = true
+	s.planningRetryRequired = false
 	stopBefore := s.stopBeforeImplementation
 	s.mu.Unlock()
 	if stopBefore {
@@ -1319,17 +1340,50 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	toolJoinTimeout := s.options.StopTimeout
 	s.mu.Unlock()
 	toolTimer := time.NewTimer(toolJoinTimeout)
+	var toolJoinErr error
 	select {
 	case <-toolIdle:
 	case <-turnContext.Done():
-		waitErr = errors.Join(waitErr, &GenerationWorkerError{
+		toolJoinErr = &GenerationWorkerError{
 			Reason: "Codex dynamic tool call did not quiesce after the turn ended",
 			Err:    turnContext.Err(),
-		})
+		}
 	case <-toolTimer.C:
-		waitErr = errors.Join(waitErr, &GenerationWorkerError{Reason: "Codex dynamic tool call did not quiesce after the turn ended"})
+		toolJoinErr = &GenerationWorkerError{Reason: "Codex dynamic tool call did not quiesce after the turn ended"}
 	}
 	toolTimer.Stop()
+	waitErr = errors.Join(waitErr, toolJoinErr)
+	var deliveryErr *planningDynamicCallLifecycleError
+	if errors.As(waitErr, &deliveryErr) && toolJoinErr == nil {
+		s.mu.Lock()
+		evidence := s.planningEvidence
+		s.mu.Unlock()
+		if evidence == nil {
+			waitErr = &GenerationWorkerError{Reason: "planning evidence is unavailable"}
+		} else if evidenceErr := s.recordPlanningRetryableFailure(evidence); evidenceErr != nil {
+			waitErr = generationFailure(waitErr, evidenceErr)
+		} else {
+			s.mu.Lock()
+			s.planningRetryRequired = true
+			s.lastStatus = "failed"
+			s.mu.Unlock()
+			failureData := cloneMap(provenanceData)
+			failureData["duration_seconds"] = nonNegativeSeconds(time.Since(startedAt))
+			failureData["result"] = "failed"
+			failureData["failure_kind"] = "orphaned_dynamic_call"
+			s.record("planning_failed", failureData)
+			s.publish(observability.ActivityTurnFailed, map[string]any{
+				"turn_number": turnNumber, "turn_phase": phase, "status": "failed",
+				"reason": "planning tool result was not delivered",
+			}, threadID, turnID, "")
+			s.clearTurn("failed")
+			return GenerationResult{
+				TurnStatus:   "failed",
+				RuntimeState: s.runtimeState(),
+				Summary:      "Codex planning failed because a planning tool result could not be delivered. Run agent to retry planning.",
+			}, nil
+		}
+	}
 	if waitErr != nil {
 		terminalFailure := status == "failed"
 		s.mu.Lock()
@@ -1461,10 +1515,15 @@ func (s *GenerationSession) waitForTurn(ctx context.Context, threadID, turnID, p
 		}
 		if method == "item/completed" {
 			if values, ok := params.(map[string]any); ok {
-				if item, ok := values["item"].(map[string]any); ok && item["type"] == "agentMessage" {
-					if text, ok := item["text"].(string); ok {
-						lastMessage = text
-						lastMessagePresent = true
+				if item, ok := values["item"].(map[string]any); ok {
+					switch item["type"] {
+					case "agentMessage":
+						if text, ok := item["text"].(string); ok {
+							lastMessage = text
+							lastMessagePresent = true
+						}
+					case "dynamicToolCall":
+						s.dynamicCalls.recordDelivery(values, item, threadID, turnID)
 					}
 				}
 			}
@@ -1490,6 +1549,14 @@ func (s *GenerationSession) waitForTurn(ctx context.Context, threadID, turnID, p
 		status, ok := turn["status"].(string)
 		if !ok || (status != "completed" && status != "interrupted" && status != "failed") {
 			return "", "", false, &GenerationWorkerError{Reason: fmt.Sprintf("turn/completed has invalid status %#v", turn["status"])}
+		}
+		s.mu.Lock()
+		s.lastStatus = status
+		s.mu.Unlock()
+		pending := s.dynamicCalls.orphanUnresolved(threadID, turnID, phase, status)
+		if status == "completed" && phase == "planning" && len(pending) != 0 {
+			s.cancelReview()
+			return status, "", false, &planningDynamicCallLifecycleError{}
 		}
 		finalMessage, ok := finalAgentMessage(turn)
 		if (!ok || finalMessage == "") && lastMessagePresent {
@@ -1817,7 +1884,8 @@ func (s *GenerationSession) cancelReview() {
 func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	s.mu.Lock()
 	server, threadID, turnID := s.server, s.threadID, s.turnID
-	planning := s.turnPhase == "planning"
+	turnPhase := s.turnPhase
+	planning := turnPhase == "planning"
 	interview := s.mode == GenerationModeInterviewTurn
 	turnStarting := s.turnStarting
 	turnReady := s.turnReady
@@ -1832,15 +1900,21 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 		<-turnReady
 		s.mu.Lock()
 		server, threadID, turnID = s.server, s.threadID, s.turnID
-		planning = s.turnPhase == "planning"
+		turnPhase = s.turnPhase
+		planning = turnPhase == "planning"
 		interview = s.mode == GenerationModeInterviewTurn
 		s.mu.Unlock()
 	}
+	routing := s.dynamicCalls.ensure(message, threadID, turnID, turnPhase)
+	defer s.dynamicCalls.finishHandler(routing)
 	if server == nil || threadID == "" || turnID == "" {
 		if server == nil {
+			s.dynamicCalls.finish(routing, "rejected", "")
 			return
 		}
-		_ = server.RejectServerRequest(message)
+		if routing == nil || s.dynamicCalls.finish(routing, "rejected", "") {
+			_ = server.RejectServerRequest(message)
+		}
 		return
 	}
 	s.mu.Lock()
@@ -1849,7 +1923,16 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	// and joins this callback or prevents it from starting.
 	if s.closed || !s.turnAcceptingTools || s.server != server || s.threadID != threadID || s.turnID != turnID {
 		s.mu.Unlock()
-		_ = server.RejectServerRequest(message)
+		if routing == nil || s.dynamicCalls.finish(routing, "rejected", "") {
+			_ = server.RejectServerRequest(message)
+		}
+		return
+	}
+	if routing != nil && !s.dynamicCalls.mayWrite(routing, threadID, turnID, turnPhase, false) {
+		s.mu.Unlock()
+		if s.dynamicCalls.finish(routing, "rejected", "") {
+			_ = server.RejectServerRequest(message)
+		}
 		return
 	}
 	s.activeTools++
@@ -1873,9 +1956,32 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	if interview {
 		response = s.interviewToolDenial(message["params"], threadID, turnID)
 	} else {
-		response = s.dynamicToolResponse(message["params"], threadID, turnID, planning)
+		response = s.dynamicToolResponse(message["params"], threadID, turnID, planning, routing)
 	}
-	_ = server.WriteResult(message["id"], response)
+	if routing != nil {
+		s.dynamicCalls.markResultReady(routing)
+		s.mu.Lock()
+		currentThread, currentTurn, currentPhase := s.threadID, s.turnID, s.turnPhase
+		interrupted := s.lastStatus == "interrupted"
+		s.mu.Unlock()
+		if !s.dynamicCalls.mayWrite(routing, currentThread, currentTurn, currentPhase, interrupted) {
+			s.dynamicCalls.finish(routing, "orphaned", "")
+			return
+		}
+		s.dynamicCalls.markResponseWriteAttempted(routing)
+	}
+	if err := server.WriteResult(message["id"], response); err != nil {
+		s.dynamicCalls.finish(routing, "rejected", "")
+		return
+	}
+	if routing != nil {
+		s.mu.Lock()
+		interrupted := s.lastStatus == "interrupted"
+		s.mu.Unlock()
+		if interrupted {
+			s.dynamicCalls.finish(routing, "rejected", "")
+		}
+	}
 }
 
 func (s *GenerationSession) interviewToolDenial(params any, threadID, turnID string) map[string]any {
@@ -1903,16 +2009,27 @@ func (s *GenerationSession) recordServerRequestQueued(message map[string]any) {
 		tool = "unknown"
 	}
 	s.mu.Lock()
-	phase := s.turnPhase
+	phase, threadID, turnID := s.turnPhase, s.threadID, s.turnID
+	starting, ready := s.turnStarting, s.turnReady
 	s.mu.Unlock()
+	if turnID == "" && starting && ready != nil {
+		<-ready
+		s.mu.Lock()
+		phase, threadID, turnID = s.turnPhase, s.threadID, s.turnID
+		s.mu.Unlock()
+	}
+	routing := s.dynamicCalls.ensure(message, threadID, turnID, phase)
 	queued := map[string]any{"tool": tool}
 	if phase != "" {
 		queued["turn_phase"] = phase
 	}
+	if routing != nil {
+		queued = mergeMaps(queued, s.dynamicCalls.identity(routing))
+	}
 	s.record("tool_app_server_queued", queued)
 }
 
-func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID string, planning bool) map[string]any {
+func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID string, planning bool, routing *dynamicCallRouting) map[string]any {
 	activityData := dynamicToolActivityData(params)
 	if planning {
 		activityData["turn_phase"] = "planning"
@@ -1945,7 +2062,7 @@ func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID str
 			return guest.ToolResult{}, "", fmt.Errorf("%s is unavailable during the planning phase; persistent guest/runtime changes and generation completion begin with the implementation turn", tool)
 		}
 		if namespace == nil && tool == "review" {
-			result, err := s.runReview(arguments)
+			result, err := s.runReview(arguments, s.dynamicCalls.identity(routing))
 			return guest.ToolResult{}, result, err
 		}
 		if !namespaceIsString || namespaceName != "codexos" {
@@ -2165,7 +2282,7 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 	}
 }
 
-func (s *GenerationSession) runReview(arguments map[string]any) (string, error) {
+func (s *GenerationSession) runReview(arguments map[string]any, origin map[string]any) (string, error) {
 	if err := checkGenerationFields(arguments, nil, map[string]struct{}{"request": {}, "focus": {}}); err != nil {
 		return "", err
 	}
@@ -2216,6 +2333,7 @@ func (s *GenerationSession) runReview(arguments map[string]any) (string, error) 
 		ReasoningEffort:  s.options.ReviewerReasoningEffort,
 		ReasoningSummary: s.options.ReviewerReasoningSummary,
 		ServiceTier:      s.options.ReviewerServiceTier,
+		Origin:           origin,
 	})
 	return result, err
 }
@@ -2356,6 +2474,12 @@ func (s *GenerationSession) completePlanningEvidence(evidence *provenance.Planni
 	s.planningEvidenceMu.Lock()
 	defer s.planningEvidenceMu.Unlock()
 	return evidence.Complete(outcome, response)
+}
+
+func (s *GenerationSession) recordPlanningRetryableFailure(evidence *provenance.PlanningEvidence) error {
+	s.planningEvidenceMu.Lock()
+	defer s.planningEvidenceMu.Unlock()
+	return evidence.RecordRetryableFailure()
 }
 
 func generationFailure(primary, evidence error) error {
