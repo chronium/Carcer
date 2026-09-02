@@ -73,7 +73,25 @@ func RunWithIO(ctx context.Context, options Options, input io.Reader, output io.
 	return runWithIO(ctx, options, input, output)
 }
 
+// runnerConfiguration contains trusted concrete process inputs used by the
+// disposable acceptance boundary. The public runner supplies the zero value;
+// no test setting is exposed through the operator CLI or guest state.
+type runnerConfiguration struct {
+	live    experiment.LiveRunOptions
+	session agent.GenerationSessionOptions
+}
+
 func runWithIO(ctx context.Context, options Options, input io.Reader, output io.Writer) (resultErr error) {
+	return runWithIOConfigured(ctx, options, input, output, runnerConfiguration{})
+}
+
+func runWithIOConfigured(
+	ctx context.Context,
+	options Options,
+	input io.Reader,
+	output io.Writer,
+	configuration runnerConfiguration,
+) (resultErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -178,12 +196,12 @@ func runWithIO(ctx context.Context, options Options, input io.Reader, output io.
 	if providedAssetsConfigured {
 		providedAssets = &options.ProvidedAssets
 	}
-	runtime, err = experiment.NewLiveCodexOSRun(options.RunDirectory, experiment.LiveRunOptions{
-		ProvidedAssetsDirectory: providedAssets,
-		EventLog:                eventLog,
-		Metrics:                 metrics,
-		ActivityStream:          activity,
-	})
+	liveOptions := configuration.live
+	liveOptions.ProvidedAssetsDirectory = providedAssets
+	liveOptions.EventLog = eventLog
+	liveOptions.Metrics = metrics
+	liveOptions.ActivityStream = activity
+	runtime, err = experiment.NewLiveCodexOSRun(options.RunDirectory, liveOptions)
 	if err != nil {
 		return err
 	}
@@ -220,12 +238,12 @@ func runWithIO(ctx context.Context, options Options, input io.Reader, output io.
 			return err
 		}
 	}
+	sessionOptions := configuration.session
+	sessionOptions.ActivityStream = activity
 	consoleOptions := PlainConsoleOptions{
-		Input:  input,
-		Output: output,
-		Controller: GenerationControllerOptions{Session: agent.GenerationSessionOptions{
-			ActivityStream: activity,
-		}},
+		Input:          input,
+		Output:         output,
+		Controller:     GenerationControllerOptions{Session: sessionOptions},
 		GitRecorder:    gitRecorder,
 		InterviewStore: interviewStore,
 	}

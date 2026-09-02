@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -16,6 +18,97 @@ import (
 	"codexos/internal/qemu"
 	"codexos/internal/store"
 )
+
+func TestRunnerStartsPausesAndAbortsDisposableGeneration(t *testing.T) {
+	qemuExecutable := buildDisposableRunnerQEMU(t)
+	runDirectory, err := os.MkdirTemp("/tmp", "codexos-runner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runDirectory) })
+	initialISO := filepath.Join(t.TempDir(), "initial.iso")
+	if err := os.WriteFile(initialISO, []byte("disposable initial image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var output bytes.Buffer
+	err = runWithIOConfigured(ctx, Options{
+		RunDirectory: runDirectory,
+		InitialISO:   initialISO,
+	}, strings.NewReader("status\npause\nabort\ny\nquit\n"), &output, runnerConfiguration{
+		live: experiment.LiveRunOptions{
+			QEMUExecutable:  qemuExecutable,
+			HardwareProfile: qemu.TestHardwareProfile,
+			ReadyTimeout:    2 * time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run disposable generation: %v\n%s", err, output.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("runner exceeded acceptance deadline: %v", ctx.Err())
+	}
+	for _, want := range []string{
+		"Generation 0: RUNNING",
+		"Hardware profile: test-v1",
+		"Generation 0 paused.",
+		"Generation 0 aborted.",
+		"No successor was selected.",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("operator output missing %q:\n%s", want, output.String())
+		}
+	}
+	loaded, err := experiment.NewCodexOSRun(runDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := loaded.InspectGeneration(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.Outcome != "aborted" || archive.Transition != "initial" {
+		t.Fatalf("archive = %#v", archive)
+	}
+	workspaces, err := filepath.Glob(filepath.Join(runDirectory, ".generation-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 0 {
+		t.Fatalf("runner left generation workspaces: %v", workspaces)
+	}
+	events, err := os.ReadFile(filepath.Join(runDirectory, observability.EventLogFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := -1
+	for _, event := range []string{"run_started", "generation_paused", "generation_aborted", "run_stopped"} {
+		index := bytes.Index(events, []byte(`"event":"`+event+`"`))
+		if index < 0 || index <= previous {
+			t.Fatalf("event %q missing or out of order:\n%s", event, events)
+		}
+		previous = index
+	}
+}
+
+func buildDisposableRunnerQEMU(t *testing.T) string {
+	t.Helper()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(t.TempDir(), "fake-qemu")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "go", "build", "-o", executable, "./internal/operator/testdata/fakeqemu")
+	command.Dir = repositoryRoot
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build disposable QEMU fixture: %v\n%s", err, output)
+	}
+	return executable
+}
 
 func TestRunnerReopensArchivedGateThroughPlainConsole(t *testing.T) {
 	runDirectory := t.TempDir()

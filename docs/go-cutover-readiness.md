@@ -130,7 +130,10 @@ consecutive race-enabled runs for both direct application shutdown and caller
 context cancellation. A separately built `cmd/codexos` executable also reopens
 a disposable archived gate through both the plain frontend and a real
 pseudo-terminal, exits cleanly on `quit` or `SIGTERM`, preserves event order,
-and restores terminal state. Tests cover exact bytes,
+and restores terminal state. The concrete runner also starts a fresh generation
+against a separately built standalone QEMU/QMP/serial peer, reports status,
+pauses, permanently aborts with operator confirmation, publishes the aborted
+archive, and leaves no live workspace. Tests cover exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -239,6 +242,24 @@ with `experiment.WriteAbortedArchive` and `qemu.TestHardwareProfile`. Plain mode
 receives `quit` over a pipe. TUI mode owns a fresh `/dev/ptmx` pair, receives
 `SIGTERM` only after raw mode is observed, and must restore the original termios.
 Neither case starts QEMU, Codex, a build, telemetry, or live state.
+
+### Recorded disposable live runner acceptance
+
+From the repository root, the exact race-enabled command is:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerStartsPausesAndAbortsDisposableGeneration$' -count=10 -timeout=180s
+```
+
+`internal/operator/testdata/fakeqemu` is built as a standalone executable; it is
+not a recursively invoked Go test binary. The runner receives that trusted path,
+`qemu.TestHardwareProfile`, a fresh short `/tmp/codexos-runner-*` run directory,
+and a synthetic initial ISO through an unexported acceptance-only configuration
+boundary. The ordinary plain console drives `status`, `pause`, confirmed
+`abort`, and `quit`. The test requires ordered start/pause/abort/stop events, an
+immutable aborted generation-zero archive, and removal of the live generation
+workspace. It invokes no Codex session, compiler, candidate VM, telemetry
+endpoint, or live state.
 
 ## Operational risks
 
