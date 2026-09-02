@@ -114,8 +114,8 @@ Streaming agent messages remain literal and finalized messages are rendered by
 bounded Glamour Markdown without changing canonical activity text or enabling
 terminal hyperlinks. Caller cancellation and external shutdown cancel command
 work but send Bubble Tea a graceful quit, so its Linux terminal reader is joined
-before descriptor close. A complete disposable interactive acceptance run
-remains outstanding.
+before descriptor close. A complete disposable live TUI acceptance run remains
+outstanding.
 
 ## Verification performed
 
@@ -133,7 +133,15 @@ pseudo-terminal, exits cleanly on `quit` or `SIGTERM`, preserves event order,
 and restores terminal state. The concrete runner also starts a fresh generation
 against a separately built standalone QEMU/QMP/serial peer, reports status,
 pauses, permanently aborts with operator confirmation, publishes the aborted
-archive, and leaves no live workspace. Tests cover exact bytes,
+archive, and leaves no live workspace. A second concrete-runner path uses
+separately built standalone QEMU and Codex app-server peers to complete planning
+and implementation in one thread, dispatch an ordinary guest tool, perform
+nested build and finish host-service calls, run the fixed trusted build, boot and
+exercise the candidate validator against a distinct synthetic QMP/serial peer,
+freeze the exact successful snapshot, publish
+the completed generation-zero archive, retain and then retire the same healthy
+Codex session at the gate, and leave no child or live workspace. Tests cover
+exact bytes,
 round trips, malformed and oversized input, fragmentation, coalescing, and fuzz
 properties. Black-box conformance tests compare wire bytes, feature records, and
 planning, build, and review evidence trees against the Python modules and
@@ -168,12 +176,14 @@ unrelated Python failures.
 ## Remaining gaps and known differences
 
 Required remaining work is operational verification rather than another missing
-owner layer: run and record the complete disposable Go-binary scenarios for new
-run, live planning/build/finish, abort, gate resume, continue/rollback, cross-run
-bootstrap, large-transfer shutdown, and both frontends; and rerun the complete
-reference suite when the documented TCG candidate timing test can succeed. The
-two frontends are proven at an archived gate, but still need to be exercised as
-part of the complete live-generation scenarios. Go `ReadFrame` relies on
+owner layer: extend the disposable completed run through continue and rollback,
+exercise cross-run bootstrap and large-transfer shutdown, repeat a complete live
+generation through the TUI and the separately built Go command boundary, perform
+the corresponding real-image candidate acceptance when the pinned guest/toolchain
+environment is available, and rerun the complete reference suite when the
+documented TCG candidate timing test can succeed. Both frontends are proven at an
+archived gate, but only the plain frontend has been exercised through a complete
+live planning/build/finish generation. Go `ReadFrame` relies on
 its transport owner for deadlines, while Python's public helper currently applies
 a five-second deadline itself; the dispatcher provides the bounded production
 transport path.
@@ -261,12 +271,39 @@ immutable aborted generation-zero archive, and removal of the live generation
 workspace. It invokes no Codex session, compiler, candidate VM, telemetry
 endpoint, or live state.
 
+### Recorded disposable planning/build/finish acceptance
+
+From the repository root, the exact race-enabled command is:
+
+```text
+GOCACHE=/tmp/codexos-go-cache GOMODCACHE=/tmp/codexos-go-modcache GOPATH=/tmp/codexos-go-path go test -race ./internal/operator -run '^TestRunnerCompletesDisposableGenerationThroughAgentAndBuild$' -count=10 -timeout=180s
+```
+
+`internal/operator/testdata/fakecodex` and
+`internal/operator/testdata/fakeqemu` are built as standalone executables, never
+as recursively invoked test binaries. The test uses an ordinary pipe-driven
+plain console, a file-backed fake ChatGPT login, a short fresh `/tmp/co-live-*`
+run root, and fixed disposable compiler, linker, bubblewrap, xorriso, and Limine
+fixtures. The active serial peer advertises the canonical guest tools and nests
+real build and finish host-service requests inside their tool exchanges. A
+separate synthetic `-S` QEMU peer must pass READY and list-tools candidate
+validation. This exercises the complete validator ownership and protocol path;
+it does not claim that the fixture's synthetic ISO is independently bootable.
+The test requires exact handoff and source-snapshot preservation, matching
+materialized source, selected kernel/ISO artifacts, successful immutable build
+and candidate provenance, ordered lifecycle evidence, clean gate-session
+retirement, no live workspace, and explicit proof that every recorded QEMU and
+Codex child PID has been reaped. The short run root is intentional because Linux
+limits Unix-domain socket paths while the candidate validator adds nested
+temporary directories. No network, production QEMU, real Codex session, paid
+review, production telemetry, or live experiment state is used.
+
 ## Operational risks
 
 The highest risks are durable archive compatibility, fail-closed provenance,
 single-reader duplex serial behavior during large nested responses, generation
-gate semantics, same-thread planning-to-implementation continuity, and the lack
-of a complete disposable interactive process run. The terminal reader's unsafe
+transition semantics beyond the first completed gate, and the lack of a complete
+disposable live TUI/command process run. The terminal reader's unsafe
 forced-cancellation path is avoided by application-owned graceful shutdown and
 covered with a real pseudo-terminal under the race detector. Bubble Tea v2.0.9
 can still use its upstream forced path after an internal renderer/input error or
