@@ -508,6 +508,18 @@ func (s *GenerationSession) ActiveTurnPhase() string {
 	return s.turnPhase
 }
 
+// TurnAdmitted reports whether the app server has accepted the currently
+// reserved turn. Operator pause waits for this boundary so it never cancels a
+// turn/start request in the narrow interval before its ID is known.
+func (s *GenerationSession) TurnAdmitted() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnID != ""
+}
+
 func (s *GenerationSession) Healthy() bool {
 	if s == nil {
 		return false
