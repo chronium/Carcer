@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"codexos/internal/guest"
+	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 )
 
@@ -35,7 +36,8 @@ const (
 	// run's feature-request ledger.
 	CrossRunBootstrapFeatureLedger = "cross-run-feature-requests.json"
 
-	crossRunBootstrapSchemaVersion = uint64(2)
+	crossRunBootstrapSchemaVersion = uint64(3)
+	crossRunBootstrapLegacySchema  = uint64(2)
 	crossRunCopyBufferSize         = 1024 * 1024
 	crossRunGitTimeout             = 30 * time.Second
 	crossRunGitDiagnosticsLimit    = 16 * 1024
@@ -65,16 +67,18 @@ func (e *CrossRunBootstrapError) Unwrap() error { return e.Err }
 // order. Callers should treat it as read-only; loading returns a private
 // decoded slice and initialization does not retain caller-owned slices.
 type CrossRunBootstrap struct {
-	SourceRun           string
-	SourceGeneration    uint64
-	Handoff             string
-	SuccessorISOSHA256  string
-	SuccessorISOSize    uint64
-	FeatureLedgerSHA256 string
-	FeatureLedgerSize   uint64
-	InheritedRequestIDs []uint64
-	GitBaseRef          string
-	GitBaseCommit       string
+	SourceRun                  string
+	SourceGeneration           uint64
+	Handoff                    string
+	SuccessorISOSHA256         string
+	SuccessorISOSize           uint64
+	FeatureLedgerSHA256        string
+	FeatureLedgerSize          uint64
+	InheritedRequestIDs        []uint64
+	GitBaseRef                 string
+	GitBaseCommit              string
+	SourceHarnessIdentity      *provenance.HarnessIdentity
+	DestinationHarnessIdentity *provenance.HarnessIdentity
 }
 
 // VerifyInitialISO verifies that initialISO is the exact selected successor
@@ -108,6 +112,36 @@ func InitializeCrossRunBootstrap(
 	sourceGeneration uint64,
 	gitRepository string,
 	gitBaseRef string,
+) (*CrossRunBootstrap, error) {
+	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, nil)
+}
+
+func InitializeCrossRunBootstrapWithHarnessIdentity(
+	destinationRun string,
+	initialISO string,
+	sourceRun string,
+	sourceGeneration uint64,
+	gitRepository string,
+	gitBaseRef string,
+	harnessIdentity *provenance.HarnessIdentity,
+) (*CrossRunBootstrap, error) {
+	if harnessIdentity == nil {
+		return nil, &CrossRunBootstrapError{Reason: "destination harness identity is required"}
+	}
+	if err := provenance.ValidateHarnessIdentity(*harnessIdentity); err != nil {
+		return nil, &CrossRunBootstrapError{Reason: "destination harness identity is invalid", Err: err}
+	}
+	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, harnessIdentity)
+}
+
+func initializeCrossRunBootstrap(
+	destinationRun string,
+	initialISO string,
+	sourceRun string,
+	sourceGeneration uint64,
+	gitRepository string,
+	gitBaseRef string,
+	harnessIdentity *provenance.HarnessIdentity,
 ) (*CrossRunBootstrap, error) {
 	destination, err := resolveCrossRunPath(destinationRun)
 	if err != nil {
@@ -241,16 +275,23 @@ func InitializeCrossRunBootstrap(
 		return nil, err
 	}
 	bootstrap := &CrossRunBootstrap{
-		SourceRun:           filepath.Base(source),
-		SourceGeneration:    sourceGeneration,
-		Handoff:             *archived.Handoff,
-		SuccessorISOSHA256:  isoIdentity.SHA256,
-		SuccessorISOSize:    isoIdentity.Size,
-		FeatureLedgerSHA256: crossRunBytesIdentity(ledgerBytes).SHA256,
-		FeatureLedgerSize:   uint64(len(ledgerBytes)),
-		InheritedRequestIDs: cloneCrossRunRequestIDs(requestIDs),
-		GitBaseRef:          gitBaseRef,
-		GitBaseCommit:       baseCommit,
+		SourceRun:                  filepath.Base(source),
+		SourceGeneration:           sourceGeneration,
+		Handoff:                    *archived.Handoff,
+		SuccessorISOSHA256:         isoIdentity.SHA256,
+		SuccessorISOSize:           isoIdentity.Size,
+		FeatureLedgerSHA256:        crossRunBytesIdentity(ledgerBytes).SHA256,
+		FeatureLedgerSize:          uint64(len(ledgerBytes)),
+		InheritedRequestIDs:        cloneCrossRunRequestIDs(requestIDs),
+		GitBaseRef:                 gitBaseRef,
+		GitBaseCommit:              baseCommit,
+		SourceHarnessIdentity:      provenance.CloneHarnessIdentity(archived.HarnessIdentity),
+		DestinationHarnessIdentity: provenance.CloneHarnessIdentity(harnessIdentity),
+	}
+	if harnessIdentity != nil {
+		if err := provenance.NewHarnessIdentityStore(candidate).RecordRunCreation(*harnessIdentity); err != nil {
+			return nil, &CrossRunBootstrapError{Reason: "could not persist destination harness identity", Err: err}
+		}
 	}
 	if err := writeCrossRunDurable(filepath.Join(candidate, CrossRunBootstrapHandoff), handoffBytes); err != nil {
 		return nil, err
@@ -352,6 +393,17 @@ func LoadCrossRunBootstrap(runDirectory string) (*CrossRunBootstrap, error) {
 	if err != nil {
 		return nil, err
 	}
+	if bootstrap.DestinationHarnessIdentity != nil {
+		runIdentityPath := filepath.Join(run, provenance.RunHarnessIdentityFilename)
+		runIdentityBytes, readErr := readCrossRunLimited(runIdentityPath, crossRunProvenanceFileLimit)
+		if readErr != nil {
+			return nil, &CrossRunBootstrapError{Reason: "cross-run bootstrap destination harness identity is unavailable", Err: readErr}
+		}
+		runIdentity, parseErr := provenance.ParseHarnessIdentity(runIdentityBytes)
+		if parseErr != nil || !runIdentity.Equal(*bootstrap.DestinationHarnessIdentity) {
+			return nil, &CrossRunBootstrapError{Reason: "cross-run bootstrap destination harness identity does not match", Err: parseErr}
+		}
+	}
 	if identity := crossRunBytesIdentity(handoffBytes); identity.SHA256 != expectedHandoff.SHA256 || identity.Size != expectedHandoff.Size {
 		return nil, &CrossRunBootstrapError{Reason: "cross-run bootstrap handoff identity does not match"}
 	}
@@ -377,12 +429,13 @@ type crossRunIdentity struct {
 }
 
 type crossRunArchivedGeneration struct {
-	Generation  uint64
-	Parent      *uint64
-	Transition  string
-	Outcome     string
-	ArchivePath string
-	Handoff     *string
+	Generation      uint64
+	Parent          *uint64
+	Transition      string
+	Outcome         string
+	ArchivePath     string
+	Handoff         *string
+	HarnessIdentity *provenance.HarnessIdentity
 }
 
 func wrapCrossRunSourceError(err error) error {
@@ -521,6 +574,20 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 	if _, err := qemu.ParseHardwareManifest(hardwareBytes); err != nil {
 		return archive, crossRunArchiveError(expectedGeneration, errors.New("generation hardware manifest is malformed"))
 	}
+	harnessPath := filepath.Join(path, provenance.GenerationHarnessFilename)
+	if _, statErr := os.Lstat(harnessPath); statErr == nil {
+		harnessBytes, readErr := readCrossRunRegular(path, provenance.GenerationHarnessFilename)
+		if readErr != nil {
+			return archive, crossRunArchiveError(expectedGeneration, readErr)
+		}
+		identity, parseErr := provenance.ParseHarnessIdentity(harnessBytes)
+		if parseErr != nil {
+			return archive, crossRunArchiveError(expectedGeneration, errors.New("generation harness identity is malformed"))
+		}
+		archive.HarnessIdentity = &identity
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return archive, crossRunArchiveError(expectedGeneration, statErr)
+	}
 	if err := requireCrossRunDirectory(path, "boot"); err != nil {
 		return archive, crossRunArchiveError(expectedGeneration, err)
 	}
@@ -563,6 +630,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 			"boot": {}, "metadata.json": {}, "hardware.json": {}, "handoff.txt": {},
 			"source.snapshot": {}, "source": {}, "successor": {}, "qemu.stdout": {}, "qemu.stderr": {},
 		}
+		if archive.HarnessIdentity != nil {
+			expected[provenance.GenerationHarnessFilename] = struct{}{}
+		}
 		if err := validateCrossRunArchiveContents(path, expected); err != nil {
 			return archive, crossRunArchiveError(expectedGeneration, err)
 		}
@@ -576,6 +646,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 		}
 		expected := map[string]struct{}{
 			"boot": {}, "metadata.json": {}, "hardware.json": {}, "aborted.txt": {}, "qemu.stdout": {}, "qemu.stderr": {},
+		}
+		if archive.HarnessIdentity != nil {
+			expected[provenance.GenerationHarnessFilename] = struct{}{}
 		}
 		latestManifest := filepath.Join(path, "latest-success.json")
 		latestSnapshot := filepath.Join(path, "latest-success.snapshot")
@@ -897,13 +970,25 @@ func crossRunNonNegativeUint(value any) bool {
 }
 
 func decodeCrossRunManifest(value any) (*CrossRunBootstrap, crossRunIdentity, error) {
-	fields, err := crossRunObject(value, map[string]struct{}{"schema_version": {}, "source": {}, "successor_iso": {}, "handoff": {}, "feature_requests": {}, "git_base": {}}, "cross-run bootstrap manifest")
+	fields, err := crossRunObject(value, nil, "cross-run bootstrap manifest")
 	if err != nil {
 		return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap manifest has invalid fields"}
 	}
 	version, ok := fields["schema_version"].(uint64)
-	if !ok || version != crossRunBootstrapSchemaVersion {
+	if !ok || version != crossRunBootstrapSchemaVersion && version != crossRunBootstrapLegacySchema {
 		return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap schema version is unsupported"}
+	}
+	expected := map[string]struct{}{"schema_version": {}, "source": {}, "successor_iso": {}, "handoff": {}, "feature_requests": {}, "git_base": {}}
+	if version == crossRunBootstrapSchemaVersion {
+		expected["harness"] = struct{}{}
+	}
+	if len(fields) != len(expected) {
+		return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap manifest has invalid fields"}
+	}
+	for key := range fields {
+		if _, exists := expected[key]; !exists {
+			return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap manifest has invalid fields"}
+		}
 	}
 	sourceFields, err := crossRunObject(fields["source"], map[string]struct{}{"run": {}, "generation": {}}, "cross-run bootstrap source")
 	if err != nil {
@@ -976,7 +1061,7 @@ func decodeCrossRunManifest(value any) (*CrossRunBootstrap, crossRunIdentity, er
 	if !commitOK || !validCrossRunSHA(gitCommit, true) {
 		return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap Git commit digest is invalid"}
 	}
-	return &CrossRunBootstrap{
+	bootstrap := &CrossRunBootstrap{
 		SourceRun:           sourceRun,
 		SourceGeneration:    generation,
 		SuccessorISOSHA256:  iso.SHA256,
@@ -986,7 +1071,42 @@ func decodeCrossRunManifest(value any) (*CrossRunBootstrap, crossRunIdentity, er
 		InheritedRequestIDs: ids,
 		GitBaseRef:          gitRef,
 		GitBaseCommit:       gitCommit,
-	}, handoff, nil
+	}
+	if version == crossRunBootstrapSchemaVersion {
+		harnessFields, harnessErr := crossRunObject(fields["harness"], map[string]struct{}{"destination": {}, "source_generation": {}}, "cross-run bootstrap harness identity")
+		if harnessErr != nil {
+			return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap harness identity has invalid fields"}
+		}
+		destination, parseErr := crossRunHarnessIdentity(harnessFields["destination"])
+		if parseErr != nil || destination == nil {
+			return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap destination harness identity is invalid", Err: parseErr}
+		}
+		var sourceIdentity *provenance.HarnessIdentity
+		if harnessFields["source_generation"] != nil {
+			sourceIdentity, parseErr = crossRunHarnessIdentity(harnessFields["source_generation"])
+			if parseErr != nil || sourceIdentity == nil {
+				return nil, crossRunIdentity{}, &CrossRunBootstrapError{Reason: "cross-run bootstrap source harness identity is invalid", Err: parseErr}
+			}
+		}
+		bootstrap.DestinationHarnessIdentity = destination
+		bootstrap.SourceHarnessIdentity = sourceIdentity
+	}
+	return bootstrap, handoff, nil
+}
+
+func crossRunHarnessIdentity(value any) (*provenance.HarnessIdentity, error) {
+	if value == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := provenance.ParseHarnessIdentity(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return &identity, nil
 }
 
 func decodeCrossRunIdentity(fields map[string]any, label string, allowGit bool) (crossRunIdentity, error) {
@@ -1117,6 +1237,7 @@ func crossRunManifestBytes(bootstrap *CrossRunBootstrap, handoff []byte, request
 	if ids == nil {
 		ids = []uint64{}
 	}
+	version := crossRunBootstrapLegacySchema
 	value := map[string]any{
 		"feature_requests": map[string]any{
 			"count":  requestCount,
@@ -1134,7 +1255,7 @@ func crossRunManifestBytes(bootstrap *CrossRunBootstrap, handoff []byte, request
 			"sha256": crossRunBytesIdentity(handoff).SHA256,
 			"size":   uint64(len(handoff)),
 		},
-		"schema_version": crossRunBootstrapSchemaVersion,
+		"schema_version": version,
 		"source": map[string]any{
 			"generation": bootstrap.SourceGeneration,
 			"run":        bootstrap.SourceRun,
@@ -1143,6 +1264,17 @@ func crossRunManifestBytes(bootstrap *CrossRunBootstrap, handoff []byte, request
 			"sha256": bootstrap.SuccessorISOSHA256,
 			"size":   bootstrap.SuccessorISOSize,
 		},
+	}
+	if bootstrap.DestinationHarnessIdentity != nil {
+		version = crossRunBootstrapSchemaVersion
+		value["schema_version"] = version
+		var source any
+		if bootstrap.SourceHarnessIdentity != nil {
+			source = bootstrap.SourceHarnessIdentity.AsJSON()
+		}
+		value["harness"] = map[string]any{
+			"destination": bootstrap.DestinationHarnessIdentity.AsJSON(), "source_generation": source,
+		}
 	}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)

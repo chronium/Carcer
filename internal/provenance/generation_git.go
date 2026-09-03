@@ -301,6 +301,23 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 	if _, err := qemu.ParseHardwareManifest(hardwareBytes); err != nil {
 		return generationArchive{}, errors.New("generation hardware manifest is malformed")
 	}
+	hasHarnessIdentity := false
+	harnessPath := filepath.Join(archivePath, GenerationHarnessFilename)
+	if _, statErr := os.Lstat(harnessPath); statErr == nil {
+		if !isRegularWithoutSymlink(harnessPath) {
+			return generationArchive{}, errors.New("generation harness identity is malformed")
+		}
+		harnessBytes, readErr := os.ReadFile(harnessPath)
+		if readErr != nil {
+			return generationArchive{}, readErr
+		}
+		if _, parseErr := ParseHarnessIdentity(harnessBytes); parseErr != nil {
+			return generationArchive{}, errors.New("generation harness identity is malformed")
+		}
+		hasHarnessIdentity = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return generationArchive{}, statErr
+	}
 
 	boot := filepath.Join(archivePath, "boot")
 	if !isDirectoryWithoutSymlink(boot) {
@@ -358,9 +375,13 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 			return generationArchive{}, err
 		}
 		archive.handoff = string(handoffBytes)
-		if err := validateArchiveNames(archivePath, []string{
+		names := []string{
 			"boot", "metadata.json", "hardware.json", "handoff.txt", "source.snapshot", "source", "successor", "qemu.stdout", "qemu.stderr",
-		}); err != nil {
+		}
+		if hasHarnessIdentity {
+			names = append(names, GenerationHarnessFilename)
+		}
+		if err := validateArchiveNames(archivePath, names); err != nil {
 			return generationArchive{}, err
 		}
 	} else {
@@ -376,6 +397,9 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 			return generationArchive{}, errors.New("generation abort marker is malformed")
 		}
 		names := []string{"boot", "metadata.json", "hardware.json", "aborted.txt", "qemu.stdout", "qemu.stderr"}
+		if hasHarnessIdentity {
+			names = append(names, GenerationHarnessFilename)
+		}
 		manifestPath := filepath.Join(archivePath, "latest-success.json")
 		snapshotPath := filepath.Join(archivePath, "latest-success.snapshot")
 		manifestExists := pathExists(manifestPath)

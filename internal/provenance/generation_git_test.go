@@ -127,6 +127,27 @@ func TestGenerationGitRecorderCreatesImmutableTagsAndLineages(t *testing.T) {
 	}
 }
 
+func TestGenerationGitRecorderAcceptsValidatedHarnessIdentityArchive(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	createGenerationGitRepository(t, repository)
+	run := filepath.Join(root, "identity-run")
+	archiveGenerationGitCompleted(t, run, 0, nil, "initial", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("source\n")}}, "handoff")
+	encoded, err := EncodeHarnessIdentity(testHarnessIdentity())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGenerationGitFile(t, filepath.Join(run, "generation-0000", GenerationHarnessFilename), encoded)
+	recorder, err := NewGenerationGitRecorder(repository, run, "test-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := recorder.Reconcile()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("identity archive reconciliation = %#v, %v", records, err)
+	}
+}
+
 func TestGenerationGitRecorderReconcilesFreshRunWithoutArchives(t *testing.T) {
 	repository := filepath.Join(t.TempDir(), "repository")
 	createGenerationGitRepository(t, repository)

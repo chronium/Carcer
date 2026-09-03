@@ -72,7 +72,6 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 			if inheritanceRequested && options.InheritFromGeneration < 0 {
 				return errors.New("--inherit-from-generation must not be negative")
 			}
-
 			if plain && tui {
 				return errors.New("--plain and --tui are mutually exclusive")
 			}

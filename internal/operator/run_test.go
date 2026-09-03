@@ -254,8 +254,7 @@ func TestRunnerReopensArchivedGateThroughPlainConsole(t *testing.T) {
 
 	var output bytes.Buffer
 	err = runWithIO(context.Background(), Options{
-		RunDirectory: runDirectory,
-		ResumeAtGate: true,
+		RunDirectory: runDirectory, ResumeAtGate: true,
 	}, strings.NewReader("quit\n"), &output)
 	if err != nil {
 		t.Fatalf("run archived gate: %v", err)
@@ -264,6 +263,11 @@ func TestRunnerReopensArchivedGateThroughPlainConsole(t *testing.T) {
 		"CodexOS operator console",
 		"Generation 0 aborted.",
 		"No successor was selected.",
+		"Harness identity changed at this validated generation gate.",
+		"Previous harness identity:",
+		"unavailable (legacy run without harness identity provenance)",
+		"Current harness identity:",
+		"continue or rollback authorizes the current harness",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("operator output missing %q:\n%s", want, output.String())

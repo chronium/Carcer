@@ -59,6 +59,7 @@ func TestCommandOpeningDisplayAndPairingValidation(t *testing.T) {
 		{"inheritance opening", []string{"--run-directory", "run", "--resume-at-gate", "--inherit-from-run", "old", "--inherit-from-generation", "1", "--git-repository", "repo", "--git-base-ref", "base"}, "cross-run inheritance is valid only with --initial-iso"},
 		{"inheritance provenance", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "1"}, "cross-run inheritance requires Git provenance options"},
 		{"negative inherited generation", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "-1", "--git-repository", "repo", "--git-base-ref", "base"}, "--inherit-from-generation must not be negative"},
+		{"removed harness acknowledgement", []string{"--run-directory", "run", "--resume-at-gate", "--acknowledge-harness-change"}, "unknown flag: --acknowledge-harness-change"},
 		{"display exclusive", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--plain", "--tui"}, "--plain and --tui are mutually exclusive"},
 		{"positional arguments rejected", []string{"--run-directory", "run", "--resume-at-gate", "extra"}, "unknown command \"extra\""},
 	}

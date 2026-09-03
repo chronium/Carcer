@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,8 @@ func TestReviewerSuiteSentinel(t *testing.T) {
 
 func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	runtime := newFakeReviewRuntime(t)
+	identity := reviewerHarnessIdentity()
+	runtime.identity = &identity
 	runtime.provenance = provenance.NewBuildReviewProvenance(runtime.root)
 	runtime.invoke = func(_ context.Context, name string, arguments [][]byte) (guest.ToolResult, error) {
 		switch name {
@@ -148,6 +151,10 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	activities := stream.Drain()
 	if !hasReviewerActivity(activities, observability.ActivityReviewStarted) || !hasReviewerActivity(activities, observability.ActivityReviewCompleted) || !hasReviewerActivity(activities, observability.ActivityToolStarted) {
 		t.Fatalf("review activities = %#v", activities)
+	}
+	events, err := os.ReadFile(runtime.eventLog.Path())
+	if err != nil || !reviewerEventHasHarnessIdentity(t, events, "review_completed", identity) {
+		t.Fatalf("review completion lacks harness identity: %v", err)
 	}
 }
 
@@ -328,6 +335,7 @@ type fakeReviewRuntime struct {
 	eventLog   *observability.EventLog
 	metrics    *observability.Metrics
 	provenance *provenance.BuildReviewProvenance
+	identity   *provenance.HarnessIdentity
 }
 
 func newFakeReviewRuntime(t *testing.T) *fakeReviewRuntime {
@@ -343,6 +351,10 @@ func newFakeReviewRuntime(t *testing.T) *fakeReviewRuntime {
 func (r *fakeReviewRuntime) ReviewRunning() bool { return r.running }
 
 func (r *fakeReviewRuntime) GenerationNumber() (uint64, bool) { return r.generation, true }
+
+func (r *fakeReviewRuntime) HarnessIdentity() *provenance.HarnessIdentity {
+	return provenance.CloneHarnessIdentity(r.identity)
+}
 
 func (r *fakeReviewRuntime) InvokeTool(ctx context.Context, name string, arguments [][]byte) (guest.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -365,6 +377,45 @@ func (r *fakeReviewRuntime) Metrics() *observability.Metrics { return r.metrics 
 
 func (r *fakeReviewRuntime) ForensicProvenance() *provenance.BuildReviewProvenance {
 	return r.provenance
+}
+
+func reviewerHarnessIdentity() provenance.HarnessIdentity {
+	return provenance.HarnessIdentity{
+		SchemaVersion:    provenance.HarnessIdentitySchemaVersion,
+		RepositoryCommit: strings.Repeat("a", 40),
+		Executable:       provenance.FileIdentity{SHA256: strings.Repeat("b", 64), Size: 123},
+		Build: provenance.HarnessBuildIdentity{
+			GoVersion: "go1.test", ModulePath: "codexos", ModuleVersion: "(devel)",
+			SettingsSHA256: strings.Repeat("c", 64),
+		},
+	}
+}
+
+func reviewerEventHasHarnessIdentity(t *testing.T, contents []byte, event string, expected provenance.HarnessIdentity) bool {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	for scanner.Scan() {
+		var envelope struct {
+			Event string         `json:"event"`
+			Data  map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Event != event {
+			continue
+		}
+		encoded, err := json.Marshal(envelope.Data["harness_identity"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := provenance.ParseHarnessIdentity(encoded)
+		return err == nil && identity.Equal(expected)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
 }
 
 func fakeAuthFile(t *testing.T) string {

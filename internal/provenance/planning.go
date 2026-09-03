@@ -36,11 +36,18 @@ type PlanningResponseIdentity struct {
 }
 
 type PlanningEvidenceStore struct {
-	root string
+	root            string
+	harnessIdentity *HarnessIdentity
 }
 
 func NewPlanningEvidenceStore(runDirectory string) *PlanningEvidenceStore {
 	return &PlanningEvidenceStore{root: filepath.Join(runDirectory, "planning-evidence")}
+}
+
+func NewPlanningEvidenceStoreWithHarnessIdentity(runDirectory string, identity *HarnessIdentity) *PlanningEvidenceStore {
+	return &PlanningEvidenceStore{
+		root: filepath.Join(runDirectory, "planning-evidence"), harnessIdentity: CloneHarnessIdentity(identity),
+	}
 }
 
 func (s *PlanningEvidenceStore) Begin(generation uint64, threadID string) (*PlanningEvidence, error) {
@@ -84,6 +91,12 @@ func (s *PlanningEvidenceStore) Begin(generation uint64, threadID string) (*Plan
 		SchemaVersion: planningSchemaVersion,
 		Stage:         "allocated",
 		ThreadID:      threadID,
+	}
+	if s.harnessIdentity != nil {
+		if err := ValidateHarnessIdentity(*s.harnessIdentity); err != nil {
+			return nil, err
+		}
+		manifest.HarnessIdentity = CloneHarnessIdentity(s.harnessIdentity)
 	}
 	if err := writePlanningJSON(filepath.Join(directory, "manifest.json"), manifest); err != nil {
 		return nil, err
@@ -288,6 +301,7 @@ func (e *PlanningEvidence) activeAttempt() (*planningAttempt, error) {
 type planningManifest struct {
 	Attempts        []planningAttempt `json:"attempts"`
 	Generation      uint64            `json:"generation"`
+	HarnessIdentity *HarnessIdentity  `json:"harness_identity,omitempty"`
 	Kind            string            `json:"kind"`
 	Outcome         string            `json:"outcome"`
 	ResponseBytes   *uint64           `json:"response_bytes,omitempty"`

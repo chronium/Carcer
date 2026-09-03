@@ -37,6 +37,7 @@ type LiveRunOptions struct {
 	EventLog                *observability.EventLog
 	Metrics                 *observability.Metrics
 	ActivityStream          *observability.ActivityStream
+	HarnessIdentity         *provenance.HarnessIdentity
 }
 
 type liveRun struct {
@@ -48,6 +49,7 @@ type liveRun struct {
 	options         LiveRunOptions
 	featureStore    *store.FeatureRequestStore
 	provenance      *provenance.BuildReviewProvenance
+	harnessStore    *provenance.HarnessIdentityStore
 	bootstrap       *store.CrossRunBootstrap
 	provided        *store.ProvidedAssets
 	assetsReady     bool
@@ -74,6 +76,7 @@ type liveGeneration struct {
 
 // NewLiveCodexOSRun creates a concrete process owner. It does not start QEMU.
 func NewLiveCodexOSRun(runDirectory string, options LiveRunOptions) (*CodexOSRun, error) {
+	options.HarnessIdentity = provenance.CloneHarnessIdentity(options.HarnessIdentity)
 	if options.QEMUExecutable == "" {
 		options.QEMUExecutable = "qemu-system-x86_64"
 	}
@@ -104,12 +107,19 @@ func NewLiveCodexOSRun(runDirectory string, options LiveRunOptions) (*CodexOSRun
 	if err != nil {
 		return nil, err
 	}
-	forensics := provenance.NewBuildReviewProvenance(run.runDirectory, func(event string, generation uint64, data map[string]any) {
+	var harnessStore *provenance.HarnessIdentityStore
+	if options.HarnessIdentity != nil {
+		if err := provenance.ValidateHarnessIdentity(*options.HarnessIdentity); err != nil {
+			return nil, err
+		}
+		harnessStore = provenance.NewHarnessIdentityStore(run.runDirectory)
+	}
+	forensics := provenance.NewBuildReviewProvenanceWithHarnessIdentity(run.runDirectory, options.HarnessIdentity, func(event string, generation uint64, data map[string]any) {
 		run.recordLive(event, &generation, data)
 	})
 	liveContext, cancelLive := context.WithCancel(context.Background())
 	run.live = &liveRun{
-		options: options, featureStore: features, provenance: forensics, bootstrap: bootstrap,
+		options: options, featureStore: features, provenance: forensics, harnessStore: harnessStore, bootstrap: bootstrap,
 		context: liveContext, cancel: cancelLive,
 	}
 	requests, requestErr := features.Requests()
@@ -156,6 +166,11 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 		return &GenerationRuntimeError{Reason: "CodexOS run has already been started"}
 	}
 	r.gateMu.Unlock()
+	if r.live.options.HarnessIdentity != nil {
+		if err := r.live.harnessStore.VerifyCurrent(*r.live.options.HarnessIdentity); err != nil {
+			return err
+		}
+	}
 	resolvedISO, err := filepath.Abs(initialISO)
 	if err == nil {
 		resolvedISO, err = filepath.EvalSymlinks(resolvedISO)
@@ -176,6 +191,13 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, resolvedISO)
 	if err != nil {
 		return err
+	}
+	if err := r.recordHarnessGenerationStart(0); err != nil {
+		closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+		if closeErr == nil {
+			_ = os.RemoveAll(generation.workspace)
+		}
+		return errors.Join(err, closeErr)
 	}
 	r.installLiveGeneration(generation)
 	zero := uint64(0)
@@ -232,6 +254,13 @@ func (r *CodexOSRun) ForensicProvenance() *provenance.BuildReviewProvenance {
 		return nil
 	}
 	return r.live.provenance
+}
+
+func (r *CodexOSRun) HarnessIdentity() *provenance.HarnessIdentity {
+	if r == nil || r.live == nil {
+		return nil
+	}
+	return provenance.CloneHarnessIdentity(r.live.options.HarnessIdentity)
 }
 
 func (r *CodexOSRun) FeatureRequests() ([]store.FeatureRequest, error) {
@@ -725,12 +754,30 @@ func (r *CodexOSRun) recordLive(event string, generation *uint64, data map[strin
 	if r == nil || r.live == nil {
 		return
 	}
+	if identity := r.live.options.HarnessIdentity; identity != nil {
+		copy := make(map[string]any, len(data)+1)
+		for key, value := range data {
+			copy[key] = value
+		}
+		copy["harness_identity"] = identity.AsJSON()
+		data = copy
+	}
 	if r.live.options.EventLog != nil {
 		r.live.options.EventLog.Record(event, generation, data)
 	}
 	if r.live.options.Metrics != nil {
 		r.live.options.Metrics.Record(event, data)
 	}
+}
+
+func (r *CodexOSRun) recordHarnessGenerationStart(generation uint64) error {
+	if r == nil || r.live == nil || r.live.options.HarnessIdentity == nil {
+		return nil
+	}
+	if r.live.harnessStore == nil {
+		return &GenerationRuntimeError{Reason: "harness identity store is unavailable"}
+	}
+	return r.live.harnessStore.RecordGenerationStart(generation, *r.live.options.HarnessIdentity)
 }
 
 func (r *CodexOSRun) setObservedLiveState() {

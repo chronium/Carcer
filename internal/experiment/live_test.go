@@ -2,6 +2,7 @@ package experiment
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -25,6 +26,250 @@ import (
 )
 
 const liveQEMUHelperEnvironment = "CODEXOS_GO_LIVE_QEMU_HELPER"
+
+func TestLiveGenerationFixesHarnessIdentityAcrossEventsAndArchive(t *testing.T) {
+	t.Setenv(liveQEMUHelperEnvironment, "1")
+	runDirectory := liveTestRunDirectory(t)
+	eventLog, err := observability.OpenEventLog(runDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eventLog.Close)
+	initialISO := filepath.Join(t.TempDir(), "initial.iso")
+	if err := os.WriteFile(initialISO, []byte("synthetic boot image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity := experimentHarnessIdentity()
+	expected := identity
+	if err := provenance.NewHarnessIdentityStore(runDirectory).RecordRunCreation(identity); err != nil {
+		t.Fatal(err)
+	}
+	run, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		QEMUExecutable: os.Args[0], HardwareProfile: qemu.TestHardwareProfile,
+		ReadyTimeout: 2 * time.Second, EventLog: eventLog, HarnessIdentity: &identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.Stop)
+	identity.RepositoryCommit = strings.Repeat("d", 40)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := run.Start(ctx, initialISO); err != nil {
+		t.Fatal(err)
+	}
+	recordBytes, err := os.ReadFile(provenance.HarnessGenerationRecordPath(runDirectory, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := provenance.ParseHarnessGenerationRecord(recordBytes, 0)
+	if err != nil || !recorded.Equal(expected) {
+		t.Fatalf("generation identity = %#v, %v", recorded, err)
+	}
+	if err := run.AbortGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := InspectGeneration(runDirectory, 0)
+	if err != nil || archive.HarnessIdentity == nil || !archive.HarnessIdentity.Equal(expected) {
+		t.Fatalf("archive identity = %#v, %v", archive.HarnessIdentity, err)
+	}
+	contents, err := os.ReadFile(eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, eventName := range []string{"run_started", "generation_started", "generation_aborted"} {
+		if !eventHasHarnessIdentity(t, contents, eventName, expected) {
+			t.Fatalf("event %s lacks the fixed harness identity", eventName)
+		}
+	}
+}
+
+func TestLiveGateAutomaticallyRecordsAndReportsHarnessReplacement(t *testing.T) {
+	runDirectory := liveTestRunDirectory(t)
+	first := experimentHarnessIdentity()
+	if err := provenance.NewHarnessIdentityStore(runDirectory).RecordRunCreation(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
+		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	same, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		HardwareProfile: qemu.TestHardwareProfile, HarnessIdentity: &first,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := same.ReopenAtGate(); err != nil {
+		t.Fatalf("same identity reopen: %v", err)
+	}
+	if err := same.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement := first
+	replacement.Executable.SHA256 = strings.Repeat("e", 64)
+	eventLog, err := observability.OpenEventLog(runDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		HardwareProfile: qemu.TestHardwareProfile, EventLog: eventLog, HarnessIdentity: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.ReopenAtGate(); err != nil {
+		t.Fatal(err)
+	}
+	presentation := reopened.PresentationSnapshot().HarnessTransition
+	if presentation == nil || presentation.Previous == nil || !presentation.Previous.Equal(first) || !presentation.Current.Equal(replacement) {
+		t.Fatalf("presented harness transition = %#v", presentation)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	eventLog.Close()
+	events, err := os.ReadFile(eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eventHasHarnessIdentity(t, events, "harness_identity_transition_recorded", replacement) {
+		t.Fatal("identity transition event is missing")
+	}
+	previous, current := eventHarnessTransition(t, events, "harness_identity_transition_recorded")
+	if previous == nil || !previous.Equal(first) || current == nil || !current.Equal(replacement) {
+		t.Fatalf("identity transition event = %#v -> %#v", previous, current)
+	}
+	transitions, err := filepath.Glob(filepath.Join(runDirectory, "harness-transitions", "transition-*.json"))
+	if err != nil || len(transitions) != 1 {
+		t.Fatalf("identity transitions = %v, %v", transitions, err)
+	}
+}
+
+func TestLiveGateDoesNotRecordHarnessReplacementBeforeReopenConfigurationSucceeds(t *testing.T) {
+	runDirectory := liveTestRunDirectory(t)
+	first := experimentHarnessIdentity()
+	if err := provenance.NewHarnessIdentityStore(runDirectory).RecordRunCreation(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
+		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := first
+	replacement.Executable.SHA256 = strings.Repeat("e", 64)
+	missingAssets := filepath.Join(t.TempDir(), "missing-assets")
+	run, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		HardwareProfile: qemu.TestHardwareProfile, HarnessIdentity: &replacement,
+		ProvidedAssetsDirectory: &missingAssets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.ReopenAtGate(); err == nil {
+		t.Fatal("gate reopen unexpectedly succeeded with missing provided assets")
+	}
+	if run.State() != RuntimeStateStopped {
+		t.Fatalf("state after failed reopen = %s", run.State())
+	}
+	transitions, err := filepath.Glob(filepath.Join(runDirectory, "harness-transitions", "transition-*.json"))
+	if err != nil || len(transitions) != 0 {
+		t.Fatalf("identity transition persisted before configuration succeeded: %v, %v", transitions, err)
+	}
+}
+
+func TestLiveGateRejectsHarnessReplacementWithPartialGenerationState(t *testing.T) {
+	runDirectory := liveTestRunDirectory(t)
+	first := experimentHarnessIdentity()
+	if err := provenance.NewHarnessIdentityStore(runDirectory).RecordRunCreation(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
+		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(runDirectory, ".generation-0001-active"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacement := first
+	replacement.Executable.SHA256 = strings.Repeat("e", 64)
+	run, err := NewLiveCodexOSRun(runDirectory, LiveRunOptions{
+		HardwareProfile: qemu.TestHardwareProfile, HarnessIdentity: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.ReopenAtGate(); err == nil || !strings.Contains(err.Error(), "partial generation state") {
+		t.Fatalf("partial generation reopen error = %v", err)
+	}
+	transitions, err := filepath.Glob(filepath.Join(runDirectory, "harness-transitions", "transition-*.json"))
+	if err != nil || len(transitions) != 0 {
+		t.Fatalf("identity transition persisted for partial generation state: %v, %v", transitions, err)
+	}
+}
+
+func eventHasHarnessIdentity(t *testing.T, contents []byte, wanted string, expected provenance.HarnessIdentity) bool {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	for scanner.Scan() {
+		var envelope struct {
+			Event string         `json:"event"`
+			Data  map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Event != wanted {
+			continue
+		}
+		encoded, err := json.Marshal(envelope.Data["harness_identity"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := provenance.ParseHarnessIdentity(encoded)
+		return err == nil && identity.Equal(expected)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
+}
+
+func eventHarnessTransition(t *testing.T, contents []byte, wanted string) (*provenance.HarnessIdentity, *provenance.HarnessIdentity) {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	for scanner.Scan() {
+		var envelope struct {
+			Event string         `json:"event"`
+			Data  map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Event != wanted {
+			continue
+		}
+		parse := func(value any) *provenance.HarnessIdentity {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := provenance.ParseHarnessIdentity(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &identity
+		}
+		return parse(envelope.Data["previous_identity"]), parse(envelope.Data["current_identity"])
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return nil, nil
+}
 
 func TestLiveRunOwnsBootToolsPauseResumeAndStop(t *testing.T) {
 	t.Setenv(liveQEMUHelperEnvironment, "1")
