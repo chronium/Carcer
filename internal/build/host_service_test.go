@@ -100,9 +100,11 @@ func TestCodexOSHostServicesFreezesMatchingFinishAndRoutesFeatures(t *testing.T)
 		t.Fatal(err)
 	}
 	generation := uint64(7)
+	featuresRecorded := 0
 	services, err := NewCodexOSHostServices(HostServicesConfig{
 		StagingDirectory:    filepath.Join(root, "staging"),
 		FeatureRequestStore: featureStore,
+		FeatureRecorded:     func() { featuresRecorded++ },
 		Generation:          &generation,
 	})
 	if err != nil {
@@ -143,6 +145,9 @@ func TestCodexOSHostServicesFreezesMatchingFinishAndRoutesFeatures(t *testing.T)
 	recorded, err := featureStore.Request(1)
 	if err != nil || recorded.Generation != generation || recorded.Title != "Δυνατότητα" {
 		t.Fatalf("recorded feature = %#v, %v", recorded, err)
+	}
+	if featuresRecorded != 1 {
+		t.Fatalf("feature-recorded callbacks = %d, want 1", featuresRecorded)
 	}
 
 	handoff := []byte("Continue from the validated successor. λ")
@@ -189,6 +194,9 @@ func TestCodexOSHostServicesFreezesMatchingFinishAndRoutesFeatures(t *testing.T)
 	}
 	if requests, err := featureStore.Requests(); err != nil || len(requests) != 1 {
 		t.Fatalf("feature records after finish = %#v, %v", requests, err)
+	}
+	if featuresRecorded != 1 {
+		t.Fatalf("rejected feature changed callback count to %d", featuresRecorded)
 	}
 }
 

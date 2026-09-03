@@ -185,6 +185,37 @@ func (r *CodexOSRun) GenerationNumber() (uint64, bool) {
 	return *r.generationNumber, true
 }
 
+// RunPresentationSnapshot is the small runtime view needed by interactive
+// frontends.
+type RunPresentationSnapshot struct {
+	RunDirectory           string
+	State                  RuntimeState
+	Generation             uint64
+	HasGeneration          bool
+	PendingFeatureRequests int
+}
+
+// PresentationSnapshot never enters live operation serialization, so a guest
+// exchange cannot prevent the operator interface from repainting or accepting
+// input.
+func (r *CodexOSRun) PresentationSnapshot() RunPresentationSnapshot {
+	if r == nil {
+		return RunPresentationSnapshot{State: RuntimeStateStopped}
+	}
+	snapshot := RunPresentationSnapshot{RunDirectory: r.runDirectory}
+	r.gateMu.Lock()
+	snapshot.State = r.state
+	if r.generationNumber != nil {
+		snapshot.Generation = *r.generationNumber
+		snapshot.HasGeneration = true
+	}
+	r.gateMu.Unlock()
+	if r.live != nil {
+		snapshot.PendingFeatureRequests = int(r.live.pendingFeatures.Load())
+	}
+	return snapshot
+}
+
 // PreviousHandoff returns the handoff selected for the current generation.
 func (r *CodexOSRun) PreviousHandoff() (string, bool) {
 	if r == nil {

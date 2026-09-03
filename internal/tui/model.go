@@ -106,6 +106,7 @@ type ToolDetailPresentation struct {
 type ToolPresentation struct {
 	Role       observability.ActivityRole
 	Tool       string
+	TurnPhase  string
 	State      ActivityDisplayState
 	Summary    string
 	Detail     *ToolDetailPresentation
@@ -586,8 +587,12 @@ func (m *OperatorActivityModel) consumeTool(event observability.ActivityEvent) {
 			resultNote = "result returned to Sol"
 		}
 	}
+	turnPhase, _ := event.Data["turn_phase"].(string)
+	if turnPhase == "" && hasExisting {
+		turnPhase = existing.TurnPhase
+	}
 	presentation := ToolPresentation{
-		Role: event.Role, Tool: SafeDisplayText(tool, SummaryDisplayBytes), State: state, Summary: summary,
+		Role: event.Role, Tool: SafeDisplayText(tool, SummaryDisplayBytes), TurnPhase: turnPhase, State: state, Summary: summary,
 		Detail: detail, ResultNote: resultNote,
 	}
 	m.toolPresentations[key] = presentation
@@ -811,13 +816,71 @@ func (m *OperatorActivityModel) consumeLifecycle(event observability.ActivityEve
 	}
 	detail := ""
 	if len(useful) != 0 {
-		detail = SafeDisplayText(pythonJSON(useful), m.displayBytes)
+		detail = lifecycleDetail(useful, m.displayBytes)
 	}
 	m.upsertEntry(ActivityDisplayEntry{
 		Key:          "lifecycle:" + strconv.FormatUint(event.Sequence, 10),
 		Kind:         ActivityDisplayKindLifecycle,
-		Presentation: LifecyclePresentation{Role: event.Role, Title: string(event.Kind), Detail: detail, State: state},
+		Presentation: LifecyclePresentation{Role: event.Role, Title: readableLifecycleTitle(event.Kind), Detail: detail, State: state},
 	})
+}
+
+func readableLifecycleTitle(kind observability.ActivityKind) string {
+	title := strings.NewReplacer("_", " ", ".", " ").Replace(strings.TrimSpace(string(kind)))
+	return title
+}
+
+func lifecycleDetail(values map[string]any, limit int) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.SliceStable(keys, func(left, right int) bool {
+		leftError := keys[left] == "error" || keys[left] == "reason"
+		rightError := keys[right] == "error" || keys[right] == "reason"
+		if leftError != rightError {
+			return leftError
+		}
+		return keys[left] < keys[right]
+	})
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		appendLifecycleValue(&lines, key, values[key])
+	}
+	return SafeDisplayText(strings.Join(lines, "\n"), limit)
+}
+
+func appendLifecycleValue(lines *[]string, key string, value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for nested := range typed {
+			keys = append(keys, nested)
+		}
+		sort.Strings(keys)
+		for _, nested := range keys {
+			appendLifecycleValue(lines, key+"."+nested, typed[nested])
+		}
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, lifecycleScalar(item))
+		}
+		*lines = append(*lines, key+": "+strings.Join(parts, ", "))
+	default:
+		*lines = append(*lines, key+": "+lifecycleScalar(value))
+	}
+}
+
+func lifecycleScalar(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.ReplaceAll(typed, "\n", " / ")
+	case nil:
+		return "none"
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func (m *OperatorActivityModel) correlationKey(event observability.ActivityEvent, suffix string) string {

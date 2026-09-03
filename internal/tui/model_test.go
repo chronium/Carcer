@@ -351,3 +351,25 @@ func TestModelMatchesPythonPayloadRenderingEdges(t *testing.T) {
 		})
 	}
 }
+
+func TestModelLifecycleFailuresUseReadableFieldsInsteadOfRawJSON(t *testing.T) {
+	model := newTestModel(t)
+	model.Consume(modelEvent(1, observability.ActivityTurnFailed, map[string]any{
+		"error":    "delivery failed",
+		"status":   "orphaned",
+		"identity": map[string]any{"call_id": "call-7", "turn_id": "turn-4"},
+	}, observability.ActivityImplementor, "failure"))
+	entry := model.Entries()[0]
+	presentation, ok := entry.Presentation.(LifecyclePresentation)
+	if !ok {
+		t.Fatalf("lifecycle presentation = %#v", entry.Presentation)
+	}
+	for _, want := range []string{"error: delivery failed", "identity.call_id: call-7", "identity.turn_id: turn-4", "status: orphaned"} {
+		if !strings.Contains(presentation.Detail, want) {
+			t.Fatalf("lifecycle detail missing %q: %q", want, presentation.Detail)
+		}
+	}
+	if strings.ContainsAny(presentation.Detail, "{}\"") {
+		t.Fatalf("lifecycle detail exposed raw JSON: %q", presentation.Detail)
+	}
+}

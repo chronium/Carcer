@@ -613,6 +613,21 @@ func (c *GenerationController) ReviewYieldState() agent.ReviewYieldState {
 	return session.ReviewYieldState()
 }
 
+// ActiveTurnPhase reports the live generation phase from the session rather
+// than the broader operator command that originally started it.
+func (c *GenerationController) ActiveTurnPhase() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return ""
+	}
+	return session.ActiveTurnPhase()
+}
+
 // NextTurnKind reports how StartTurn would use the current generation session.
 // It is operator presentation state, not an admission reservation.
 func (c *GenerationController) NextTurnKind() string {

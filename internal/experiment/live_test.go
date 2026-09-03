@@ -522,9 +522,24 @@ func TestLiveRunAppliesCrossRunHandoffAndVerifiesInitialISO(t *testing.T) {
 
 func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
 	run := startLiveTestRun(t, 2*time.Second)
-	request, err := run.live.featureStore.Create(0, "Need capability", "Please record this")
+	generation := run.liveGeneration()
+	response, err := generation.hostServices.HandleRequest(context.Background(), guest.HostRequest{
+		RequestID: 1, ServiceName: "request_feature",
+		Arguments: [][]byte{[]byte("Need capability"), []byte("Please record this")},
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(response.Payload) < 4 || binary.LittleEndian.Uint32(response.Payload[:4]) != build.FeatureResponseRecorded {
+		t.Fatalf("feature response = %#v", response)
+	}
+	requests, err := run.FeatureRequests()
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("feature requests = %#v, %v", requests, err)
+	}
+	request := requests[0]
+	if snapshot := run.PresentationSnapshot(); snapshot.PendingFeatureRequests != 1 {
+		t.Fatalf("pending feature presentation after create = %#v", snapshot)
 	}
 	if _, err := run.ApproveFeatureRequest(request.ID); err == nil || !strings.Contains(err.Error(), "only while awaiting") {
 		t.Fatalf("running feature decision error = %v", err)
@@ -538,6 +553,9 @@ func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
 	}
 	if approved.Status != store.FeatureApproved {
 		t.Fatalf("approved status = %q", approved.Status)
+	}
+	if snapshot := run.PresentationSnapshot(); snapshot.PendingFeatureRequests != 0 {
+		t.Fatalf("pending feature presentation after approval = %#v", snapshot)
 	}
 }
 

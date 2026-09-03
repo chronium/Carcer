@@ -31,6 +31,7 @@ type consoleRuntime interface {
 	FeatureRequest(uint64) (store.FeatureRequest, error)
 	ApproveFeatureRequest(uint64) (store.FeatureRequest, error)
 	DenyFeatureRequest(uint64) (store.FeatureRequest, error)
+	PresentationSnapshot() experiment.RunPresentationSnapshot
 }
 
 var _ consoleRuntime = (*experiment.CodexOSRun)(nil)
@@ -1142,16 +1143,64 @@ func (c *PlainConsole) CodexTurnState() string {
 	case agent.ReviewYieldResuming:
 		return "resuming review"
 	}
-	if turn := c.currentTurn(); turn != nil {
-		if turn.phase == "initial" || turn.phase == "planning" {
-			return "planning"
+	if phase := c.controller.ActiveTurnPhase(); phase != "" {
+		switch phase {
+		case "implementation", "continuation":
+			return "implementation"
+		default:
+			return phase
 		}
-		return "working"
+	}
+	if turn := c.currentTurn(); turn != nil {
+		return "starting"
 	}
 	if c.controller.SessionOwned() {
 		return "idle"
 	}
 	return "stopped"
+}
+
+// CodexActivity identifies the agent and phase currently represented by the
+// live session. It is presentation state only and grants no lifecycle control.
+func (c *PlainConsole) CodexActivity() (string, string) {
+	if c == nil {
+		return "", ""
+	}
+	switch c.controller.ReviewYieldState() {
+	case agent.ReviewYieldStoppingOrigin:
+		phase := c.controller.ActiveTurnPhase()
+		if phase == "" {
+			phase = "review handoff"
+		}
+		return "Sol", phase
+	case agent.ReviewYieldAwaitingReview, agent.ReviewYieldReviewing:
+		return "Luna", "review"
+	case agent.ReviewYieldFailed:
+		return "Luna", "review failed"
+	case agent.ReviewYieldAwaitingContinuation, agent.ReviewYieldResuming:
+		return "Sol", "review continuation"
+	}
+	if c.exitInterviewState() == "answering" {
+		return "Sol", "interview"
+	}
+	phase := c.controller.ActiveTurnPhase()
+	if phase == "continuation" {
+		phase = "implementation"
+	}
+	if phase != "" {
+		return "Sol", phase
+	}
+	if turn := c.currentTurn(); turn != nil && !turn.interview {
+		switch turn.phase {
+		case "initial", "planning":
+			return "Sol", "planning"
+		case "continuation":
+			return "Sol", "implementation"
+		default:
+			return "Sol", "starting"
+		}
+	}
+	return "", ""
 }
 
 // ExitInterviewState reports the compact interview presentation state used by
