@@ -119,13 +119,7 @@ func validateSnapshotFiles(files []SnapshotFile) error {
 	paths := make(map[string]struct{}, len(files))
 	totalContent := 0
 	for _, file := range files {
-		if !utf8.ValidString(file.Path) {
-			return &SourceSnapshotError{Reason: "source path is not valid UTF-8"}
-		}
-		if len(file.Path) < 1 || len(file.Path) > maxSourcePathBytes {
-			return &SourceSnapshotError{Reason: "source path length must be 1 through 255"}
-		}
-		if err := validateBuildPath(file.Path); err != nil {
+		if err := validateSourcePath(file.Path); err != nil {
 			return err
 		}
 		if _, exists := paths[file.Path]; exists {
@@ -140,8 +134,18 @@ func validateSnapshotFiles(files []SnapshotFile) error {
 	return nil
 }
 
+func validateSourcePath(path string) error {
+	if !utf8.ValidString(path) {
+		return &SourceSnapshotError{Reason: "source path is not valid UTF-8"}
+	}
+	if len(path) < 1 || len(path) > maxSourcePathBytes {
+		return &SourceSnapshotError{Reason: "source path length must be 1 through 255"}
+	}
+	return validateBuildPath(path)
+}
+
 func validateBuildPath(path string) error {
-	if strings.IndexByte(path, 0) >= 0 || strings.HasPrefix(path, "/") {
+	if strings.IndexByte(path, 0) >= 0 || strings.ContainsAny(path, "\r\n") || strings.HasPrefix(path, "/") {
 		return &SourceSnapshotError{Reason: fmt.Sprintf("unsafe source path: %q", path)}
 	}
 	components := strings.Split(path, "/")

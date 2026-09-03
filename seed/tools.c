@@ -118,6 +118,15 @@ static int valid_path(struct bytes path) {
            valid_utf8(path.data, path.length);
 }
 
+static int list_path_valid(const struct file *file) {
+    for (uint32_t index = 0; index < file->path_length; ++index) {
+        if (file->path[index] == '\r' || file->path[index] == '\n') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void send_invoke_header(
     uint32_t request_id,
     uint32_t status,
@@ -245,6 +254,10 @@ static void invoke_list(uint32_t request_id, const struct invocation *invocation
     uint32_t output_length = 0;
     for (uint32_t index = 0; index < file_count; ++index) {
         if (file_path_has_prefix(&files[index], prefix.data, prefix.length)) {
+            if (!list_path_valid(&files[index])) {
+                tools_send_failure(request_id);
+                return;
+            }
             output_length += files[index].path_length + 1u;
         }
     }

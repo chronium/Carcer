@@ -334,6 +334,15 @@ class SeedBootIntegrationTest(unittest.TestCase):
                         kernel_source,
                     )
 
+                    newline_source = client.invoke_tool(
+                        "write",
+                        [b"seed/ambiguous\nname", b"0", b"source"],
+                    )
+                    self.assertEqual(newline_source.status, 0)
+                    ambiguous_list = client.invoke_tool("list", [b"seed/"])
+                    self.assertNotEqual(ambiguous_list.status, 0)
+                    self.assertEqual(ambiguous_list.output, b"")
+
                     oversized = struct.pack(
                         "<4sHHII", b"CXOS", 1, 0x0001, 24, 16 * 1024 * 1024 + 1
                     )

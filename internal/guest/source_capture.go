@@ -17,7 +17,7 @@ func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, str
 	if ctx == nil || invoke == nil {
 		return nil, errors.New("source snapshot capture is unavailable")
 	}
-	listed, err := invoke(ctx, "list", nil)
+	listed, err := invoke(ctx, "list", [][]byte{[]byte("seed/")})
 	if err != nil {
 		return nil, err
 	}
@@ -38,6 +38,12 @@ func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, str
 	for _, path := range paths {
 		if path == "" {
 			return nil, errors.New("source list contains an empty path")
+		}
+		if !strings.HasPrefix(path, "seed/") {
+			return nil, fmt.Errorf("source list contains path outside seed/ prefix: %q", path)
+		}
+		if err := validateSourcePath(path); err != nil {
+			return nil, err
 		}
 		requested := maxSnapshotContent - total + 1
 		result, readErr := invoke(ctx, "read", [][]byte{
