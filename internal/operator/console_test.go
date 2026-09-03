@@ -390,6 +390,16 @@ func TestPlainConsolePauseResumeTracksTheSameSession(t *testing.T) {
 
 	executeConsoleLine(t, console, "agent")
 	waitOperatorFile(t, ready, 3*time.Second)
+	if state := console.CodexTurnState(); state != "implementation" {
+		t.Fatalf("live implementation state = %q", state)
+	}
+	if agentName, phase := console.CodexActivity(); agentName != "Sol" || phase != "implementation" {
+		t.Fatalf("live implementation activity = %q/%q", agentName, phase)
+	}
+	status := tuiStatus(console)
+	if status.ActiveAgent != "Sol" || status.ActivePhase != "implementation" || status.SolState == "planning" {
+		t.Fatalf("live implementation TUI status = %#v", status)
+	}
 	pid := waitOperatorSessionPID(t, console.controller, 3*time.Second)
 	threadID := console.controller.SessionThreadID()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -412,6 +422,30 @@ func TestPlainConsolePauseResumeTracksTheSameSession(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("console output missing %q:\n%s", want, output.String())
 		}
+	}
+}
+
+func TestPlainConsoleActivityAttributesReservedTurnPhase(t *testing.T) {
+	runtime := newConsoleTestRuntime(t)
+	var output bytes.Buffer
+	console := newTestPlainConsole(t, runtime, strings.NewReader(""), &output, nil)
+	t.Cleanup(func() { _ = console.Shutdown() })
+
+	for _, test := range []struct {
+		reservedPhase string
+		wantPhase     string
+	}{
+		{reservedPhase: "initial", wantPhase: "planning"},
+		{reservedPhase: "continuation", wantPhase: "implementation"},
+	} {
+		turn, err := console.reserveTurn(false, test.reservedPhase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if agentName, phase := console.CodexActivity(); agentName != "Sol" || phase != test.wantPhase {
+			t.Fatalf("reserved %s activity = %q/%q", test.reservedPhase, agentName, phase)
+		}
+		console.releaseReservedTurn(turn)
 	}
 }
 

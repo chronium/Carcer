@@ -65,7 +65,7 @@ func TestApplicationViewUsesV2FullScreenAndTypedTranscriptRows(t *testing.T) {
 	if view.MouseMode != tea.MouseModeCellMotion {
 		t.Fatalf("mouse mode = %v, want cell motion", view.MouseMode)
 	}
-	for _, want := range []string{"run-1", "gen 7", "2 pending", "Sol", "Luna", "read", "missing", "details"} {
+	for _, want := range []string{"run-1", "g7", "p2", "Sol", "Luna", "read", "missing", "details"} {
 		if !strings.Contains(view.Content, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, view.Content)
 		}
@@ -75,7 +75,7 @@ func TestApplicationViewUsesV2FullScreenAndTypedTranscriptRows(t *testing.T) {
 	}
 }
 
-func TestApplicationRendersOnlyFinalAgentMessagesAsSafeMarkdown(t *testing.T) {
+func TestApplicationRendersAgentMessagesAsSafeMarkdown(t *testing.T) {
 	app := testApplication(t, ApplicationOptions{})
 	generation := uint64(4)
 	streaming := observability.ActivityEvent{
@@ -94,8 +94,8 @@ func TestApplicationRendersOnlyFinalAgentMessagesAsSafeMarkdown(t *testing.T) {
 	}
 	key := messageEntry.Key
 	streamed := app.renderEntry(messageEntry)
-	if !strings.Contains(streamed, "Streaming **plain**") || strings.Contains(streamed, "\x1b[") {
-		t.Fatalf("streaming message was not literal plain text: %q", streamed)
+	if !strings.Contains(ansi.Strip(streamed), "Streaming plain") || strings.Contains(streamed, "**plain**") || strings.Contains(streamed, "\x1b[2J") {
+		t.Fatalf("streaming message was not rendered safely: %q", streamed)
 	}
 
 	final := streaming
@@ -173,6 +173,9 @@ func TestApplicationCommandsKeepInputIndependentFromActivityAndFinishRows(t *tes
 		!strings.Contains(app.ActivityModel().RenderText(), "State: STOPPED") {
 		t.Fatalf("command block missing from transcript: %q", app.ActivityModel().RenderText())
 	}
+	if !app.composer.Focused() || app.View().Cursor == nil {
+		t.Fatal("composer did not regain focused cursor after command completion")
+	}
 }
 
 func TestApplicationCommandErrorsAreRecoverable(t *testing.T) {
@@ -181,7 +184,7 @@ func TestApplicationCommandErrorsAreRecoverable(t *testing.T) {
 			return CommandResult{}, errors.New("command is not valid")
 		},
 	})
-	app.input = "status"
+	app.composer.SetValue("status")
 	_, command := app.Update(keyPress("\r", tea.KeyEnter))
 	if command == nil {
 		t.Fatal("command submission returned no command")
@@ -196,7 +199,7 @@ func TestApplicationCommandErrorsAreRecoverable(t *testing.T) {
 		t.Fatalf("recoverable command error missing from transcript: %q", transcript)
 	}
 
-	app.input = "status"
+	app.composer.SetValue("status")
 	if _, command = app.Update(keyPress("\r", tea.KeyEnter)); command == nil {
 		t.Fatal("application did not accept a command after an ordinary error")
 	}
@@ -270,12 +273,9 @@ func TestApplicationFollowUnreadEndAndMouseToolSelection(t *testing.T) {
 	if toolIndex < 0 {
 		t.Fatal("tool row was not created")
 	}
-	start, _ := app.visibleWindow(entries)
-	line := 1
-	for index := start; index < toolIndex; index++ {
-		line += countLines(app.renderEntry(entries[index])) + 1
-	}
-	app.Update(tea.MouseClickMsg{X: 0, Y: line, Button: tea.MouseLeft})
+	rows, totalLines := app.transcriptLayout(entries)
+	line := rows[toolIndex].start - app.viewportOffset(totalLines)
+	app.Update(tea.MouseClickMsg{X: 0, Y: app.regionLayout().header + line, Button: tea.MouseLeft})
 	if !app.ExpandedTool(entries[toolIndex].Key) {
 		t.Fatal("mouse click did not expand tool detail")
 	}
@@ -292,7 +292,7 @@ func TestApplicationPauseUsesTwoEscapesAndPreservesInput(t *testing.T) {
 			return CommandResult{}, nil
 		},
 	})
-	app.input = "partially typed"
+	app.composer.SetValue("partially typed")
 	_, command := app.Update(keyPress("", tea.KeyEscape))
 	if command != nil || len(commands) != 0 || !strings.Contains(app.View().Content, "Esc again") {
 		t.Fatalf("first escape state: cmd=%v commands=%v view=%s", command != nil, commands, app.View().Content)
@@ -318,7 +318,7 @@ func TestApplicationConfirmationDefaultsToNoAndShutdownIsIdempotent(t *testing.T
 	if got := app.ConfirmationPrompt(); got == "" || !strings.Contains(got, "Stop the run") {
 		t.Fatalf("confirmation prompt = %q", got)
 	}
-	if view := app.View().Content; strings.Contains(view, "\x1b") || !strings.Contains(view, `Stop the run / without archiving?\x1b[2J [y/N]`) {
+	if view := app.View().Content; strings.Contains(view, "\x1b[2J") || strings.Count(ansi.Strip(view), "[y/N]") != 1 || !strings.Contains(ansi.Strip(view), `Stop the run / without archiving?\x1b[2J [y/N]`) {
 		t.Fatalf("unsafe confirmation view = %q", view)
 	}
 	app.Update(keyPress("", tea.KeyEscape))
@@ -330,14 +330,14 @@ func TestApplicationConfirmationDefaultsToNoAndShutdownIsIdempotent(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("confirmation was not completed")
 	}
-	yesRequest := &confirmationRequest{prompt: "Confirm?", reply: make(chan bool, 1)}
+	yesRequest := &confirmationRequest{prompt: "Confirm? [y/N] ", reply: make(chan bool, 1)}
 	app.Update(yesRequest)
-	for _, character := range "yes" {
-		app.Update(keyPress(string(character), character))
+	if got := strings.Count(ansi.Strip(app.View().Content), "[y/N]"); got != 1 {
+		t.Fatalf("confirmation indicators = %d, want one", got)
 	}
-	app.Update(keyPress("\r", tea.KeyEnter))
-	if accepted := <-yesRequest.reply; accepted {
-		t.Fatal("confirmation accepted 'yes'; reference accepts only y/Y")
+	app.Update(keyPress("y", 'y'))
+	if accepted := <-yesRequest.reply; !accepted {
+		t.Fatal("confirmation rejected y")
 	}
 	app.Shutdown()
 	app.Shutdown()
@@ -701,5 +701,270 @@ func TestApplicationPreservesSeparatorScrollAnchorAcrossRowGrowth(t *testing.T) 
 	second = len(layout) - 1
 	if got, want := app.scrollTop, layout[second].start-1; got != want {
 		t.Fatalf("separator scroll offset after row growth = %d, want %d", got, want)
+	}
+}
+
+func TestApplicationRetainedRegionsStayPinnedDuringHighVolumeOutput(t *testing.T) {
+	stream := observability.NewActivityStream()
+	app := testApplication(t, ApplicationOptions{
+		Activity: stream,
+		Status: func() StatusSnapshot {
+			return StatusSnapshot{RunName: "run-fixed", Generation: 8, HasGeneration: true, RuntimeState: "running", ActiveAgent: "Sol", ActivePhase: "implementation"}
+		},
+	})
+	app.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	beforeLayout := app.regionLayout()
+	generation := uint64(8)
+	for index := 0; index < 200; index++ {
+		if _, err := stream.Publish(&generation, observability.ActivityImplementor, observability.ActivityAgentMessage,
+			map[string]any{"text": fmt.Sprintf("message %03d %s", index, strings.Repeat("x", 80)), "turn_phase": "implementation"}, "thread", "turn", fmt.Sprintf("message-%03d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app.Update(activityPollMsg{})
+	afterLayout := app.regionLayout()
+	if beforeLayout != afterLayout {
+		t.Fatalf("fixed region geometry changed with output: before=%#v after=%#v", beforeLayout, afterLayout)
+	}
+	view := app.View()
+	assertFixedFrame(t, view.Content, 48, 14)
+	rows := strings.Split(ansi.Strip(view.Content), "\n")
+	if !strings.Contains(rows[0], "run-fixed") || !strings.Contains(rows[0], "Sol implementation") {
+		t.Fatalf("top row = %q", rows[0])
+	}
+	separator := beforeLayout.header + beforeLayout.transcript
+	if !strings.Contains(rows[separator], "LIVE") {
+		t.Fatalf("separator row %d = %q", separator, rows[separator])
+	}
+	if strings.TrimSpace(rows[len(rows)-1]) != "" {
+		t.Fatalf("bottom composer padding = %q", rows[len(rows)-1])
+	}
+}
+
+func TestApplicationKeyboardAndMouseScrollingControlLiveTail(t *testing.T) {
+	stream := observability.NewActivityStream()
+	app := testApplication(t, ApplicationOptions{Activity: stream})
+	app.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	generation := uint64(1)
+	for index := 0; index < 30; index++ {
+		if _, err := stream.Publish(&generation, observability.ActivityImplementor, observability.ActivityAgentMessage,
+			map[string]any{"text": fmt.Sprintf("history-%02d", index)}, "thread", "turn", fmt.Sprintf("item-%02d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app.Update(activityPollMsg{})
+	app.Update(tea.MouseWheelMsg{X: 2, Y: 3, Button: tea.MouseWheelUp})
+	if app.FollowState().Following {
+		t.Fatal("mouse wheel did not leave live-tail mode")
+	}
+	beforePageDown := app.scrollTop
+	app.Update(keyPress("", tea.KeyPgDown))
+	if app.scrollTop <= beforePageDown || app.FollowState().Following {
+		t.Fatalf("PageDown state: offset %d -> %d follow=%t", beforePageDown, app.scrollTop, app.FollowState().Following)
+	}
+	app.Update(keyPress("", tea.KeyPgUp))
+	mouseOffset := app.scrollTop
+	app.Update(keyPress("", tea.KeyUp))
+	if app.scrollTop >= mouseOffset {
+		t.Fatalf("keyboard up did not scroll: %d -> %d", mouseOffset, app.scrollTop)
+	}
+	app.Update(keyPress("", tea.KeyHome))
+	if app.scrollTop != 0 || app.FollowState().Following {
+		t.Fatalf("Home state: offset=%d follow=%t", app.scrollTop, app.FollowState().Following)
+	}
+	app.Update(keyPress("", tea.KeyEnd))
+	if !app.FollowState().Following {
+		t.Fatal("End did not return to live tail")
+	}
+}
+
+func TestApplicationMultilineComposerGrowthCursorAndClickFocus(t *testing.T) {
+	stream := observability.NewActivityStream()
+	app := testApplication(t, ApplicationOptions{Activity: stream})
+	app.Update(tea.WindowSizeMsg{Width: 28, Height: 12})
+	app.Update(tea.PasteMsg{Content: "first line that wraps here\nsecond line"})
+	layout := app.regionLayout()
+	if layout.composerText < 3 {
+		t.Fatalf("composer did not grow for wrapped multiline input: %#v", layout)
+	}
+	view := app.View()
+	assertFixedFrame(t, view.Content, 28, 12)
+	if view.Cursor == nil {
+		t.Fatal("focused composer did not expose a real cursor")
+	}
+	composerStart := layout.header + layout.transcript + layout.separator
+	if view.Cursor.Position.Y < composerStart || view.Cursor.Position.Y >= 12 {
+		t.Fatalf("cursor position = %#v, composer starts at %d", view.Cursor.Position, composerStart)
+	}
+	input, cursor := app.Input(), view.Cursor.Position
+	generation := uint64(1)
+	if _, err := stream.Publish(&generation, observability.ActivityReviewer, observability.ActivityAgentMessage,
+		map[string]any{"text": "incoming **review**"}, "review", "turn", "message"); err != nil {
+		t.Fatal(err)
+	}
+	app.Update(activityPollMsg{})
+	redrawn := app.View()
+	if app.Input() != input || redrawn.Cursor == nil || redrawn.Cursor.Position != cursor {
+		t.Fatalf("incoming output changed editor state: input=%q cursor=%#v", app.Input(), redrawn.Cursor)
+	}
+	for y := composerStart; y < 12; y++ {
+		app.composer.Blur()
+		app.Update(tea.MouseClickMsg{X: 27, Y: y, Button: tea.MouseLeft})
+		if !app.composer.Focused() {
+			t.Fatalf("composer row %d did not focus on click", y)
+		}
+	}
+}
+
+func TestApplicationSmallTerminalLayoutNeverOverlapsOrClips(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	app.composer.SetValue("unicode λ界 " + strings.Repeat("long ", 20))
+	for height := 1; height <= 8; height++ {
+		for _, width := range []int{1, 2, 8, 20} {
+			app.Update(tea.WindowSizeMsg{Width: width, Height: height})
+			view := app.View()
+			assertFixedFrame(t, view.Content, width, height)
+			if view.Cursor == nil || view.Cursor.Position.X < 0 || view.Cursor.Position.X >= width || view.Cursor.Position.Y < 0 || view.Cursor.Position.Y >= height {
+				t.Fatalf("focused cursor at %dx%d = %#v", width, height, view.Cursor)
+			}
+			layout := app.regionLayout()
+			if layout.header < 0 || layout.transcript < 0 || layout.separator < 0 || layout.composerText < 0 {
+				t.Fatalf("negative layout at %dx%d: %#v", width, height, layout)
+			}
+		}
+	}
+}
+
+func TestApplicationComposerPreservesLongMultilineDraft(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	lines := make([]string, 300)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("draft line %03d", index)
+	}
+	draft := strings.Join(lines, "\n")
+	app.Update(tea.PasteMsg{Content: draft})
+	if got := app.Input(); got != draft {
+		t.Fatalf("long multiline draft bytes = %d, want %d", len(got), len(draft))
+	}
+}
+
+func TestApplicationHeaderUsesLiveImplementationPhaseOverStaleState(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{Status: func() StatusSnapshot {
+		return StatusSnapshot{RunName: "phase", RuntimeState: "running", SolState: "planning", ActiveAgent: "Sol", ActivePhase: "implementation"}
+	}})
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
+	if !strings.Contains(header, "Sol implementation") || strings.Contains(header, "Sol planning") {
+		t.Fatalf("implementation header = %q", header)
+	}
+}
+
+func TestApplicationHeaderTracksPlanningReviewAndImplementationTransitions(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	for _, transition := range []struct {
+		agent, phase string
+	}{
+		{agent: "Sol", phase: "planning"},
+		{agent: "Luna", phase: "review"},
+		{agent: "Sol", phase: "implementation"},
+	} {
+		app.SetStatus(StatusSnapshot{RunName: "phase", RuntimeState: "running", ActiveAgent: transition.agent, ActivePhase: transition.phase})
+		header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
+		if !strings.Contains(header, transition.agent+" "+transition.phase) {
+			t.Fatalf("%s/%s header = %q", transition.agent, transition.phase, header)
+		}
+	}
+}
+
+func TestApplicationExpandedUnicodeToolDetailsRemainInViewport(t *testing.T) {
+	stream := observability.NewActivityStream()
+	app := testApplication(t, ApplicationOptions{Activity: stream})
+	app.Update(tea.WindowSizeMsg{Width: 32, Height: 10})
+	generation := uint64(3)
+	if _, err := stream.Publish(&generation, observability.ActivityImplementor, observability.ActivityToolCompleted,
+		map[string]any{
+			"tool":       "write",
+			"turn_phase": "implementation",
+			"arguments":  map[string]any{"path": "seed/界.c", "offset": 0, "data": strings.Repeat("λ界", 80)},
+			"result":     map[string]any{"status": 0, "output": ""},
+		}, "thread", "turn", "tool"); err != nil {
+		t.Fatal(err)
+	}
+	app.Update(activityPollMsg{})
+	entries := app.ActivityModel().Entries()
+	var tool ActivityDisplayEntry
+	for _, entry := range entries {
+		if entry.Kind == ActivityDisplayKindTool {
+			tool = entry
+			break
+		}
+	}
+	if tool.Key == "" || !app.ToggleTool(tool.Key) {
+		t.Fatalf("expandable tool row not found: %#v", entries)
+	}
+	app.Update(keyPress("", tea.KeyHome))
+	view := app.View()
+	assertFixedFrame(t, view.Content, 32, 10)
+	plain := ansi.Strip(view.Content)
+	if !strings.Contains(plain, "implementation") || !strings.Contains(plain, "details") {
+		t.Fatalf("expanded tool presentation missing summary:\n%s", plain)
+	}
+}
+
+func TestApplicationConfirmationKeyboardResponsesAreSingleState(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.KeyPressMsg
+		want bool
+	}{
+		{name: "yes", key: keyPress("Y", 'Y'), want: true},
+		{name: "no", key: keyPress("n", 'n')},
+		{name: "default", key: keyPress("\r", tea.KeyEnter)},
+		{name: "escape", key: keyPress("", tea.KeyEscape)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := testApplication(t, ApplicationOptions{})
+			request := &confirmationRequest{prompt: "Proceed? [y/N] ", reply: make(chan bool, 1)}
+			app.Update(request)
+			plain := ansi.Strip(app.View().Content)
+			if strings.Count(plain, "Proceed?") != 1 || strings.Count(plain, "[y/N]") != 1 {
+				t.Fatalf("duplicated confirmation:\n%s", plain)
+			}
+			app.Update(test.key)
+			if got := <-request.reply; got != test.want {
+				t.Fatalf("confirmation response = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestApplicationSuspendAndResumeRestoreComposerFocus(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	message := tea.KeyPressMsg(tea.Key{Code: 'z', Mod: tea.ModCtrl})
+	_, suspend := app.Update(message)
+	if suspend == nil {
+		t.Fatalf("%q did not request Bubble Tea suspension", message.String())
+	}
+	if _, ok := suspend().(tea.SuspendMsg); !ok {
+		t.Fatalf("Ctrl+Z command returned %T", suspend())
+	}
+	app.composer.Blur()
+	app.Update(tea.ResumeMsg{})
+	if !app.composer.Focused() || app.View().Cursor == nil {
+		t.Fatalf("resume did not restore focused real cursor: focused=%t cursor=%#v", app.composer.Focused(), app.View().Cursor)
+	}
+}
+
+func assertFixedFrame(t *testing.T, content string, width, height int) {
+	t.Helper()
+	rows := strings.Split(content, "\n")
+	if len(rows) != height {
+		t.Fatalf("frame row count = %d, want %d\n%s", len(rows), height, ansi.Strip(content))
+	}
+	for index, row := range rows {
+		if got := ansi.StringWidth(row); got != width {
+			t.Fatalf("frame row %d width = %d, want %d: %q", index, got, width, ansi.Strip(row))
+		}
 	}
 }

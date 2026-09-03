@@ -329,10 +329,13 @@ func normalizeTUIRunError(ctx context.Context, err error) error {
 }
 
 func tuiStatus(console *PlainConsole) tui.StatusSnapshot {
+	agentName, phase := console.CodexActivity()
 	status := tui.StatusSnapshot{
 		RunName:      filepath.Base(console.runtime.RunDirectory()),
 		RuntimeState: runtimeStateName(console.runtime.State()),
 		SolState:     console.CodexTurnState(),
+		ActiveAgent:  agentName,
+		ActivePhase:  phase,
 	}
 	status.Generation, status.HasGeneration = console.runtime.GenerationNumber()
 	requests, err := console.runtime.FeatureRequests()
