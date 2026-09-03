@@ -2,7 +2,7 @@
 #include "files.h"
 #include "interrupts.h"
 #include "memory.h"
-#define TASK_MAX_COUNT 4u
+#define TASK_MAX_COUNT 8u
 #define TASK_STACK_SIZE (16u*1024u)
 #define KERNEL_CODE_SELECTOR 0x08u
 #define KERNEL_DATA_SELECTOR 0x10u
@@ -34,7 +34,7 @@ static const uint8_t worker_up[]={0x48,0xb8,0,1,0x40,0,0,0,0,0,0x48,0xff,0,0xeb,
 "mov $7,%eax\nxor %edi,%edi\nint $0x80\ncmp $0x402000,%rax\njne 9f\nmov $7,%eax\nmov $0x402001,%edi\nint $0x80\ncmp $-1,%rax\njne 9f\nmov $7,%eax\nxor %edi,%edi\nint $0x80\ncmp $0x402000,%rax\njne 9f\nmov $7,%eax\nmov $0x403000,%edi\nint $0x80\ncmp $0x403000,%rax\njne 9f\n"
 "mov $4,%eax\nmov $0x401070,%edi\nmov $9,%esi\nxor %edx,%edx\nmov $0x401040,%ecx\nmov $1,%r8d\nint $0x80\ncmp $1,%rax\njne 9f\n"
 "mov $7,%eax\nmov $0x404000,%edi\nint $0x80\ncmp $0x404000,%rax\njne 9f\nmov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x402ff8,%ecx\nmov $16,%r8d\nint $0x80\ncmp $16,%rax\njne 9f\ncmpl $0x31455843,0x402ff8\njne 9f\n"
-"mov $7,%eax\nmov $0x403000,%edi\nint $0x80\ncmp $0x403000,%rax\njne 9f\nmov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x403000,%ecx\nmov $1,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\nmov $7,%eax\nmov $0x404000,%edi\nint $0x80\ncmpb $0,0x403000\njne 9f\nmov $7,%eax\nmov $0x601000,%edi\nint $0x80\ncmp $0x601000,%rax\njne 9f\nmovl $0x12345678,0x600000\nmov $7,%eax\nmov $0x404000,%edi\nint $0x80\ncmp $0x404000,%rax\njne 9f\nmov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x600000,%ecx\nmov $1,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\n"
+"mov $7,%eax\nmov $0x403000,%edi\nint $0x80\ncmp $0x403000,%rax\njne 9f\nmov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x403000,%ecx\nmov $1,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\nmov $7,%eax\nmov $0x404000,%edi\nint $0x80\ncmpb $0,0x403000\njne 9f\nmov $7,%eax\nmov $0x1001000,%edi\nint $0x80\ncmp $0x1001000,%rax\njne 9f\nmovl $0x12345678,0x600000\nmov $7,%eax\nmov $0x404000,%edi\nint $0x80\ncmp $0x404000,%rax\njne 9f\nmov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x600000,%ecx\nmov $1,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\n"
 "mov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x3ffffff8,%ecx\nmov $8,%r8d\nint $0x80\ncmp $8,%rax\njne 9f\ncmpl $0x31455843,0x3ffffff8\njne 9f\n"
 "mov $3,%eax\nmov $0x401060,%edi\nmov $14,%esi\nint $0x80\ncmp $1,%rax\njne 9f\nmov $4,%eax\nmov $0x401060,%edi\nmov $14,%esi\nxor %edx,%edx\nmov $0x400ff8,%ecx\nmov $1,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\nmov $4,%eax\nmov $0x401060,%edi\nmov $14,%esi\nxor %edx,%edx\nxor %ecx,%ecx\nxor %r8d,%r8d\nint $0x80\ncmp $-1,%rax\njne 9f\n"
 "mov $1,%eax\nmov $0x401070,%edi\nmov $9,%esi\nint $0x80\ncmp $1,%rax\njne 9f\nmov $2,%eax\nxor %edx,%edx\nmov $0x3ffffff0,%ecx\nmov $1,%r8d\nint $0x80\ncmp $1,%rax\njne 9f\ncmpb $0x62,0x3ffffff0\njne 9f\n"
