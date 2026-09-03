@@ -306,10 +306,6 @@ type GenerationSessionOptions struct {
 	ReviewerServiceTier      string
 }
 
-// ImplementorSessionOptions is a readable alias for callers that prefer the
-// role name over the generation-worker name.
-type ImplementorSessionOptions = GenerationSessionOptions
-
 // GenerationSession owns one isolated Codex app-server and its implementor
 // thread. Planning and implementation intentionally share the same thread;
 // a fresh session is required for a fresh generation.
@@ -432,62 +428,6 @@ func NewGenerationSession(runtime GenerationRuntime, options GenerationSessionOp
 	}
 	session.dynamicCalls = newDynamicCallRouter(session.record)
 	return session
-}
-
-// NewImplementorSession is an equivalent constructor with role-oriented
-// naming.
-func NewImplementorSession(runtime GenerationRuntime, options ImplementorSessionOptions) *GenerationSession {
-	return NewGenerationSession(runtime, options)
-}
-
-// GenerationWorker runs one fresh generation session and always retires it.
-// It is intentionally single-use-at-a-time so concurrent callers cannot
-// accidentally create multiple implementors for one worker owner.
-type GenerationWorker struct {
-	options GenerationSessionOptions
-	mu      sync.Mutex
-	running bool
-}
-
-func NewGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
-	return &GenerationWorker{options: options}
-}
-
-func (w *GenerationWorker) RunGeneration(ctx context.Context, runtime GenerationRuntime) (result GenerationResult, resultErr error) {
-	if w == nil {
-		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker is nil"}
-	}
-	if ctx == nil {
-		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker context is nil"}
-	}
-	w.mu.Lock()
-	if w.running {
-		w.mu.Unlock()
-		return GenerationResult{}, &GenerationWorkerError{Reason: "Codex generation worker is already running"}
-	}
-	w.running = true
-	w.mu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		w.running = false
-		w.mu.Unlock()
-	}()
-
-	session := NewGenerationSession(runtime, w.options)
-	stopCancellation := context.AfterFunc(ctx, session.Cancel)
-	defer stopCancellation()
-	defer func() {
-		closeErr := session.Close()
-		if resultErr == nil {
-			resultErr = closeErr
-		} else if closeErr != nil {
-			resultErr = fmt.Errorf("%w; generation session close also failed: %v", resultErr, closeErr)
-		}
-	}()
-	if err := session.Start(ctx); err != nil {
-		return GenerationResult{}, err
-	}
-	return session.RunInitialTurn()
 }
 
 func closedChannel() chan struct{} {

@@ -1574,56 +1574,6 @@ func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.
 	}
 }
 
-func TestGenerationWorkerRejectsConcurrentRunAndAlwaysClosesSession(t *testing.T) {
-	holdRecord := filepath.Join(t.TempDir(), "generation-worker-hold.json")
-	setGenerationHelper(t, "hold", holdRecord)
-	runtime := newGenerationTestRuntime(t)
-	worker := NewGenerationWorker(GenerationSessionOptions{
-		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, err := worker.RunGeneration(ctx, runtime)
-		result <- err
-	}()
-	waitForReviewerFile(t, holdRecord)
-	hold := readReviewerJSON(t, holdRecord)
-	pid := int(hold["pid"].(float64))
-	if _, err := worker.RunGeneration(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "already running") {
-		t.Fatalf("concurrent worker error = %v", err)
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("cancelled generation worker unexpectedly succeeded")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelled generation worker did not return")
-	}
-	if generationProcessAlive(pid) {
-		t.Fatalf("cancelled worker left app-server process %d alive", pid)
-	}
-
-	successRecord := filepath.Join(t.TempDir(), "generation-worker-success.json")
-	setGenerationHelper(t, "worker-success", successRecord)
-	runtime = newGenerationTestRuntime(t)
-	completed, err := worker.RunGeneration(context.Background(), runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if completed.FinalMessage != "Implementation complete." {
-		t.Fatalf("worker result = %#v", completed)
-	}
-	waitForReviewerFile(t, successRecord)
-	success := readReviewerJSON(t, successRecord)
-	successPID := int(success["pid"].(float64))
-	if generationProcessAlive(successPID) {
-		t.Fatalf("completed worker left app-server process %d alive", successPID)
-	}
-}
-
 func TestGenerationSessionClosePreservesPartialInterviewWithoutResponse(t *testing.T) {
 	recordPath := filepath.Join(t.TempDir(), "generation-interview-hold.json")
 	setGenerationHelper(t, "interview-hold", recordPath)
@@ -2526,7 +2476,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -2670,7 +2620,7 @@ func runGenerationFakeAppServer() {
 			namespace = nil
 			arguments = map[string]any{"focus": "general", "proposal": "Inspect first, then implement the smallest useful change."}
 		}
-		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
+		if ((mode == "success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			tool = "write"
 			arguments = map[string]any{"path": "seed/kernel.c", "offset": 0, "data": "x"}
 		}
@@ -2813,7 +2763,7 @@ func runGenerationFakeAppServer() {
 		if plan := os.Getenv(generationHelperPlan); plan != "" && ((index == 0 && mode != "resume-failed") || (mode == "planning-interrupt" && index == 1)) {
 			text = plan
 		}
-		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
+		if ((mode == "success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			text = "Implementation complete."
 		}
 		if mode == "interview" && index == 2 {
@@ -2840,9 +2790,6 @@ func runGenerationFakeAppServer() {
 		send(map[string]any{"method": "item/completed", "params": map[string]any{
 			"threadId": threadID, "turnId": turnID, "item": item,
 		}})
-		if mode == "worker-success" && index == 1 {
-			writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
-		}
 		send(map[string]any{"method": "turn/completed", "params": map[string]any{
 			"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"},
 		}})
