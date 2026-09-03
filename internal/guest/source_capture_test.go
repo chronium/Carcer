@@ -18,7 +18,10 @@ func TestCaptureSourceSnapshotMatchesTrustedBuildSourceSelection(t *testing.T) {
 	invoke := func(_ context.Context, name string, arguments [][]byte) (ToolResult, error) {
 		switch name {
 		case "list":
-			return ToolResult{Status: 0, Output: []byte("test/immutable\nseed/z.bin\nseed/a.c\n")}, nil
+			if len(arguments) != 1 || string(arguments[0]) != "seed/" {
+				t.Fatalf("source list arguments = %q", arguments)
+			}
+			return ToolResult{Status: 0, Output: []byte("seed/z.bin\nseed/a.c\n")}, nil
 		case "read":
 			path := string(arguments[0])
 			readPaths = append(readPaths, path)
@@ -57,13 +60,29 @@ func TestCaptureSourceSnapshotMatchesTrustedBuildSourceSelection(t *testing.T) {
 func TestCaptureSourceSnapshotRejectsInvalidSelectedSourcePath(t *testing.T) {
 	invoke := func(_ context.Context, name string, _ [][]byte) (ToolResult, error) {
 		if name == "list" {
-			return ToolResult{Status: 0, Output: []byte("test/immutable\nseed/../escape.c\n")}, nil
+			return ToolResult{Status: 0, Output: []byte("seed/../escape.c\n")}, nil
 		}
 		t.Fatalf("invalid source path reached %q", name)
 		return ToolResult{}, nil
 	}
 	if _, err := CaptureSourceSnapshot(context.Background(), invoke); err == nil || !strings.Contains(err.Error(), "unsafe source path") {
 		t.Fatalf("invalid selected source path error = %v", err)
+	}
+}
+
+func TestCaptureSourceSnapshotRejectsOutOfPrefixListResult(t *testing.T) {
+	invoke := func(_ context.Context, name string, arguments [][]byte) (ToolResult, error) {
+		if name == "list" {
+			if len(arguments) != 1 || string(arguments[0]) != "seed/" {
+				t.Fatalf("source list arguments = %q", arguments)
+			}
+			return ToolResult{Status: 0, Output: []byte("test/immutable\n")}, nil
+		}
+		t.Fatalf("out-of-prefix source path reached %q", name)
+		return ToolResult{}, nil
+	}
+	if _, err := CaptureSourceSnapshot(context.Background(), invoke); err == nil || !strings.Contains(err.Error(), "outside seed/ prefix") {
+		t.Fatalf("out-of-prefix source list error = %v", err)
 	}
 }
 

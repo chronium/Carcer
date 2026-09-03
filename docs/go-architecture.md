@@ -142,8 +142,10 @@ thread for each consultation. A review request closes the originating Sol turn
 to new tools, quiesces it, captures source atomically under the live runtime's
 serialized operation lock, and exposes only snapshot-backed read tools to Luna.
 Snapshot construction selects the same `seed/` source paths as a guest build;
-non-source guest files are excluded, while every selected path and byte is
-independently validated by the trusted source-snapshot codec.
+it requests the guest's newline-delimited list with that exact prefix, so
+non-source filenames cannot affect decoding. CR and LF are forbidden in
+canonical source paths, while every selected path and byte is independently
+validated by the trusted length-framed source-snapshot codec.
 The exact findings return through one trusted continuation on the same Sol
 process, thread, and phase. Request, proposal, snapshot, and findings bytes are
 private evidence; operational events carry only identities and digests. The

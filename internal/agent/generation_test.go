@@ -1220,9 +1220,12 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 		}
 	}
 	reviewerSnapshotDigest := fmt.Sprintf("%x", sha256.Sum256(reviewerSnapshot))
-	runtime.invoke = func(_ context.Context, name string, _ [][]byte) (guest.ToolResult, error) {
+	runtime.invoke = func(_ context.Context, name string, arguments [][]byte) (guest.ToolResult, error) {
 		switch name {
 		case "list":
+			if len(arguments) == 1 && string(arguments[0]) == "seed/" {
+				return guest.ToolResult{Status: 0, Output: []byte("seed/tasks.c\n")}, nil
+			}
 			return guest.ToolResult{Status: 0, Output: []byte("test/immutable\nseed/tasks.c\n")}, nil
 		case "read":
 			captured := append([]byte(nil), source...)
@@ -1330,10 +1333,17 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	runtime.mu.Lock()
 	calls := append([]generationTestCall(nil), runtime.calls...)
 	runtime.mu.Unlock()
+	foundScopedSourceList := false
 	for _, call := range calls {
+		if call.name == "list" && len(call.arguments) == 1 && string(call.arguments[0]) == "seed/" {
+			foundScopedSourceList = true
+		}
 		if call.name == "read" && len(call.arguments) > 0 && string(call.arguments[0]) == "test/immutable" {
 			t.Fatal("review snapshot read non-source test/immutable")
 		}
+	}
+	if !foundScopedSourceList {
+		t.Fatal("review snapshot did not request list with exact seed/ prefix")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)

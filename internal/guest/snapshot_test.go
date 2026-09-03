@@ -45,7 +45,7 @@ func TestSourceSnapshotRejectsMalformedUnsafeAndBoundedInput(t *testing.T) {
 		{name: "invalid UTF-8", data: snapshotRecord([]byte{255}, nil), want: "UTF-8"},
 		{name: "content bound", data: contentLengthRecord(maxSnapshotContent + 1), want: "64 KiB"},
 	}
-	for _, path := range []string{"seed/../outside", "/seed/kernel.c", "seed//kernel.c", "seed/bad\x00name"} {
+	for _, path := range []string{"seed/../outside", "/seed/kernel.c", "seed//kernel.c", "seed/bad\x00name", "seed/bad\nname"} {
 		tests = append(tests, struct {
 			name string
 			data []byte

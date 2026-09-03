@@ -145,7 +145,7 @@ func validateSourcePath(path string) error {
 }
 
 func validateBuildPath(path string) error {
-	if strings.IndexByte(path, 0) >= 0 || strings.HasPrefix(path, "/") {
+	if strings.IndexByte(path, 0) >= 0 || strings.ContainsAny(path, "\r\n") || strings.HasPrefix(path, "/") {
 		return &SourceSnapshotError{Reason: fmt.Sprintf("unsafe source path: %q", path)}
 	}
 	components := strings.Split(path, "/")
