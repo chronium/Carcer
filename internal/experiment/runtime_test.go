@@ -350,6 +350,98 @@ func TestOperatorFeedbackAttachmentCannotBeReplaced(t *testing.T) {
 	}
 }
 
+func TestOperatorFeedbackAttachmentRecoversAcrossInterruptedPublication(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		published bool
+	}{
+		{name: "before final link"},
+		{name: "after final link", published: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run, feedback := abortFeedbackGateFixture(t)
+			canonical := filepath.Join(run, operatorFeedbackDirName)
+			if err := os.Mkdir(canonical, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := encodeOperatorFeedback(feedback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staging, err := stageOperatorFeedback(run, encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if filepath.Dir(staging) != run {
+				t.Fatalf("feedback staging path entered canonical directory: %s", staging)
+			}
+			final := filepath.Join(canonical, operatorFeedbackFilename(feedback.TargetGeneration))
+			if test.published {
+				if err := os.Link(staging, final); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			runtime := reopenProcessFreeRun(t, run)
+			if err := runtime.ForkFromGeneration(0); err != nil {
+				t.Fatal(err)
+			}
+			if source, reason, ok := runtime.OperatorFeedback(); !ok || source != feedback.SourceAbortGeneration || reason != feedback.Reason {
+				t.Fatalf("recovered feedback = (%d, %q, %t)", source, reason, ok)
+			}
+			persisted, err := os.ReadFile(final)
+			if err != nil || !bytes.Equal(persisted, encoded) {
+				t.Fatalf("final attachment = %s, %v", persisted, err)
+			}
+			if _, err := os.Stat(staging); err != nil {
+				t.Fatalf("simulated crash staging unexpectedly affected recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestOperatorFeedbackCanonicalDirectoryRejectsUnexpectedEntry(t *testing.T) {
+	run, _ := abortFeedbackGateFixture(t)
+	directory := filepath.Join(run, operatorFeedbackDirName)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".operator-feedback-interrupted"), []byte("not canonical"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewCodexOSRun(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.ReopenAtGate(); err == nil || !strings.Contains(err.Error(), "unexpected entry") {
+		t.Fatalf("unexpected canonical entry reopen error = %v", err)
+	}
+}
+
+func abortFeedbackGateFixture(t *testing.T) (string, OperatorFeedback) {
+	t.Helper()
+	run := t.TempDir()
+	hardware := testHardware(t)
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: hardware, BootISO: []byte("boot-0"),
+		Handoff: "handoff-0", SourceSnapshot: testSnapshot(t, "source\n"), KernelELF: []byte("kernel-0"), SuccessorISO: []byte("iso-0"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parent := uint64(0)
+	feedback := OperatorFeedback{
+		TargetGeneration: 2, SourceAbortGeneration: 1,
+		Reason: "restart-safe operator feedback", SchemaVersion: 1,
+	}
+	if _, err := WriteAbortedArchive(run, AbortedArchive{
+		Generation: 1, ParentGeneration: &parent, Transition: "successor", Hardware: hardware,
+		BootISO: []byte("boot-1"), AbortReason: feedback.Reason,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return run, feedback
+}
+
 func TestPendingAbortFeedbackAttachesThroughContinue(t *testing.T) {
 	run := t.TempDir()
 	hardware := testHardware(t)

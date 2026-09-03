@@ -22,6 +22,7 @@ const (
 	abortReasonName         = "abort-reason.txt"
 	operatorFeedbackDirName = "operator-feedback"
 	operatorFeedbackLimit   = MaxAbortReasonBytes + 1024
+	operatorFeedbackStaging = ".operator-feedback-attachment-*"
 )
 
 // OperatorFeedback is the immutable abort feedback attached to one generation.
@@ -146,30 +147,19 @@ func persistOperatorFeedback(runDirectory string, feedback OperatorFeedback) err
 	} else if !errors.Is(readErr, os.ErrNotExist) {
 		return &GenerationRuntimeError{Reason: "could not inspect operator feedback attachment", Err: readErr}
 	}
-	staging, err := os.CreateTemp(directory, ".operator-feedback-*")
+	// Stage in the run root, outside the strictly validated canonical
+	// directory. A process death may leave this inode behind, but it cannot be
+	// mistaken for a canonical attachment or prevent gate recovery.
+	stagingPath, err := stageOperatorFeedback(runDirectory, encoded)
 	if err != nil {
-		return &GenerationRuntimeError{Reason: "could not stage operator feedback attachment", Err: err}
+		return err
 	}
-	stagingPath := staging.Name()
 	remove := true
 	defer func() {
-		_ = staging.Close()
 		if remove {
 			_ = os.Remove(stagingPath)
 		}
 	}()
-	if err := staging.Chmod(0o600); err != nil {
-		return err
-	}
-	if err := writeAllFile(staging, encoded); err != nil {
-		return &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
-	}
-	if err := staging.Sync(); err != nil {
-		return &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
-	}
-	if err := staging.Close(); err != nil {
-		return &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
-	}
 	if err := os.Link(stagingPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			existing, readErr := readRegularLimited(path, operatorFeedbackLimit)
@@ -180,14 +170,48 @@ func persistOperatorFeedback(runDirectory string, feedback OperatorFeedback) err
 		}
 		return &GenerationRuntimeError{Reason: "could not publish operator feedback attachment", Err: err}
 	}
+	// Persist the final link before removing the recoverable staging link. A
+	// crash on either side of this boundary leaves at least one complete link.
+	if err := syncDirectory(directory); err != nil {
+		return &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
+	}
 	if err := os.Remove(stagingPath); err != nil {
 		return &GenerationRuntimeError{Reason: "could not finalize operator feedback attachment", Err: err}
 	}
 	remove = false
-	if err := syncDirectory(directory); err != nil {
+	if err := syncDirectory(runDirectory); err != nil {
 		return &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
 	}
 	return nil
+}
+
+func stageOperatorFeedback(runDirectory string, encoded []byte) (string, error) {
+	staging, err := os.CreateTemp(runDirectory, operatorFeedbackStaging)
+	if err != nil {
+		return "", &GenerationRuntimeError{Reason: "could not stage operator feedback attachment", Err: err}
+	}
+	path := staging.Name()
+	complete := false
+	defer func() {
+		_ = staging.Close()
+		if !complete {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := staging.Chmod(0o600); err != nil {
+		return "", &GenerationRuntimeError{Reason: "could not stage operator feedback attachment", Err: err}
+	}
+	if err := writeAllFile(staging, encoded); err != nil {
+		return "", &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
+	}
+	if err := staging.Sync(); err != nil {
+		return "", &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
+	}
+	if err := staging.Close(); err != nil {
+		return "", &GenerationRuntimeError{Reason: "could not persist operator feedback attachment", Err: err}
+	}
+	complete = true
+	return path, nil
 }
 
 func loadOperatorFeedbackRecords(runDirectory string) ([]OperatorFeedback, error) {
