@@ -170,6 +170,76 @@ func TestReviewForensicEvidenceSeparatesOutcomeAndCapture(t *testing.T) {
 	}
 }
 
+func TestReviewYieldEvidencePreservesPrivateContentAndExactlyOneContinuation(t *testing.T) {
+	var events []map[string]any
+	run := t.TempDir()
+	store := NewBuildReviewProvenance(run, func(_ string, _ uint64, data map[string]any) {
+		events = append(events, data)
+	})
+	evidence, err := store.BeginReview(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := "check the locking boundary"
+	proposal := "1. Quiesce the turn.\n2. Resume exactly once."
+	if err := evidence.RecordYieldRequested(ReviewYieldOrigin{
+		RequestID: 17, CallID: "call-17", ThreadID: "thread-3", TurnID: "turn-4",
+		Phase: "planning", Focus: "correctness", Request: &request, Proposal: &proposal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := []byte("stable snapshot\x00bytes")
+	if err := evidence.RecordAwaitingReview(snapshot, "interrupted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.Complete("completed"); err != nil {
+		t.Fatal(err)
+	}
+	findings := "Blocking: preserve the originating identity."
+	if err := evidence.RecordReviewResult("completed", findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.RecordContinuationStarted("turn-5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.RecordContinuationStarted("turn-6"); err == nil || !strings.Contains(err.Error(), "current state") {
+		t.Fatalf("duplicate continuation error = %v", err)
+	}
+	if err := evidence.RecordContinuationFinished("completed"); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := filepath.Join(run, "build-review-provenance", "generation-0003", "review-000001")
+	for name, want := range map[string][]byte{
+		"request.txt": []byte(request), "proposal.txt": []byte(proposal),
+		"source.snapshot": snapshot, "result.txt": []byte(findings),
+	} {
+		got, readErr := os.ReadFile(filepath.Join(directory, name))
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("%s = %q, %v", name, got, readErr)
+		}
+	}
+	manifest := readForensicManifest(t, filepath.Join(directory, "manifest.json"))
+	if manifest["stage"] != "completed" || manifest["origin_status"] != "interrupted" || manifest["continuation_turn_id"] != "turn-5" || manifest["continuation_status"] != "completed" {
+		t.Fatalf("yield completion = %#v", manifest)
+	}
+	yield, ok := manifest["yield"].(map[string]any)
+	if !ok || yield["call_id"] != "call-17" || yield["phase"] != "planning" {
+		t.Fatalf("yield identity = %#v", manifest["yield"])
+	}
+	for _, event := range events {
+		encoded, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		for _, private := range []string{request, proposal, findings, string(snapshot)} {
+			if bytes.Contains(encoded, []byte(private)) {
+				t.Fatalf("operational event leaked private content: %s", encoded)
+			}
+		}
+	}
+}
+
 func TestReviewForensicContentWriteFailureLeavesSafeIncompleteMarker(t *testing.T) {
 	run := t.TempDir()
 	evidence, err := NewBuildReviewProvenance(run).BeginReview(10)

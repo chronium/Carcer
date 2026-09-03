@@ -5,6 +5,8 @@ import (
 	"sync"
 )
 
+const maxTerminalDynamicTurns = 256
+
 // dynamicCallRouting identifies one app-server initiated dynamic tool call.
 //
 // The request ID identifies the JSON-RPC request whose response is written by
@@ -40,16 +42,24 @@ type dynamicCallKey struct {
 // implementor and reviewer sessions can use the same routing state machine.
 // The recorder is called outside the router lock.
 type dynamicCallRouter struct {
-	mu     sync.Mutex
-	calls  map[dynamicCallKey]*dynamicCallRouting
-	order  []*dynamicCallRouting
-	record func(string, map[string]any)
+	mu            sync.Mutex
+	calls         map[dynamicCallKey]*dynamicCallRouting
+	order         []*dynamicCallRouting
+	terminalTurns map[dynamicTurnKey]struct{}
+	terminalOrder []dynamicTurnKey
+	record        func(string, map[string]any)
+}
+
+type dynamicTurnKey struct {
+	threadID string
+	turnID   string
 }
 
 func newDynamicCallRouter(record func(string, map[string]any)) *dynamicCallRouter {
 	return &dynamicCallRouter{
-		calls:  make(map[dynamicCallKey]*dynamicCallRouting),
-		record: record,
+		calls:         make(map[dynamicCallKey]*dynamicCallRouting),
+		terminalTurns: make(map[dynamicTurnKey]struct{}),
+		record:        record,
 	}
 }
 
@@ -83,6 +93,9 @@ func (r *dynamicCallRouter) ensure(message map[string]any, threadID, turnID, tur
 	defer r.mu.Unlock()
 	if existing := r.calls[key]; existing != nil {
 		return existing
+	}
+	if _, terminal := r.terminalTurns[dynamicTurnKey{threadID: requestThreadID, turnID: requestTurnID}]; terminal {
+		return nil
 	}
 	if requestThreadID != threadID || requestTurnID != turnID || turnPhase == "" {
 		return nil
@@ -164,7 +177,7 @@ func (r *dynamicCallRouter) finish(routing *dynamicCallRouting, outcome, itemSta
 		return false
 	}
 	switch outcome {
-	case "delivered", "rejected", "orphaned":
+	case "delivered", "rejected", "orphaned", "yielded":
 	default:
 		return false
 	}
@@ -321,6 +334,15 @@ func (r *dynamicCallRouter) orphanUnresolved(threadID, turnID, turnPhase, turnSt
 		return nil
 	}
 	r.mu.Lock()
+	turnKey := dynamicTurnKey{threadID: threadID, turnID: turnID}
+	if _, exists := r.terminalTurns[turnKey]; !exists {
+		r.terminalTurns[turnKey] = struct{}{}
+		r.terminalOrder = append(r.terminalOrder, turnKey)
+		if len(r.terminalOrder) > maxTerminalDynamicTurns {
+			delete(r.terminalTurns, r.terminalOrder[0])
+			r.terminalOrder = r.terminalOrder[1:]
+		}
+	}
 	var calls []*dynamicCallRouting
 	for _, routing := range r.order {
 		if routing.threadID == threadID && routing.turnID == turnID {

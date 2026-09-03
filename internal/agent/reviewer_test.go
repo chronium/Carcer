@@ -479,10 +479,10 @@ func runReviewerFakeAppServer() {
 		"activePermissionProfile": map[string]any{"id": "codexos-reviewer"},
 		"sandbox":                 map[string]any{"type": "readOnly", "networkAccess": false},
 	})
-	writeReviewerRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID})
 	turnRequest := expect("turn/start")
 	turnID := fmt.Sprintf("turn-%d", os.Getpid())
 	respond(turnRequest, map[string]any{"turn": map[string]any{"id": turnID}})
+	writeReviewerRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "turn_request": turnRequest})
 	if path := os.Getenv(reviewerHelperReady); path != "" {
 		_ = os.WriteFile(path, []byte("ready"), 0o600)
 	}
@@ -537,6 +537,13 @@ func runReviewerFakeAppServer() {
 		item := map[string]any{"id": "message", "type": "agentMessage", "text": "Review finished early."}
 		send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": threadID, "turnId": turnID, "item": item}})
 		send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{item}, "status": "completed"}}})
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "failure":
+		send(map[string]any{"method": "turn/completed", "params": map[string]any{
+			"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{}, "status": "failed", "error": map[string]any{"message": "synthetic review failure"}},
+		}})
 		for {
 			time.Sleep(time.Hour)
 		}

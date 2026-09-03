@@ -31,7 +31,7 @@ const (
 	DefaultReasoningSummary = "auto"
 	DefaultServiceTier      = "priority"
 	DefaultInterruptTimeout = 5 * time.Second
-	AgentContractVersion    = uint64(7)
+	AgentContractVersion    = uint64(8)
 
 	ContinuePrompt         = "Continue working on the current CodexOS generation."
 	ResumePrompt           = "Continue working on the current CodexOS generation after the operator pause."
@@ -51,7 +51,7 @@ const (
 	listRequestsToolDescription       = "List the authoritative run-level external feature requests and their current pending, approved, or denied status. Pending requests are recorded advisory requests, not provisioned or promised, and carry no ETA or approval probability. Under trusted operator semantics, approved requests have already been provisioned and are usable only within the exact provisioned scope; denied requests are unavailable under that request. This read-only tool does not modify requests."
 	listProvidedAssetsToolDescription = "Ask the running CodexOS guest to list the immutable provided assets it can access through its advertised development tool."
 	readProvidedAssetToolDescription  = "Ask the running CodexOS guest to read an exact byte range from a provided asset through its advertised development tool. This does not give Codex direct access to trusted host asset storage."
-	reviewToolDescription             = "Consult a fresh independent reviewer that inspects the current mutable CodexOS guest source through restricted read-only tools. The reviewer is advisory and cannot modify CodexOS."
+	reviewToolDescription             = "Yield the current turn, then consult a fresh independent reviewer over one stable CodexOS guest-source snapshot. Planning calls must include the exact proposed plan. The reviewer is advisory and cannot modify CodexOS; its exact result returns in one trusted continuation on this thread."
 )
 
 // implementorConfig is intentionally kept as a concrete app-server config
@@ -366,6 +366,12 @@ type GenerationSession struct {
 	availableTools           map[string]struct{}
 	serviceTierName          string
 	activeReviewer           *ReviewWorker
+	pendingReview            *reviewYield
+	activeReviewResume       *reviewYield
+	reviewYieldState         ReviewYieldState
+	reviewCancel             context.CancelFunc
+	reviewDone               chan struct{}
+	reviewPauseRequested     bool
 	generation               uint64
 	generationSet            bool
 	availableOrder           []string
@@ -531,7 +537,7 @@ func (s *GenerationSession) TurnAdmitted() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.turnID != ""
+	return s.turnID != "" || s.reviewYieldState != ReviewYieldIdle
 }
 
 func (s *GenerationSession) Healthy() bool {
@@ -701,7 +707,7 @@ func (s *GenerationSession) RunExitInterviewTurn(question string) (GenerationRes
 		}
 		s.mu.Unlock()
 	}()
-	return s.runTurnWithInterview(exitInterviewPrompt(question), "interview", metadata)
+	return s.runTurnWithInterview(exitInterviewPrompt(question), "interview", metadata, nil)
 }
 
 // EndExitInterview records one terminal interview event and permanently
@@ -1052,7 +1058,13 @@ func (s *GenerationSession) RunContinuationTurn(prompts ...string) (GenerationRe
 	if len(prompts) > 0 {
 		prompt = prompts[0]
 	}
-	return s.runTurn(prompt, "continuation")
+	phase := "continuation"
+	s.mu.Lock()
+	if pending := s.pendingReview; pending != nil && pending.outcome != "" {
+		phase = pending.phase
+	}
+	s.mu.Unlock()
+	return s.runReviewableTurn(prompt, phase)
 }
 
 func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult, error) {
@@ -1083,7 +1095,7 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 		}
 		s.mu.Unlock()
 	}()
-	planning, err := s.runTurn(prompt, "planning")
+	planning, err := s.runReviewableTurn(prompt, "planning")
 	if err != nil || planning.TurnStatus != "completed" || !s.runtime.GenerationRunning() {
 		return planning, err
 	}
@@ -1110,7 +1122,7 @@ func (s *GenerationSession) runPlanningSequence(prompt string) (GenerationResult
 		planning.Summary = "Codex planning completed; implementation did not start."
 		return planning, nil
 	}
-	return s.runTurn(ImplementationPrompt, "implementation")
+	return s.runReviewableTurn(ImplementationPrompt, "implementation")
 }
 
 type interviewTurnInput struct {
@@ -1119,11 +1131,7 @@ type interviewTurnInput struct {
 	admissionDone chan struct{}
 }
 
-func (s *GenerationSession) runTurn(prompt, phase string) (GenerationResult, error) {
-	return s.runTurnWithInterview(prompt, phase, nil)
-}
-
-func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview *interviewTurnInput) (GenerationResult, error) {
+func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview *interviewTurnInput, resumedReview *reviewYield) (GenerationResult, error) {
 	failBeforeTurn := func(err error) (GenerationResult, error) {
 		if phase == "planning" {
 			return GenerationResult{}, generationFailure(err, s.failPlanningEvidence())
@@ -1191,6 +1199,24 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 			Summary:      "Codex planning completed; implementation did not start.",
 		}, nil
 	}
+	if resumedReview != nil && s.reviewPauseRequested {
+		s.pendingReview = resumedReview
+		if s.activeReviewResume == resumedReview {
+			s.activeReviewResume = nil
+		}
+		if resumedReview.outcome == "completed" {
+			s.reviewYieldState = ReviewYieldAwaitingContinuation
+		} else {
+			s.reviewYieldState = ReviewYieldFailed
+		}
+		s.lastStatus = "interrupted"
+		s.mu.Unlock()
+		return GenerationResult{
+			TurnStatus:   "interrupted",
+			RuntimeState: s.runtimeState(),
+			Summary:      "Codex review completed; the trusted continuation is awaiting resume.",
+		}, nil
+	}
 	parentContext := s.runCtx
 	if parentContext == nil {
 		s.mu.Unlock()
@@ -1235,11 +1261,34 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 		turnCancel()
 		s.mu.Lock()
 		reserved := s.turnReady == turnReady
+		pausedReview := resumedReview != nil && reserved && s.reviewPauseRequested && !s.closed && turnContext.Err() != nil
+		if pausedReview {
+			s.pendingReview = resumedReview
+			if s.activeReviewResume == resumedReview {
+				s.activeReviewResume = nil
+			}
+			if resumedReview.outcome == "completed" {
+				s.reviewYieldState = ReviewYieldAwaitingContinuation
+			} else {
+				s.reviewYieldState = ReviewYieldFailed
+			}
+			s.lastStatus = "interrupted"
+		}
 		if reserved {
-			s.lastStatus = "failed"
-			s.healthy = false
+			if !pausedReview {
+				s.lastStatus = "failed"
+				s.healthy = false
+			}
 		}
 		s.mu.Unlock()
+		if pausedReview {
+			s.clearTurn("interrupted")
+			return GenerationResult{
+				TurnStatus:   "interrupted",
+				RuntimeState: s.runtimeState(),
+				Summary:      "Codex review completed; the trusted continuation is awaiting resume.",
+			}, nil
+		}
 		if phase == "planning" {
 			err = combineGenerationErrors(err, s.failPlanningEvidence())
 		}
@@ -1310,6 +1359,31 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 				return GenerationResult{}, generationError(err)
 			}
 		}
+	}
+	if resumedReview != nil {
+		s.mu.Lock()
+		if resumedReview.continuationStarted {
+			s.mu.Unlock()
+			s.markUnhealthy()
+			s.recordTurnFailure(turnNumber, startedAt, phase)
+			s.clearTurn("failed")
+			return GenerationResult{}, &GenerationWorkerError{Reason: "review continuation was already started"}
+		}
+		resumedReview.continuationStarted = true
+		s.mu.Unlock()
+		if resumedReview.evidence != nil {
+			if err := resumedReview.evidence.RecordContinuationStarted(turnID); err != nil {
+				s.degradeReviewEvidence("review continuation-start evidence is unavailable: " + err.Error())
+			}
+		}
+		defer func() {
+			s.mu.Lock()
+			finished := resumedReview.continuationFinished
+			s.mu.Unlock()
+			if !finished && resumedReview.evidence != nil {
+				_ = resumedReview.evidence.RecordContinuationFinished("failed")
+			}
+		}()
 	}
 	provenanceData := s.servingProvenance()
 	eventPrefix := "codex_turn"
@@ -1413,6 +1487,7 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 		return GenerationResult{}, waitErr
 	}
 	var identity provenance.PlanningResponseIdentity
+	reviewYielded := false
 	if phase == "planning" {
 		s.mu.Lock()
 		evidence := s.planningEvidence
@@ -1423,10 +1498,18 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 			return GenerationResult{}, &GenerationWorkerError{Reason: "planning evidence is unavailable"}
 		}
 		var response *string
-		if responsePresent {
+		yielded := s.reviewYieldForTurn(threadID, turnID, phase)
+		if yielded != nil {
+			reviewYielded = true
+			response = yielded.proposal
+		} else if responsePresent {
 			response = &finalMessage
 		}
-		identity, err = s.completePlanningEvidence(evidence, status, response)
+		if yielded != nil && response != nil {
+			identity, err = s.recordPlanningYielded(evidence, *response)
+		} else {
+			identity, err = s.completePlanningEvidence(evidence, status, response)
+		}
 		if err != nil {
 			evidenceErr := s.failPlanningEvidence()
 			s.markUnhealthy()
@@ -1453,19 +1536,33 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	s.mu.Unlock()
 	terminalData := cloneMap(provenanceData)
 	terminalData["duration_seconds"] = nonNegativeSeconds(time.Since(startedAt))
-	terminalData["result"] = status
+	terminalResult := status
+	if reviewYielded {
+		terminalResult = "yielded"
+	}
+	terminalData["result"] = terminalResult
 	if phase == "planning" {
 		terminalData["response_bytes"] = identity.Size
 		terminalData["response_sha256"] = identity.SHA256
 	}
-	s.record(eventPrefix+"_"+status, terminalData)
+	s.record(eventPrefix+"_"+terminalResult, terminalData)
 	kind := observability.ActivityTurnCompleted
-	if status != "completed" {
+	if status != "completed" || reviewYielded {
 		kind = observability.ActivityTurnInterrupted
 	}
 	s.publish(kind, map[string]any{
 		"turn_number": turnNumber, "turn_phase": phase, "status": status,
 	}, threadID, turnID, "")
+	if resumedReview != nil {
+		if resumedReview.evidence != nil {
+			if err := resumedReview.evidence.RecordContinuationFinished(status); err != nil {
+				s.degradeReviewEvidence("review continuation-finish evidence is unavailable: " + err.Error())
+			}
+		}
+		s.mu.Lock()
+		resumedReview.continuationFinished = true
+		s.mu.Unlock()
+	}
 	s.clearTurn(status)
 	result := GenerationResult{
 		TurnStatus:   status,
@@ -1629,11 +1726,20 @@ func (s *GenerationSession) InterruptTurn(timeout ...time.Duration) error {
 		return &GenerationWorkerError{Reason: "Codex interrupt timeout must not be negative"}
 	}
 	deadline := time.Now().Add(limit)
+	s.mu.Lock()
+	reviewState := s.reviewYieldState
+	if reviewState != ReviewYieldIdle {
+		s.reviewPauseRequested = true
+		if s.initialActive {
+			s.stopBeforeImplementation = true
+		}
+	}
+	s.mu.Unlock()
 	s.cancelReview()
 	var server *codexapp.CodexAppServer
 	var threadID, turnID string
 	var initialActive, turnStarting bool
-	var initialDone, turnDone, toolIdle chan struct{}
+	var initialDone, turnDone, toolIdle, reviewDone chan struct{}
 	var turnCancel context.CancelFunc
 	for {
 		s.mu.Lock()
@@ -1646,6 +1752,7 @@ func (s *GenerationSession) InterruptTurn(timeout ...time.Duration) error {
 		turnCancel = s.turnCancel
 		turnDone = s.turnDone
 		toolIdle = s.toolIdle
+		reviewDone = s.reviewDone
 		s.mu.Unlock()
 		if !pending {
 			break
@@ -1653,6 +1760,18 @@ func (s *GenerationSession) InterruptTurn(timeout ...time.Duration) error {
 		if !waitUntil(admissionDone, deadline) {
 			return s.retireAfterInterruptFailure(&GenerationWorkerError{Reason: "Codex interview turn admission did not finish before timeout"}, nil)
 		}
+	}
+	if reviewState != ReviewYieldIdle && reviewState != ReviewYieldResuming {
+		if !waitUntil(turnDone, deadline) {
+			return s.retireAfterInterruptFailure(&GenerationWorkerError{Reason: "review origin did not stop before timeout"}, turnCancel)
+		}
+		if !waitUntil(toolIdle, deadline) {
+			return s.retireAfterInterruptFailure(&GenerationWorkerError{Reason: "review origin tool callback did not quiesce before timeout"}, turnCancel)
+		}
+		if !waitUntil(reviewDone, deadline) {
+			return s.retireAfterInterruptFailure(&GenerationWorkerError{Reason: "Codex reviewer did not quiesce before timeout"}, turnCancel)
+		}
+		return nil
 	}
 	if turnID == "" && (initialActive || turnStarting) {
 		s.mu.Lock()
@@ -1759,6 +1878,7 @@ func (s *GenerationSession) Close() error {
 	turnCancel := s.turnCancel
 	turnDone := s.turnDone
 	toolIdle := s.toolIdle
+	reviewDone := s.reviewDone
 	initialDone := s.initialDone
 	startDone := s.startDone
 	startCancel := s.startCancel
@@ -1766,6 +1886,7 @@ func (s *GenerationSession) Close() error {
 	closeGenerationChannel(s.turnReady)
 	server := s.server
 	threadID := s.threadID
+	turnID := s.turnID
 	started := s.started
 	s.server = nil
 	s.startServer = nil
@@ -1810,6 +1931,9 @@ func (s *GenerationSession) Close() error {
 			err = shutdownErr
 		}
 	}
+	for released := s.dynamicCalls.releaseUnstarted(threadID, turnID); released > 0; released-- {
+		s.finishDynamicToolHandler()
+	}
 	if !waitUntil(startDone, deadline) && err == nil {
 		err = &GenerationWorkerError{Reason: "Codex app-server start did not stop before session close timeout"}
 	}
@@ -1821,6 +1945,9 @@ func (s *GenerationSession) Close() error {
 	}
 	if !waitUntil(toolIdle, deadline) && err == nil {
 		err = &GenerationWorkerError{Reason: "Codex dynamic tool call did not quiesce before session close timeout"}
+	}
+	if !waitUntil(reviewDone, deadline) && err == nil {
+		err = &GenerationWorkerError{Reason: "Codex reviewer did not quiesce before session close timeout"}
 	}
 	err = combineGenerationErrors(err, s.failPlanningEvidence())
 	s.mu.Lock()
@@ -1837,6 +1964,11 @@ func (s *GenerationSession) Close() error {
 	s.initialDone = closedChannel()
 	s.turnDone = closedChannel()
 	s.toolIdle = closedChannel()
+	s.pendingReview = nil
+	s.activeReviewResume = nil
+	s.reviewYieldState = ReviewYieldIdle
+	s.reviewCancel = nil
+	s.reviewDone = nil
 	serviceTierName := s.serviceTierName
 	s.mu.Unlock()
 	if started {
@@ -1875,7 +2007,11 @@ func (s *GenerationSession) finishInterviewAdmissionLocked(done chan struct{}) {
 func (s *GenerationSession) cancelReview() {
 	s.mu.Lock()
 	reviewer := s.activeReviewer
+	cancel := s.reviewCancel
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if reviewer != nil {
 		reviewer.Cancel()
 	}
@@ -1907,6 +2043,10 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 	}
 	routing := s.dynamicCalls.ensure(message, threadID, turnID, turnPhase)
 	defer s.dynamicCalls.finishHandler(routing)
+	startedHandler := routing != nil && s.dynamicCalls.startHandler(routing)
+	if startedHandler {
+		defer s.finishDynamicToolHandler()
+	}
 	if server == nil || threadID == "" || turnID == "" {
 		if server == nil {
 			s.dynamicCalls.finish(routing, "rejected", "")
@@ -1917,43 +2057,62 @@ func (s *GenerationSession) handleServerRequest(message map[string]any) {
 		}
 		return
 	}
+	if !startedHandler {
+		if server != nil {
+			_ = server.RejectServerRequest(message)
+		}
+		return
+	}
 	s.mu.Lock()
 	// Close clears the owned server while holding the same mutex. Revalidate
 	// the captured turn before registering the callback so Close either sees
 	// and joins this callback or prevents it from starting.
-	if s.closed || !s.turnAcceptingTools || s.server != server || s.threadID != threadID || s.turnID != turnID {
+	pendingReview := s.pendingReview
+	admittedReview := isReviewToolCall(message["params"]) && pendingReview != nil && pendingReview.routing == routing
+	if s.closed || (!s.turnAcceptingTools && !admittedReview) || s.server != server || s.threadID != threadID || s.turnID != turnID {
 		s.mu.Unlock()
 		if routing == nil || s.dynamicCalls.finish(routing, "rejected", "") {
 			_ = server.RejectServerRequest(message)
 		}
 		return
 	}
-	if routing != nil && !s.dynamicCalls.mayWrite(routing, threadID, turnID, turnPhase, false) {
+	if routing != nil && !admittedReview && !s.dynamicCalls.mayWrite(routing, threadID, turnID, turnPhase, false) {
 		s.mu.Unlock()
 		if s.dynamicCalls.finish(routing, "rejected", "") {
 			_ = server.RejectServerRequest(message)
 		}
 		return
 	}
-	s.activeTools++
-	if s.activeTools == 1 {
-		s.toolIdle = make(chan struct{})
-	}
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.activeTools--
-		if s.activeTools == 0 {
-			select {
-			case <-s.toolIdle:
-			default:
-				close(s.toolIdle)
-			}
-		}
-		s.mu.Unlock()
-	}()
 	var response map[string]any
-	if interview {
+	if !interview && isReviewToolCall(message["params"]) {
+		activityData := map[string]any{"namespace": nil, "tool": "review"}
+		callID := activityCallID(message["params"])
+		yield := s.reviewYieldForTurn(threadID, turnID, turnPhase)
+		var err error
+		if yield == nil {
+			yield, err = s.beginReviewYield(message, routing, threadID, turnID, turnPhase)
+		}
+		if err != nil {
+			message := "Bridge error: " + boundedGenerationError(err)
+			s.publishWithItem(observability.ActivityToolStarted, activityData, threadID, turnID, callID)
+			s.publishWithItem(observability.ActivityToolFailed, mergeMaps(activityData, map[string]any{"success": false, "error": boundedGenerationError(err)}), threadID, turnID, callID)
+			response = map[string]any{"contentItems": []map[string]any{{"type": "inputText", "text": message}}, "success": false}
+		} else {
+			_ = server.RejectServerRequest(message)
+			limit := s.options.StopTimeout
+			if limit <= 0 {
+				limit = DefaultInterruptTimeout
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			err = server.InterruptTurn(ctx, threadID, turnID)
+			cancel()
+			if err != nil {
+				s.record("review_origin_interrupt_failed", s.dynamicCalls.identity(routing))
+			}
+			return
+		}
+	} else if interview {
 		response = s.interviewToolDenial(message["params"], threadID, turnID)
 	} else {
 		response = s.dynamicToolResponse(message["params"], threadID, turnID, planning, routing)
@@ -2019,6 +2178,14 @@ func (s *GenerationSession) recordServerRequestQueued(message map[string]any) {
 		s.mu.Unlock()
 	}
 	routing := s.dynamicCalls.ensure(message, threadID, turnID, phase)
+	if s.dynamicCalls.reserveHandler(routing) {
+		s.mu.Lock()
+		s.activeTools++
+		if s.activeTools == 1 {
+			s.toolIdle = make(chan struct{})
+		}
+		s.mu.Unlock()
+	}
 	queued := map[string]any{"tool": tool}
 	if phase != "" {
 		queued["turn_phase"] = phase
@@ -2027,6 +2194,22 @@ func (s *GenerationSession) recordServerRequestQueued(message map[string]any) {
 		queued = mergeMaps(queued, s.dynamicCalls.identity(routing))
 	}
 	s.record("tool_app_server_queued", queued)
+	if isReviewToolCall(message["params"]) && routing != nil {
+		if yield, err := s.beginReviewYield(message, routing, threadID, turnID, phase); err == nil {
+			s.dynamicCalls.finish(yield.routing, "yielded", "")
+		}
+	}
+}
+
+func (s *GenerationSession) finishDynamicToolHandler() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeTools > 0 {
+		s.activeTools--
+	}
+	if s.activeTools == 0 {
+		closeGenerationChannel(s.toolIdle)
+	}
 }
 
 func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID string, planning bool, routing *dynamicCallRouting) map[string]any {
@@ -2062,8 +2245,7 @@ func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID str
 			return guest.ToolResult{}, "", fmt.Errorf("%s is unavailable during the planning phase; persistent guest/runtime changes and generation completion begin with the implementation turn", tool)
 		}
 		if namespace == nil && tool == "review" {
-			result, err := s.runReview(arguments, s.dynamicCalls.identity(routing))
-			return guest.ToolResult{}, result, err
+			return guest.ToolResult{}, "", errors.New("review request did not enter the turn-yield boundary")
 		}
 		if !namespaceIsString || namespaceName != "codexos" {
 			return guest.ToolResult{}, "", errors.New("unsupported dynamic tool namespace")
@@ -2086,17 +2268,10 @@ func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID str
 		}
 		return result, "", err
 	}
-	result, review, err := try()
+	result, _, err := try()
 	if err != nil {
 		s.publishWithItem(observability.ActivityToolFailed, mergeMaps(activityData, map[string]any{"success": false, "error": boundedGenerationError(err)}), threadID, turnID, callID)
 		return map[string]any{"contentItems": []map[string]any{{"type": "inputText", "text": "Bridge error: " + boundedGenerationError(err)}}, "success": false}
-	}
-	if values, valuesOK := params.(map[string]any); valuesOK {
-		tool, _ := values["tool"].(string)
-		if values["namespace"] == nil && tool == "review" {
-			s.publishWithItem(observability.ActivityToolCompleted, mergeMaps(activityData, map[string]any{"success": true, "result": review}), threadID, turnID, callID)
-			return map[string]any{"contentItems": []map[string]any{{"type": "inputText", "text": review}}, "success": true}
-		}
 	}
 	tool := durableTool
 	metadata := durableMetadata
@@ -2282,62 +2457,6 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 	}
 }
 
-func (s *GenerationSession) runReview(arguments map[string]any, origin map[string]any) (string, error) {
-	if err := checkGenerationFields(arguments, nil, map[string]struct{}{"request": {}, "focus": {}}); err != nil {
-		return "", err
-	}
-	focus := "general"
-	if value, ok := arguments["focus"]; ok {
-		var valid bool
-		focus, valid = value.(string)
-		if _, exists := reviewFocuses[focus]; !valid || !exists {
-			return "", errors.New("unsupported review focus")
-		}
-	}
-	var request *string
-	if value, ok := arguments["request"]; ok {
-		text, valid := value.(string)
-		if !valid {
-			return "", errors.New("review request must be a string")
-		}
-		if !utf8.ValidString(text) {
-			return "", errors.New("review request is not valid UTF-8")
-		}
-		if len([]byte(text)) > maxReviewRequestBytes {
-			return "", errors.New("review request exceeds 8 KiB")
-		}
-		request = &text
-	}
-	objective := s.options.Objective
-	reviewerRuntime := generationReviewRuntime{GenerationRuntime: s.runtime}
-	reviewer := NewReviewWorker(ReviewWorkerOptions{
-		Executable:     s.options.ReviewerExecutable,
-		AuthFile:       s.options.ReviewerAuthFile,
-		ActivityStream: s.options.ActivityStream,
-		StopTimeout:    s.options.StopTimeout,
-	})
-	s.mu.Lock()
-	s.activeReviewer = reviewer
-	ctx := s.runCtx
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		if s.activeReviewer == reviewer {
-			s.activeReviewer = nil
-		}
-		s.mu.Unlock()
-	}()
-	result, err := reviewer.RunReview(ctx, reviewerRuntime, ReviewOptions{
-		Objective: objective, Focus: focus, Request: request,
-		Model:            s.options.ReviewerModel,
-		ReasoningEffort:  s.options.ReviewerReasoningEffort,
-		ReasoningSummary: s.options.ReviewerReasoningSummary,
-		ServiceTier:      s.options.ReviewerServiceTier,
-		Origin:           origin,
-	})
-	return result, err
-}
-
 type generationReviewRuntime struct{ GenerationRuntime }
 
 func (r generationReviewRuntime) ReviewRunning() bool { return r.GenerationRunning() }
@@ -2474,6 +2593,12 @@ func (s *GenerationSession) completePlanningEvidence(evidence *provenance.Planni
 	s.planningEvidenceMu.Lock()
 	defer s.planningEvidenceMu.Unlock()
 	return evidence.Complete(outcome, response)
+}
+
+func (s *GenerationSession) recordPlanningYielded(evidence *provenance.PlanningEvidence, proposal string) (provenance.PlanningResponseIdentity, error) {
+	s.planningEvidenceMu.Lock()
+	defer s.planningEvidenceMu.Unlock()
+	return evidence.RecordYielded(proposal)
 }
 
 func (s *GenerationSession) recordPlanningRetryableFailure(evidence *provenance.PlanningEvidence) error {
@@ -2756,8 +2881,9 @@ func dynamicToolNamespaceInOrder(selected map[string]struct{}, order []string) m
 
 func reviewDynamicFunction() map[string]any {
 	return dynamicFunction("review", reviewToolDescription, map[string]any{
-		"request": map[string]any{"type": "string"},
-		"focus":   map[string]any{"type": "string", "enum": []string{"general", "correctness", "design", "security", "performance"}, "default": "general"},
+		"request":  map[string]any{"type": "string"},
+		"proposal": map[string]any{"type": "string", "description": "The exact proposed plan or change to review. Required during planning."},
+		"focus":    map[string]any{"type": "string", "enum": []string{"general", "correctness", "design", "security", "performance"}, "default": "general"},
 	}, nil)
 }
 

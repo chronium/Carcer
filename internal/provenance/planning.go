@@ -177,6 +177,41 @@ func (e *PlanningEvidence) Complete(outcome string, response *string) (PlanningR
 	return identity, nil
 }
 
+// RecordYielded records the exact proposed plan from a review boundary as an
+// incomplete attempt. It cannot publish response.txt or complete planning;
+// only the later trusted continuation may do that.
+func (e *PlanningEvidence) RecordYielded(proposal string) (PlanningResponseIdentity, error) {
+	if !utf8.ValidString(proposal) {
+		return PlanningResponseIdentity{}, fmt.Errorf("planning proposal must be valid UTF-8")
+	}
+	activeAttempt, err := e.activeAttempt()
+	if err != nil {
+		return PlanningResponseIdentity{}, err
+	}
+	encoded := []byte(proposal)
+	digest := sha256.Sum256(encoded)
+	identity := PlanningResponseIdentity{SHA256: hex.EncodeToString(digest[:]), Size: uint64(len(encoded))}
+	responseFile := fmt.Sprintf("attempt-%04d-proposal.txt", activeAttempt.Attempt)
+	if err := writePlanningBytes(filepath.Join(e.directory, responseFile), encoded); err != nil {
+		return PlanningResponseIdentity{}, err
+	}
+	candidate := e.manifest
+	candidate.Attempts = append([]planningAttempt(nil), e.manifest.Attempts...)
+	attempt := &candidate.Attempts[len(candidate.Attempts)-1]
+	attempt.Outcome = "yielded_for_review"
+	attempt.ResponseBytes = uint64Pointer(identity.Size)
+	attempt.ResponseFile = responseFile
+	attempt.ResponsePresent = boolPointer(true)
+	attempt.ResponseSHA256 = identity.SHA256
+	candidate.Stage = "awaiting_resume"
+	candidate.Outcome = "incomplete"
+	if err := writePlanningJSON(filepath.Join(e.directory, "manifest.json"), candidate); err != nil {
+		return PlanningResponseIdentity{}, err
+	}
+	e.manifest = candidate
+	return identity, nil
+}
+
 func (e *PlanningEvidence) Fail() error {
 	if e.manifest.Outcome == "completed" || e.manifest.Outcome == "failed" {
 		return nil
