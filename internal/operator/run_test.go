@@ -4,20 +4,147 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"codexos/internal/experiment"
+	"codexos/internal/guest"
 	"codexos/internal/observability"
 	"codexos/internal/qemu"
 	"codexos/internal/store"
+	"codexos/internal/tui"
 )
+
+type blockedGuestStatusRuntime struct {
+	*consoleTestRuntime
+	operationMu         sync.Mutex
+	exchangeStarted     chan struct{}
+	featureReadAttempts atomic.Int32
+}
+
+func (r *blockedGuestStatusRuntime) InvokeTool(ctx context.Context, _ string, arguments [][]byte) (guest.ToolResult, error) {
+	r.operationMu.Lock()
+	defer r.operationMu.Unlock()
+	if len(arguments) != 1 || len(arguments[0]) < 256*1024 {
+		return guest.ToolResult{}, errors.New("blocked exchange fixture requires a large payload")
+	}
+	close(r.exchangeStarted)
+	<-ctx.Done()
+	return guest.ToolResult{}, ctx.Err()
+}
+
+func (r *blockedGuestStatusRuntime) FeatureRequests() ([]store.FeatureRequest, error) {
+	r.featureReadAttempts.Add(1)
+	r.operationMu.Lock()
+	defer r.operationMu.Unlock()
+	return r.consoleTestRuntime.FeatureRequests()
+}
+
+func TestTUIStatusAndInteractionRemainResponsiveDuringBlockedGuestExchange(t *testing.T) {
+	runtime := &blockedGuestStatusRuntime{
+		consoleTestRuntime: newConsoleTestRuntime(t),
+		exchangeStarted:    make(chan struct{}),
+	}
+	runtime.features = []store.FeatureRequest{{ID: 1, Generation: 12, Status: store.FeaturePending}}
+	var output bytes.Buffer
+	console, err := newPlainConsole(runtime, PlainConsoleOptions{Input: strings.NewReader(""), Output: &output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = console.Shutdown() })
+
+	cancelExchange := func() {}
+	app, err := tui.NewApplication(tui.ApplicationOptions{
+		Status:        func() tui.StatusSnapshot { return tuiStatus(console) },
+		StartupOutput: strings.Repeat("historical guest activity remains scrollable\n", 40),
+		ActivityPoll:  time.Hour,
+		StatusPoll:    time.Hour,
+		Execute: func(_ context.Context, command string, _ tui.ConfirmationFunc) (tui.CommandResult, error) {
+			if command != "pause" {
+				return tui.CommandResult{}, fmt.Errorf("unexpected responsive TUI command %q", command)
+			}
+			cancelExchange()
+			return tui.CommandResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	app.Init()
+	app.Update(tea.WindowSizeMsg{Width: 48, Height: 12})
+
+	exchangeContext, cancel := context.WithCancel(context.Background())
+	cancelExchange = cancel
+	defer cancelExchange()
+	exchangeDone := make(chan error, 1)
+	go func() {
+		_, invokeErr := runtime.InvokeTool(exchangeContext, "write", [][]byte{make([]byte, 256*1024)})
+		exchangeDone <- invokeErr
+	}()
+	select {
+	case <-runtime.exchangeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("large guest exchange did not block")
+	}
+
+	responsive := make(chan struct{})
+	go func() {
+		for range 20 {
+			app.SetStatus(tuiStatus(console))
+			_ = app.View()
+		}
+		app.Update(tea.KeyPressMsg(tea.Key{Text: "x", Code: 'x'}))
+		app.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyPgUp}))
+		close(responsive)
+	}()
+	select {
+	case <-responsive:
+	case <-time.After(500 * time.Millisecond):
+		cancelExchange()
+		<-exchangeDone
+		select {
+		case <-responsive:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("status polling or TUI interaction blocked behind the guest exchange")
+	}
+	if got := app.Input(); got != "x" {
+		t.Fatalf("input during guest exchange = %q", got)
+	}
+	if app.FollowState().Following {
+		t.Fatal("scrolling during guest exchange did not leave live-tail mode")
+	}
+	if runtime.featureReadAttempts.Load() != 0 {
+		t.Fatalf("status polling entered serialized FeatureRequests %d times", runtime.featureReadAttempts.Load())
+	}
+
+	if _, command := app.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})); command != nil {
+		t.Fatal("first Escape unexpectedly issued cancellation")
+	}
+	_, command := app.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if command == nil {
+		t.Fatal("second Escape did not issue the advertised cancellation command")
+	}
+	app.Update(command())
+	select {
+	case invokeErr := <-exchangeDone:
+		if !errors.Is(invokeErr, context.Canceled) {
+			t.Fatalf("cancelled guest exchange error = %v", invokeErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("guest exchange cancellation was not responsive")
+	}
+}
 
 func TestRunnerStartsPausesAndAbortsDisposableGeneration(t *testing.T) {
 	qemuExecutable := buildDisposableRunnerQEMU(t)

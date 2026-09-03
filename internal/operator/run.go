@@ -330,21 +330,16 @@ func normalizeTUIRunError(ctx context.Context, err error) error {
 
 func tuiStatus(console *PlainConsole) tui.StatusSnapshot {
 	agentName, phase := console.CodexActivity()
+	runtime := console.runtime.PresentationSnapshot()
 	status := tui.StatusSnapshot{
-		RunName:      filepath.Base(console.runtime.RunDirectory()),
-		RuntimeState: runtimeStateName(console.runtime.State()),
-		SolState:     console.CodexTurnState(),
-		ActiveAgent:  agentName,
-		ActivePhase:  phase,
-	}
-	status.Generation, status.HasGeneration = console.runtime.GenerationNumber()
-	requests, err := console.runtime.FeatureRequests()
-	if err == nil {
-		for _, request := range requests {
-			if request.Status == store.FeaturePending {
-				status.PendingFeatures++
-			}
-		}
+		RunName:         filepath.Base(runtime.RunDirectory),
+		Generation:      runtime.Generation,
+		HasGeneration:   runtime.HasGeneration,
+		RuntimeState:    runtimeStateName(runtime.State),
+		SolState:        console.CodexTurnState(),
+		ActiveAgent:     agentName,
+		ActivePhase:     phase,
+		PendingFeatures: runtime.PendingFeatureRequests,
 	}
 	switch console.ExitInterviewState() {
 	case "available":

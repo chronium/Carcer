@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,15 +45,16 @@ type liveRun struct {
 	context     context.Context
 	cancel      context.CancelFunc
 
-	options      LiveRunOptions
-	featureStore *store.FeatureRequestStore
-	provenance   *provenance.BuildReviewProvenance
-	bootstrap    *store.CrossRunBootstrap
-	provided     *store.ProvidedAssets
-	assetsReady  bool
-	generation   *liveGeneration
-	closed       bool
-	started      bool
+	options         LiveRunOptions
+	featureStore    *store.FeatureRequestStore
+	provenance      *provenance.BuildReviewProvenance
+	bootstrap       *store.CrossRunBootstrap
+	provided        *store.ProvidedAssets
+	assetsReady     bool
+	pendingFeatures atomic.Int64
+	generation      *liveGeneration
+	closed          bool
+	started         bool
 }
 
 type liveGeneration struct {
@@ -110,17 +112,18 @@ func NewLiveCodexOSRun(runDirectory string, options LiveRunOptions) (*CodexOSRun
 		options: options, featureStore: features, provenance: forensics, bootstrap: bootstrap,
 		context: liveContext, cancel: cancelLive,
 	}
+	requests, requestErr := features.Requests()
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	pending := 0
+	for _, request := range requests {
+		if request.Status == store.FeaturePending {
+			pending++
+		}
+	}
+	run.live.pendingFeatures.Store(int64(pending))
 	if options.Metrics != nil {
-		requests, requestErr := features.Requests()
-		if requestErr != nil {
-			return nil, requestErr
-		}
-		pending := 0
-		for _, request := range requests {
-			if request.Status == store.FeaturePending {
-				pending++
-			}
-		}
 		options.Metrics.SetFeatureRequestsPending(pending)
 	}
 	return run, nil
@@ -285,15 +288,16 @@ func (r *CodexOSRun) decideFeatureRequest(requestID uint64, approve bool) (store
 	r.recordLive(event, &generation, map[string]any{
 		"request_id": request.ID, "request_generation": request.Generation,
 	})
-	if r.live.options.Metrics != nil {
-		requests, requestErr := r.live.featureStore.Requests()
-		if requestErr == nil {
-			pending := 0
-			for _, item := range requests {
-				if item.Status == store.FeaturePending {
-					pending++
-				}
+	requests, requestErr := r.live.featureStore.Requests()
+	if requestErr == nil {
+		pending := 0
+		for _, item := range requests {
+			if item.Status == store.FeaturePending {
+				pending++
 			}
+		}
+		r.live.pendingFeatures.Store(int64(pending))
+		if r.live.options.Metrics != nil {
 			r.live.options.Metrics.SetFeatureRequestsPending(pending)
 		}
 	}
@@ -520,7 +524,8 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	generation.hostServices, err = build.NewCodexOSHostServices(build.HostServicesConfig{
 		StagingDirectory: filepath.Join(workspace, "builds"), CandidateValidator: validator,
 		BuildConfig: options.BuildConfig, FeatureRequestStore: r.live.featureStore,
-		Generation: &number, EventLog: options.EventLog, Metrics: options.Metrics,
+		FeatureRecorded: func() { r.live.pendingFeatures.Add(1) },
+		Generation:      &number, EventLog: options.EventLog, Metrics: options.Metrics,
 		ActivityStream: options.ActivityStream, ProvidedAssets: r.live.provided, Provenance: r.live.provenance,
 	})
 	if err != nil {

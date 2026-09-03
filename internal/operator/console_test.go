@@ -104,6 +104,18 @@ func (r *consoleTestRuntime) FeatureRequests() ([]store.FeatureRequest, error) {
 	return append([]store.FeatureRequest(nil), r.features...), nil
 }
 
+func (r *consoleTestRuntime) PresentationSnapshot() experiment.RunPresentationSnapshot {
+	snapshot := r.operatorTestRuntime.PresentationSnapshot()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, request := range r.features {
+		if request.Status == store.FeaturePending {
+			snapshot.PendingFeatureRequests++
+		}
+	}
+	return snapshot
+}
+
 func (r *consoleTestRuntime) FeatureRequest(requestID uint64) (store.FeatureRequest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

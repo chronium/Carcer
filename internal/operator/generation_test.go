@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"codexos/internal/agent"
+	"codexos/internal/experiment"
 	"codexos/internal/guest"
 	"codexos/internal/observability"
 )
@@ -58,6 +59,15 @@ func (r *operatorTestRuntime) GenerationState() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state
+}
+
+func (r *operatorTestRuntime) PresentationSnapshot() experiment.RunPresentationSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return experiment.RunPresentationSnapshot{
+		RunDirectory: r.root, State: experiment.RuntimeState(r.state),
+		Generation: r.generation, HasGeneration: true,
+	}
 }
 
 func (r *operatorTestRuntime) ListTools(ctx context.Context) ([]string, error) {

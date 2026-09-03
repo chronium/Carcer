@@ -31,6 +31,7 @@ type consoleRuntime interface {
 	FeatureRequest(uint64) (store.FeatureRequest, error)
 	ApproveFeatureRequest(uint64) (store.FeatureRequest, error)
 	DenyFeatureRequest(uint64) (store.FeatureRequest, error)
+	PresentationSnapshot() experiment.RunPresentationSnapshot
 }
 
 var _ consoleRuntime = (*experiment.CodexOSRun)(nil)

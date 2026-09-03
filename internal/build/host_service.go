@@ -357,6 +357,7 @@ type HostServicesConfig struct {
 	CandidateValidator  *CandidateBootValidator
 	BuildConfig         Config
 	FeatureRequestStore *store.FeatureRequestStore
+	FeatureRecorded     func()
 	Generation          *uint64
 	EventLog            *observability.EventLog
 	Metrics             *observability.Metrics
@@ -368,13 +369,14 @@ type HostServicesConfig struct {
 // CodexOSHostServices dispatches the concrete host services used by the seed
 // guest. Its finish state is session-local and is never inferred from files.
 type CodexOSHostServices struct {
-	buildService   *BuildHostService
-	pendingFinish  *PendingGenerationFinish
-	featureStore   *store.FeatureRequestStore
-	generation     *uint64
-	eventLog       *observability.EventLog
-	metrics        *observability.Metrics
-	providedAssets *store.ProvidedAssets
+	buildService    *BuildHostService
+	pendingFinish   *PendingGenerationFinish
+	featureStore    *store.FeatureRequestStore
+	featureRecorded func()
+	generation      *uint64
+	eventLog        *observability.EventLog
+	metrics         *observability.Metrics
+	providedAssets  *store.ProvidedAssets
 }
 
 // NewCodexOSHostServices creates the synchronous host-service dispatcher.
@@ -394,12 +396,13 @@ func NewCodexOSHostServices(config HostServicesConfig) (*CodexOSHostServices, er
 		return nil, err
 	}
 	return &CodexOSHostServices{
-		buildService:   buildService,
-		featureStore:   config.FeatureRequestStore,
-		generation:     cloneGeneration(config.Generation),
-		eventLog:       config.EventLog,
-		metrics:        config.Metrics,
-		providedAssets: config.ProvidedAssets,
+		buildService:    buildService,
+		featureStore:    config.FeatureRequestStore,
+		featureRecorded: config.FeatureRecorded,
+		generation:      cloneGeneration(config.Generation),
+		eventLog:        config.EventLog,
+		metrics:         config.Metrics,
+		providedAssets:  config.ProvidedAssets,
 	}, nil
 }
 
@@ -510,6 +513,9 @@ func (s *CodexOSHostServices) requestFeature(request guest.HostRequest) (guest.F
 	recorded, err := s.featureStore.Create(*s.generation, string(titleBytes), string(descriptionBytes))
 	if err != nil {
 		return finishResponse(request, FeatureResponseHarnessFailure, boundedFeatureDiagnostic(err.Error()))
+	}
+	if s.featureRecorded != nil {
+		s.featureRecorded()
 	}
 	data := map[string]any{
 		"request_id":         recorded.ID,
