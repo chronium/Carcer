@@ -241,10 +241,6 @@ type GenerationResult struct {
 	Summary      string
 }
 
-// CodexGenerationResult is retained as the descriptive name used by the
-// Python worker and by callers migrating from it.
-type CodexGenerationResult = GenerationResult
-
 // GenerationSessionMode describes the lifetime of a generation session.
 type GenerationSessionMode string
 
@@ -280,10 +276,6 @@ func (e *GenerationWorkerError) Unwrap() error {
 	}
 	return e.Err
 }
-
-// CodexGenerationWorkerError is the compatibility spelling used by the
-// Python implementation.
-type CodexGenerationWorkerError = GenerationWorkerError
 
 type planningDynamicCallLifecycleError struct{}
 
@@ -457,15 +449,8 @@ type GenerationWorker struct {
 	running bool
 }
 
-// CodexGenerationWorker retains the Python owner's descriptive name.
-type CodexGenerationWorker = GenerationWorker
-
 func NewGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
 	return &GenerationWorker{options: options}
-}
-
-func NewCodexGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
-	return NewGenerationWorker(options)
 }
 
 func (w *GenerationWorker) RunGeneration(ctx context.Context, runtime GenerationRuntime) (result GenerationResult, resultErr error) {
