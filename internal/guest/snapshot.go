@@ -1,8 +1,11 @@
 package guest
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -18,17 +21,65 @@ type SnapshotFile struct {
 	Content []byte
 }
 
+// SourceSnapshot is one validated, immutable source snapshot. It retains the
+// exact framing supplied by the guest while exposing independently copied
+// files and the identity used by review and build evidence.
+type SourceSnapshot struct {
+	encoded []byte
+	files   []SnapshotFile
+	sha256  string
+}
+
 type SourceSnapshotError struct {
 	Reason string
 }
 
 func (e *SourceSnapshotError) Error() string { return e.Reason }
 
-func EncodeSourceSnapshot(files []SnapshotFile) ([]byte, error) {
+// NewSourceSnapshot validates and frames files in their supplied order.
+func NewSourceSnapshot(files []SnapshotFile) (SourceSnapshot, error) {
 	if err := validateSnapshotFiles(files); err != nil {
+		return SourceSnapshot{}, err
+	}
+	files = cloneSnapshotFiles(files)
+	encoded := encodeSnapshotFiles(files)
+	return sourceSnapshot(encoded, files), nil
+}
+
+// NewCanonicalSourceSnapshot orders selected source paths before framing.
+func NewCanonicalSourceSnapshot(files []SnapshotFile) (SourceSnapshot, error) {
+	files = cloneSnapshotFiles(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return NewSourceSnapshot(files)
+}
+
+// ParseSourceSnapshot validates framing while retaining its exact bytes and
+// file order. Incoming build snapshots are not silently rewritten.
+func ParseSourceSnapshot(data []byte) (SourceSnapshot, error) {
+	files, err := decodeSnapshotFiles(data)
+	if err != nil {
+		return SourceSnapshot{}, err
+	}
+	return sourceSnapshot(append([]byte(nil), data...), files), nil
+}
+
+func (s SourceSnapshot) Bytes() []byte { return append([]byte(nil), s.encoded...) }
+
+func (s SourceSnapshot) Files() []SnapshotFile { return cloneSnapshotFiles(s.files) }
+
+func (s SourceSnapshot) SHA256() string { return s.sha256 }
+
+func (s SourceSnapshot) Size() uint64 { return uint64(len(s.encoded)) }
+
+func EncodeSourceSnapshot(files []SnapshotFile) ([]byte, error) {
+	snapshot, err := NewSourceSnapshot(files)
+	if err != nil {
 		return nil, err
 	}
+	return snapshot.Bytes(), nil
+}
 
+func encodeSnapshotFiles(files []SnapshotFile) []byte {
 	size := 2
 	for _, file := range files {
 		size += 2 + len(file.Path) + 4 + len(file.Content)
@@ -46,10 +97,18 @@ func EncodeSourceSnapshot(files []SnapshotFile) ([]byte, error) {
 		copy(encoded[offset:], file.Content)
 		offset += len(file.Content)
 	}
-	return encoded, nil
+	return encoded
 }
 
 func DecodeSourceSnapshot(data []byte) ([]SnapshotFile, error) {
+	snapshot, err := ParseSourceSnapshot(data)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Files(), nil
+}
+
+func decodeSnapshotFiles(data []byte) ([]SnapshotFile, error) {
 	offset := 0
 	take := func(length int) ([]byte, error) {
 		if length < 0 || length > len(data)-offset {
@@ -112,6 +171,19 @@ func DecodeSourceSnapshot(data []byte) ([]SnapshotFile, error) {
 	return files, nil
 }
 
+func sourceSnapshot(encoded []byte, files []SnapshotFile) SourceSnapshot {
+	digest := sha256.Sum256(encoded)
+	return SourceSnapshot{encoded: encoded, files: files, sha256: hex.EncodeToString(digest[:])}
+}
+
+func cloneSnapshotFiles(files []SnapshotFile) []SnapshotFile {
+	cloned := make([]SnapshotFile, len(files))
+	for index, file := range files {
+		cloned[index] = SnapshotFile{Path: file.Path, Content: append([]byte(nil), file.Content...)}
+	}
+	return cloned
+}
+
 func validateSnapshotFiles(files []SnapshotFile) error {
 	if len(files) > maxSnapshotFiles {
 		return &SourceSnapshotError{Reason: "source snapshot contains more than 128 files"}
@@ -119,7 +191,7 @@ func validateSnapshotFiles(files []SnapshotFile) error {
 	paths := make(map[string]struct{}, len(files))
 	totalContent := 0
 	for _, file := range files {
-		if err := validateSourcePath(file.Path); err != nil {
+		if err := ValidateSourcePath(file.Path); err != nil {
 			return err
 		}
 		if _, exists := paths[file.Path]; exists {
@@ -134,7 +206,7 @@ func validateSnapshotFiles(files []SnapshotFile) error {
 	return nil
 }
 
-func validateSourcePath(path string) error {
+func ValidateSourcePath(path string) error {
 	if !utf8.ValidString(path) {
 		return &SourceSnapshotError{Reason: "source path is not valid UTF-8"}
 	}
