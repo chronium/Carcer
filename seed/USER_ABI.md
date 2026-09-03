@@ -5,8 +5,10 @@ CXE2: a 24-byte header (`CXE2`, LE32 segment count, LE64 entry, zero LE64 reserv
 
 Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40000000, and page-aligned break after its image. `brk` growth is RW+NX. PIT scheduling preempts ring 3 and immutable-file copy windows; faults exit only that task.
 
-`int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8 arguments; UINT64_MAX failure.
+`int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 running, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz).
+5 spawn; 6 reap (0 running, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present.
 
 Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Zombies reserve slots until reap.
+
+Display info uses RDI=output and RSI=capacity. It fails for capacity<32 or an invalid destination; otherwise it writes and returns 32 bytes: LE32 size=32,width,height,pitch,format=1,zero[3]. Format 1 is XRGB8888. Present uses RDI source, RSI stride, RDX x, RCX y, R8 width, R9 height; rectangles are nonempty, in bounds, and prevalidated. The framebuffer is kernel-owned.
