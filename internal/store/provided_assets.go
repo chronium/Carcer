@@ -180,15 +180,6 @@ func (p *ProvidedAssets) Metadata() []ProvidedAssetMetadata {
 	return result
 }
 
-// ManifestObject returns the legacy exact-set manifest shape used by Python
-// fixtures. It is intentionally metadata-only.
-func (p *ProvidedAssets) ManifestObject() map[string]any {
-	return map[string]any{
-		"schema_version": providedAssetsLegacySchema,
-		"assets":         p.Metadata(),
-	}
-}
-
 // DescriptorBytes returns the deterministic guest-facing descriptor list.
 func (p *ProvidedAssets) DescriptorBytes() []byte {
 	if p == nil {

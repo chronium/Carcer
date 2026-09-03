@@ -416,15 +416,15 @@ func (r *CodexOSRun) CaptureReviewSource(ctx context.Context) ([]byte, error) {
 	}
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()
-	snapshot, err := guest.CaptureSourceSnapshot(operationContext, generation.toolClient.InvokeTool)
+	snapshot, err := guest.CaptureCanonicalSourceSnapshot(operationContext, generation.toolClient.InvokeTool)
 	if err != nil {
 		r.recordLive("review_source_snapshot_failed", &number, map[string]any{})
 		return nil, err
 	}
 	r.recordLive("review_source_snapshot_captured", &number, map[string]any{
-		"source_snapshot_sha256": sha256Hex(snapshot), "source_snapshot_bytes": len(snapshot),
+		"source_snapshot_sha256": snapshot.SHA256(), "source_snapshot_bytes": snapshot.Size(),
 	})
-	return snapshot, nil
+	return snapshot.Bytes(), nil
 }
 
 func (r *CodexOSRun) Pause(ctx context.Context) error {

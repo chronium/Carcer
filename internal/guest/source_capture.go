@@ -14,18 +14,28 @@ import (
 // read while the caller owns whatever serialization boundary protects the
 // mutable source. A successful short read establishes EOF.
 func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, string, [][]byte) (ToolResult, error)) ([]byte, error) {
-	if ctx == nil || invoke == nil {
-		return nil, errors.New("source snapshot capture is unavailable")
-	}
-	listed, err := invoke(ctx, "list", [][]byte{[]byte("seed/")})
+	snapshot, err := CaptureCanonicalSourceSnapshot(ctx, invoke)
 	if err != nil {
 		return nil, err
 	}
+	return snapshot.Bytes(), nil
+}
+
+// CaptureCanonicalSourceSnapshot obtains and identifies the canonical source
+// snapshot while the caller owns the mutable-source serialization boundary.
+func CaptureCanonicalSourceSnapshot(ctx context.Context, invoke func(context.Context, string, [][]byte) (ToolResult, error)) (SourceSnapshot, error) {
+	if ctx == nil || invoke == nil {
+		return SourceSnapshot{}, errors.New("source snapshot capture is unavailable")
+	}
+	listed, err := invoke(ctx, "list", [][]byte{[]byte("seed/")})
+	if err != nil {
+		return SourceSnapshot{}, err
+	}
 	if listed.Status != 0 {
-		return nil, fmt.Errorf("source list failed with status %d", listed.Status)
+		return SourceSnapshot{}, fmt.Errorf("source list failed with status %d", listed.Status)
 	}
 	if !utf8.Valid(listed.Output) {
-		return nil, errors.New("source list is not valid UTF-8")
+		return SourceSnapshot{}, errors.New("source list is not valid UTF-8")
 	}
 	text := strings.TrimSuffix(string(listed.Output), "\n")
 	paths := []string{}
@@ -37,29 +47,29 @@ func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, str
 	total := 0
 	for _, path := range paths {
 		if path == "" {
-			return nil, errors.New("source list contains an empty path")
+			return SourceSnapshot{}, errors.New("source list contains an empty path")
 		}
 		if !strings.HasPrefix(path, "seed/") {
-			return nil, fmt.Errorf("source list contains path outside seed/ prefix: %q", path)
+			return SourceSnapshot{}, fmt.Errorf("source list contains path outside seed/ prefix: %q", path)
 		}
-		if err := validateSourcePath(path); err != nil {
-			return nil, err
+		if err := ValidateSourcePath(path); err != nil {
+			return SourceSnapshot{}, err
 		}
 		requested := maxSnapshotContent - total + 1
 		result, readErr := invoke(ctx, "read", [][]byte{
 			[]byte(path), []byte("0"), []byte(strconv.Itoa(requested)),
 		})
 		if readErr != nil {
-			return nil, readErr
+			return SourceSnapshot{}, readErr
 		}
 		if result.Status != 0 {
-			return nil, fmt.Errorf("source read for %q failed with status %d", path, result.Status)
+			return SourceSnapshot{}, fmt.Errorf("source read for %q failed with status %d", path, result.Status)
 		}
 		if len(result.Output) > maxSnapshotContent-total {
-			return nil, errors.New("source snapshot content exceeds 64 KiB")
+			return SourceSnapshot{}, errors.New("source snapshot content exceeds 64 KiB")
 		}
 		total += len(result.Output)
 		files = append(files, SnapshotFile{Path: path, Content: append([]byte(nil), result.Output...)})
 	}
-	return EncodeSourceSnapshot(files)
+	return NewCanonicalSourceSnapshot(files)
 }

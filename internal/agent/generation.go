@@ -241,10 +241,6 @@ type GenerationResult struct {
 	Summary      string
 }
 
-// CodexGenerationResult is retained as the descriptive name used by the
-// Python worker and by callers migrating from it.
-type CodexGenerationResult = GenerationResult
-
 // GenerationSessionMode describes the lifetime of a generation session.
 type GenerationSessionMode string
 
@@ -281,10 +277,6 @@ func (e *GenerationWorkerError) Unwrap() error {
 	return e.Err
 }
 
-// CodexGenerationWorkerError is the compatibility spelling used by the
-// Python implementation.
-type CodexGenerationWorkerError = GenerationWorkerError
-
 type planningDynamicCallLifecycleError struct{}
 
 func (*planningDynamicCallLifecycleError) Error() string {
@@ -313,10 +305,6 @@ type GenerationSessionOptions struct {
 	ReviewerReasoningSummary string
 	ReviewerServiceTier      string
 }
-
-// ImplementorSessionOptions is a readable alias for callers that prefer the
-// role name over the generation-worker name.
-type ImplementorSessionOptions = GenerationSessionOptions
 
 // GenerationSession owns one isolated Codex app-server and its implementor
 // thread. Planning and implementation intentionally share the same thread;
@@ -440,69 +428,6 @@ func NewGenerationSession(runtime GenerationRuntime, options GenerationSessionOp
 	}
 	session.dynamicCalls = newDynamicCallRouter(session.record)
 	return session
-}
-
-// NewImplementorSession is an equivalent constructor with role-oriented
-// naming.
-func NewImplementorSession(runtime GenerationRuntime, options ImplementorSessionOptions) *GenerationSession {
-	return NewGenerationSession(runtime, options)
-}
-
-// GenerationWorker runs one fresh generation session and always retires it.
-// It is intentionally single-use-at-a-time so concurrent callers cannot
-// accidentally create multiple implementors for one worker owner.
-type GenerationWorker struct {
-	options GenerationSessionOptions
-	mu      sync.Mutex
-	running bool
-}
-
-// CodexGenerationWorker retains the Python owner's descriptive name.
-type CodexGenerationWorker = GenerationWorker
-
-func NewGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
-	return &GenerationWorker{options: options}
-}
-
-func NewCodexGenerationWorker(options GenerationSessionOptions) *GenerationWorker {
-	return NewGenerationWorker(options)
-}
-
-func (w *GenerationWorker) RunGeneration(ctx context.Context, runtime GenerationRuntime) (result GenerationResult, resultErr error) {
-	if w == nil {
-		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker is nil"}
-	}
-	if ctx == nil {
-		return GenerationResult{}, &GenerationWorkerError{Reason: "generation worker context is nil"}
-	}
-	w.mu.Lock()
-	if w.running {
-		w.mu.Unlock()
-		return GenerationResult{}, &GenerationWorkerError{Reason: "Codex generation worker is already running"}
-	}
-	w.running = true
-	w.mu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		w.running = false
-		w.mu.Unlock()
-	}()
-
-	session := NewGenerationSession(runtime, w.options)
-	stopCancellation := context.AfterFunc(ctx, session.Cancel)
-	defer stopCancellation()
-	defer func() {
-		closeErr := session.Close()
-		if resultErr == nil {
-			resultErr = closeErr
-		} else if closeErr != nil {
-			resultErr = fmt.Errorf("%w; generation session close also failed: %v", resultErr, closeErr)
-		}
-	}()
-	if err := session.Start(ctx); err != nil {
-		return GenerationResult{}, err
-	}
-	return session.RunInitialTurn()
 }
 
 func closedChannel() chan struct{} {

@@ -2,7 +2,9 @@ package guest
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -22,6 +24,38 @@ func TestSourceSnapshotRoundTripPreservesBinaryFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSnapshotEqual(t, decoded, files)
+}
+
+func TestCanonicalSourceSnapshotOwnsOrderedFilesBytesAndIdentity(t *testing.T) {
+	files := []SnapshotFile{
+		{Path: "seed/z.c", Content: []byte("z")},
+		{Path: "seed/a.c", Content: []byte("a")},
+	}
+	snapshot, err := NewCanonicalSourceSnapshot(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := snapshot.Bytes()
+	digest := sha256.Sum256(encoded)
+	if snapshot.SHA256() != hex.EncodeToString(digest[:]) || snapshot.Size() != uint64(len(encoded)) {
+		t.Fatalf("snapshot identity = (%q, %d), want (%x, %d)", snapshot.SHA256(), snapshot.Size(), digest, len(encoded))
+	}
+	if got := snapshot.Files(); len(got) != 2 || got[0].Path != "seed/a.c" || got[1].Path != "seed/z.c" {
+		t.Fatalf("canonical files = %#v", got)
+	}
+
+	files[0].Content[0] = 'x'
+	returnedFiles := snapshot.Files()
+	returnedFiles[0].Content[0] = 'x'
+	returnedBytes := snapshot.Bytes()
+	returnedBytes[0] = 0xff
+	parsed, err := ParseSourceSnapshot(snapshot.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Files(); string(got[0].Content) != "a" || string(got[1].Content) != "z" {
+		t.Fatalf("snapshot changed through caller-owned data: %#v", got)
+	}
 }
 
 func TestSourceSnapshotRejectsMalformedUnsafeAndBoundedInput(t *testing.T) {

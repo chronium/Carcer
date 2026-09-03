@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -290,8 +288,7 @@ func (s *GenerationSession) completeReviewYield(yield *reviewYield, originStatus
 		s.mu.Unlock()
 	}()
 
-	var snapshot []byte
-	var files []guest.SnapshotFile
+	var snapshot guest.SourceSnapshot
 	var yieldResult, yieldOutcome string
 	err := yield.setupErr
 	if err == nil && originStatus != "completed" && originStatus != "interrupted" {
@@ -299,16 +296,16 @@ func (s *GenerationSession) completeReviewYield(yield *reviewYield, originStatus
 	} else if err == nil && paused {
 		err = context.Canceled
 	} else if err == nil {
-		snapshot, files, err = captureReviewSource(ctx, s.runtime)
+		snapshot, err = captureReviewSource(ctx, s.runtime)
 	}
 	if err == nil && yield.evidence != nil {
-		err = yield.evidence.RecordAwaitingReview(snapshot, originStatus)
+		err = yield.evidence.RecordAwaitingReview(snapshot.Bytes(), originStatus)
 	}
 	if err == nil {
 		s.mu.Lock()
 		s.reviewYieldState = ReviewYieldReviewing
 		s.mu.Unlock()
-		result, reviewErr := s.runReviewSnapshot(ctx, yield, files)
+		result, reviewErr := s.runReviewSnapshot(ctx, yield, snapshot)
 		if reviewErr == nil {
 			yieldResult, yieldOutcome = result, "completed"
 		} else {
@@ -355,7 +352,7 @@ func (s *GenerationSession) degradeReviewEvidence(reason string) {
 	}
 }
 
-func (s *GenerationSession) runReviewSnapshot(ctx context.Context, yield *reviewYield, files []guest.SnapshotFile) (string, error) {
+func (s *GenerationSession) runReviewSnapshot(ctx context.Context, yield *reviewYield, snapshot guest.SourceSnapshot) (string, error) {
 	reviewer := NewReviewWorker(ReviewWorkerOptions{
 		Executable: s.options.ReviewerExecutable, AuthFile: s.options.ReviewerAuthFile,
 		ActivityStream: s.options.ActivityStream, StopTimeout: s.options.StopTimeout,
@@ -370,15 +367,10 @@ func (s *GenerationSession) runReviewSnapshot(ctx context.Context, yield *review
 		}
 		s.mu.Unlock()
 	}()
-	runtime := &snapshotReviewRuntime{base: generationReviewRuntime{GenerationRuntime: s.runtime}, files: cloneSnapshotFiles(files)}
-	snapshot, err := guest.EncodeSourceSnapshot(files)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(snapshot)
+	runtime := &snapshotReviewRuntime{base: generationReviewRuntime{GenerationRuntime: s.runtime}, files: snapshot.Files()}
 	return reviewer.RunReview(ctx, runtime, ReviewOptions{
 		Objective: s.options.Objective, Focus: yield.focus, Request: yield.request, Proposal: yield.proposal,
-		SourceSnapshot: provenance.FileIdentity{SHA256: hex.EncodeToString(digest[:]), Size: uint64(len(snapshot))},
+		SourceSnapshot: provenance.FileIdentity{SHA256: snapshot.SHA256(), Size: snapshot.Size()},
 		Model:          s.options.ReviewerModel, ReasoningEffort: s.options.ReviewerReasoningEffort,
 		ReasoningSummary: s.options.ReviewerReasoningSummary, ServiceTier: s.options.ReviewerServiceTier,
 		Origin: s.dynamicCalls.identity(yield.routing), Evidence: yield.evidence,
@@ -392,24 +384,17 @@ func reviewContinuationPrompt(yield *reviewYield) string {
 		"Review outcome: " + yield.outcome + "\n\n" + yield.result
 }
 
-func captureReviewSource(ctx context.Context, runtime GenerationRuntime) ([]byte, []guest.SnapshotFile, error) {
-	var encoded []byte
-	var err error
+func captureReviewSource(ctx context.Context, runtime GenerationRuntime) (guest.SourceSnapshot, error) {
 	if snapshotRuntime, ok := any(runtime).(interface {
 		CaptureReviewSource(context.Context) ([]byte, error)
 	}); ok {
-		encoded, err = snapshotRuntime.CaptureReviewSource(ctx)
-	} else {
-		encoded, err = guest.CaptureSourceSnapshot(ctx, runtime.InvokeTool)
+		encoded, err := snapshotRuntime.CaptureReviewSource(ctx)
+		if err != nil {
+			return guest.SourceSnapshot{}, err
+		}
+		return guest.ParseSourceSnapshot(encoded)
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	files, err := guest.DecodeSourceSnapshot(encoded)
-	if err != nil {
-		return nil, nil, err
-	}
-	return encoded, files, nil
+	return guest.CaptureCanonicalSourceSnapshot(ctx, runtime.InvokeTool)
 }
 
 type snapshotReviewRuntime struct {

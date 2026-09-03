@@ -162,7 +162,11 @@ func TestProvidedAssetsManifestRevisionsAndLegacyAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyBytes, err := json.MarshalIndent(legacySnapshot.ManifestObject(), "", "  ")
+	legacyManifest := struct {
+		Assets        []ProvidedAssetMetadata `json:"assets"`
+		SchemaVersion uint64                  `json:"schema_version"`
+	}{Assets: legacySnapshot.Metadata(), SchemaVersion: providedAssetsLegacySchema}
+	legacyBytes, err := json.MarshalIndent(legacyManifest, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

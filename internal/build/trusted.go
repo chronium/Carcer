@@ -20,7 +20,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"codexos/internal/guest"
 )
@@ -130,10 +129,11 @@ func (e *buildStepError) Error() string {
 func (e *buildStepError) Unwrap() error { return e.err }
 
 func buildSourceSnapshot(ctx context.Context, snapshotData []byte, outputDirectory string, configuration Config) BuildResult {
-	files, err := guest.DecodeSourceSnapshot(snapshotData)
+	snapshot, err := guest.ParseSourceSnapshot(snapshotData)
 	if err != nil {
 		return harnessFailure(err)
 	}
+	files := snapshot.Files()
 	if err := validateRequiredInputs(files); err != nil {
 		return harnessFailure(err)
 	}
@@ -391,7 +391,7 @@ func copyLimineInputs(inputs map[string]string, workspace string) (map[string]st
 
 func materialize(files []guest.SnapshotFile, workspace string) error {
 	for _, file := range files {
-		if err := validateBuildPath(file.Path); err != nil {
+		if err := guest.ValidateSourcePath(file.Path); err != nil {
 			return err
 		}
 		destination, err := resolvePath(filepath.Join(workspace, filepath.FromSlash(file.Path)))
@@ -410,23 +410,6 @@ func materialize(files []guest.SnapshotFile, workspace string) error {
 	}
 	return nil
 }
-
-func validateBuildPath(path string) error {
-	if !utf8.ValidString(path) || strings.IndexByte(path, 0) >= 0 || strings.HasPrefix(path, "/") {
-		return fmt.Errorf("unsafe source path: %q", path)
-	}
-	components := strings.Split(path, "/")
-	if len(components) < 2 || components[0] != "seed" {
-		return fmt.Errorf("unsafe source path: %q", path)
-	}
-	for _, component := range components {
-		if component == "" || component == "." || component == ".." {
-			return fmt.Errorf("unsafe source path: %q", path)
-		}
-	}
-	return nil
-}
-
 func prepareSandbox(ctx context.Context, config normalizedConfig, limineTool, trusted string) (sandboxMounts, error) {
 	compiler, err := resolvePath(config.tools.CrossCompiler)
 	if err != nil {
