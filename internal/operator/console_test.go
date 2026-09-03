@@ -280,6 +280,49 @@ func TestPlainConsoleCommandsExposeStateAndRequireLiteralConfirmation(t *testing
 	}
 }
 
+func TestPlainConsoleAbortRequiresAndConfirmsVerbatimReason(t *testing.T) {
+	runtime := newConsoleTestRuntime(t)
+	var output bytes.Buffer
+	var confirmation string
+	console, err := newPlainConsole(runtime, PlainConsoleOptions{
+		Input: strings.NewReader(""), Output: &output,
+		ConfirmationHandler: func(prompt string) bool {
+			confirmation = prompt
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = console.Shutdown() })
+
+	executeConsoleLine(t, console, "abort")
+	reason := "guest stopped after λ; preserve  spacing"
+	executeConsoleLine(t, console, "abort "+reason)
+	if !strings.Contains(confirmation, "Abort generation 12 permanently?") || !strings.Contains(confirmation, "Reason:\n"+reason+"\n[y/N]") {
+		t.Fatalf("abort confirmation did not show one reason and indicator: %q", confirmation)
+	}
+	runtime.mu.Lock()
+	gotReason, calls := runtime.abortReason, runtime.abortCalls
+	runtime.mu.Unlock()
+	if calls != 1 || gotReason != reason {
+		t.Fatalf("abort calls/reason = %d, %q", calls, gotReason)
+	}
+	if !strings.Contains(output.String(), "Usage: abort REASON") {
+		t.Fatalf("missing required-reason usage: %s", output.String())
+	}
+
+	runtime.archives = []experiment.ArchivedGeneration{{
+		Generation: 12, Transition: "rollback", Outcome: "aborted", AbortReason: &reason,
+		Hardware: qemu.HardwareManifest{Profile: "test-v1", Machine: "q35", CPUModel: "qemu64", VCPUs: 1, MemoryMiB: 128},
+	}}
+	executeConsoleLine(t, console, "history")
+	executeConsoleLine(t, console, "inspect 12")
+	if strings.Count(output.String(), reason) < 2 || !strings.Contains(output.String(), "Abort reason:") {
+		t.Fatalf("history/inspection omitted abort reason:\n%s", output.String())
+	}
+}
+
 func TestPlainConsoleRunExecutesUnterminatedFinalCommand(t *testing.T) {
 	runtime := newConsoleTestRuntime(t)
 	var output bytes.Buffer

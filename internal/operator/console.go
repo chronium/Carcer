@@ -279,10 +279,15 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 		}
 		return false, c.resume(ctx)
 	case "abort":
-		if !c.requireArity(words, 1, "abort") {
+		reason, ok := AbortReason(commandLine)
+		if !ok {
+			c.printLine("Usage: abort REASON")
 			return false, nil
 		}
-		return false, c.abort()
+		if err := experiment.ValidateAbortReason(reason); err != nil {
+			return false, err
+		}
+		return false, c.abort(reason)
 	case "continue":
 		if !c.requireArity(words, 1, "continue") {
 			return false, nil
@@ -503,20 +508,21 @@ func (c *PlainConsole) rollback(parent uint64) error {
 	return nil
 }
 
-func (c *PlainConsole) abort() error {
+func (c *PlainConsole) abort(reason string) error {
 	generation, _ := c.runtime.GenerationNumber()
-	if !c.confirm(fmt.Sprintf("Abort generation %d permanently? [y/N] ", generation)) {
+	data := map[string]any{"reason": reason}
+	if !c.confirm(fmt.Sprintf("Abort generation %d permanently?\nReason:\n%s\n[y/N] ", generation, EscapeTerminalText(reason, true))) {
 		c.printLine("Abort cancelled.")
-		c.recordOperator("abort", "cancelled", nil)
+		c.recordOperator("abort", "cancelled", data)
 		return nil
 	}
 	turn := c.currentTurn()
-	if err := c.controller.Abort(); err != nil {
-		c.recordOperator("abort", "failed", nil)
+	if err := c.controller.Abort(reason); err != nil {
+		c.recordOperator("abort", "failed", data)
 		return err
 	}
 	if err := c.waitForConsoleTurn(turn); err != nil {
-		c.recordOperator("abort", "failed", nil)
+		c.recordOperator("abort", "failed", data)
 		return err
 	}
 	c.resetPersistedInterview()
@@ -524,7 +530,7 @@ func (c *PlainConsole) abort() error {
 	if err := c.printGate(); err != nil {
 		return err
 	}
-	c.recordOperator("abort", "success", nil)
+	c.recordOperator("abort", "success", data)
 	return nil
 }
 
@@ -697,7 +703,7 @@ func (c *PlainConsole) printHelp() {
 		"git-record  reconcile local generation Git provenance",
 		"pause       pause the running generation",
 		"resume      resume the paused generation",
-		"abort       permanently abort the running/paused generation",
+		"abort REASON  permanently abort the running/paused generation",
 		"continue    start the cooperatively selected successor",
 		"rollback N  fork from completed generation N",
 		"quit        end the run",
@@ -779,6 +785,9 @@ func (c *PlainConsole) printHistory() error {
 			parent = strconv.FormatUint(*item.ParentGeneration, 10)
 		}
 		c.printLine(fmt.Sprintf("%-5d %-8s %-12s %s", item.Generation, parent, item.Transition, item.Outcome))
+		if item.AbortReason != nil {
+			c.printLine("      Abort reason: " + EscapeTerminalText(*item.AbortReason, false))
+		}
 	}
 	return nil
 }
@@ -818,6 +827,12 @@ func (c *PlainConsole) printInspection(item experiment.ArchivedGeneration) {
 		}
 	} else {
 		c.printLine("Generation aborted by operator.")
+		if item.AbortReason != nil {
+			c.printLine("Abort reason:")
+			c.printIndented(EscapeTerminalText(*item.AbortReason, true))
+		} else {
+			c.printLine("Abort reason: unavailable (legacy archive)")
+		}
 		c.printLine("Artifacts:")
 		for _, artifact := range []string{"boot ISO", "hardware manifest", "QEMU stdout", "QEMU stderr"} {
 			c.printLine("  " + artifact)

@@ -28,6 +28,7 @@ const (
 	maxGenerationGitDiagnostics = 16 * 1024
 	maxGenerationGitOutput      = 32 * 1024 * 1024
 	abortMarker                 = "Generation aborted by operator."
+	abortReasonLimit            = 8 * 1024
 )
 
 // GenerationGitRecorderError reports a local Git provenance failure. Git
@@ -397,6 +398,19 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 			return generationArchive{}, errors.New("generation abort marker is malformed")
 		}
 		names := []string{"boot", "metadata.json", "hardware.json", "aborted.txt", "qemu.stdout", "qemu.stderr"}
+		reasonPath := filepath.Join(archivePath, "abort-reason.txt")
+		if _, statErr := os.Lstat(reasonPath); statErr == nil {
+			if !isRegularWithoutSymlink(reasonPath) {
+				return generationArchive{}, errors.New("generation abort reason is malformed")
+			}
+			reason, readErr := os.ReadFile(reasonPath)
+			if readErr != nil || len(reason) > abortReasonLimit || !utf8.Valid(reason) || strings.TrimSpace(string(reason)) == "" {
+				return generationArchive{}, errors.New("generation abort reason is malformed")
+			}
+			names = append(names, "abort-reason.txt")
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return generationArchive{}, statErr
+		}
 		if hasHarnessIdentity {
 			names = append(names, GenerationHarnessFilename)
 		}

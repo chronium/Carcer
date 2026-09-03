@@ -114,10 +114,11 @@ func TestCompletedArchiveGateAndContinue(t *testing.T) {
 func TestAbortedGateHasNoSuccessor(t *testing.T) {
 	run := t.TempDir()
 	archive, err := WriteAbortedArchive(run, AbortedArchive{
-		Generation: 0,
-		Transition: "initial",
-		Hardware:   testHardware(t),
-		BootISO:    []byte("boot"),
+		Generation:  0,
+		Transition:  "initial",
+		Hardware:    testHardware(t),
+		BootISO:     []byte("boot"),
+		AbortReason: "operator stopped the generation",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +147,53 @@ func TestAbortedGateHasNoSuccessor(t *testing.T) {
 	}
 }
 
+func TestLegacyAbortedArchiveDoesNotFabricateReason(t *testing.T) {
+	run := t.TempDir()
+	archive, err := WriteAbortedArchive(run, AbortedArchive{
+		Generation: 0, Transition: "initial", Hardware: testHardware(t),
+		BootISO: []byte("boot"), AbortReason: "temporary fixture reason",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(archive.ArchivePath, abortReasonName)); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := InspectGeneration(run, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.AbortReason != nil {
+		t.Fatalf("legacy archive acquired abort reason: %q", *legacy.AbortReason)
+	}
+}
+
+func TestAbortRejectsInvalidReasonWithoutChangingRunningGeneration(t *testing.T) {
+	run := t.TempDir()
+	hardware := testHardware(t)
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: hardware, BootISO: []byte("boot"),
+		Handoff: "handoff", SourceSnapshot: testSnapshot(t, "source\n"), KernelELF: []byte("kernel"), SuccessorISO: []byte("iso"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := reopenProcessFreeRun(t, run)
+	if err := runtime.ContinueGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{"", " \t", strings.Repeat("x", MaxAbortReasonBytes+1), string([]byte{0xff})} {
+		if err := runtime.AbortGeneration(reason); err == nil {
+			t.Fatalf("invalid reason was accepted: %q", reason)
+		}
+		if runtime.State() != RuntimeStateRunning {
+			t.Fatalf("invalid reason changed runtime state to %s", runtime.State())
+		}
+		if _, err := InspectGeneration(run, 1); err == nil {
+			t.Fatal("invalid reason published an aborted archive")
+		}
+	}
+}
+
 func TestAbortRunningProcessFreeGenerationPublishesArchive(t *testing.T) {
 	run := t.TempDir()
 	hardware := testHardware(t)
@@ -166,7 +214,8 @@ func TestAbortRunningProcessFreeGenerationPublishesArchive(t *testing.T) {
 	if err := runState.ContinueGeneration(); err != nil {
 		t.Fatal(err)
 	}
-	if err := runState.AbortGeneration(); err != nil {
+	reason := "operator observed λ\nretry scheduler"
+	if err := runState.AbortGeneration(reason); err != nil {
 		t.Fatal(err)
 	}
 	if runState.State() != RuntimeStateAwaitingNextGeneration {
@@ -176,9 +225,177 @@ func TestAbortRunningProcessFreeGenerationPublishesArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted.Outcome != "aborted" || aborted.Handoff != nil {
+	if aborted.Outcome != "aborted" || aborted.Handoff != nil || aborted.AbortReason == nil || *aborted.AbortReason != reason {
 		t.Fatalf("aborted archive = %#v", aborted)
 	}
+	persisted, err := os.ReadFile(filepath.Join(aborted.ArchivePath, abortReasonName))
+	if err != nil || string(persisted) != reason {
+		t.Fatalf("persisted abort reason = %q, %v", persisted, err)
+	}
+}
+
+func TestAbortFeedbackAttachesOnceAcrossGateReopenAndRollback(t *testing.T) {
+	run := t.TempDir()
+	hardware := testHardware(t)
+	snapshot := testSnapshot(t, "source\n")
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: hardware, BootISO: []byte("boot-0"),
+		Handoff: "completed handoff", SourceSnapshot: snapshot, KernelELF: []byte("kernel-0"), SuccessorISO: []byte("iso-0"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := reopenProcessFreeRun(t, run)
+	if err := first.ContinueGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	firstReason := "first abort reason λ\nkeep this verbatim"
+	if err := first.AbortGeneration(firstReason); err != nil {
+		t.Fatal(err)
+	}
+	first.Stop()
+
+	// Reopening the same gate does not consume feedback. It is attached only
+	// when generation 2 actually starts from a completed rollback parent.
+	reopened := reopenProcessFreeRun(t, run)
+	reopened.Stop()
+	reopened = reopenProcessFreeRun(t, run)
+	if err := reopened.ForkFromGeneration(0); err != nil {
+		t.Fatal(err)
+	}
+	if source, reason, ok := reopened.OperatorFeedback(); !ok || source != 1 || reason != firstReason {
+		t.Fatalf("generation 2 feedback = (%d, %q, %t)", source, reason, ok)
+	}
+	if handoff, ok := reopened.PreviousHandoff(); !ok || handoff != "completed handoff" {
+		t.Fatalf("rollback handoff = %q, %t", handoff, ok)
+	}
+	records, err := loadOperatorFeedbackRecords(run)
+	if err != nil || len(records) != 1 || records[0].TargetGeneration != 2 {
+		t.Fatalf("feedback records = %#v, %v", records, err)
+	}
+	reopened.Stop()
+	reopened = reopenProcessFreeRun(t, run)
+	if err := reopened.ForkFromGeneration(0); err != nil {
+		t.Fatal(err)
+	}
+	if source, reason, ok := reopened.OperatorFeedback(); !ok || source != 1 || reason != firstReason {
+		t.Fatalf("restarted generation 2 feedback = (%d, %q, %t)", source, reason, ok)
+	}
+
+	secondReason := "newer abort supersedes pending feedback"
+	if err := reopened.AbortGeneration(secondReason); err != nil {
+		t.Fatal(err)
+	}
+	reopened.Stop()
+
+	third := reopenProcessFreeRun(t, run)
+	if err := third.ForkFromGeneration(0); err != nil {
+		t.Fatal(err)
+	}
+	if source, reason, ok := third.OperatorFeedback(); !ok || source != 2 || reason != secondReason {
+		t.Fatalf("generation 3 feedback = (%d, %q, %t)", source, reason, ok)
+	}
+	third.Stop()
+
+	parent := uint64(0)
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 3, ParentGeneration: &parent, Transition: "rollback", Hardware: hardware, BootISO: []byte("boot-3"),
+		Handoff: "generation three handoff", SourceSnapshot: snapshot, KernelELF: []byte("kernel-3"), SuccessorISO: []byte("iso-3"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fourth := reopenProcessFreeRun(t, run)
+	if err := fourth.ContinueGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	if source, reason, ok := fourth.OperatorFeedback(); ok {
+		t.Fatalf("generation 4 inherited consumed feedback = (%d, %q)", source, reason)
+	}
+	archives, err := LoadArchivedGenerations(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateArchivedHistory(archives); err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range []uint64{2, 3} {
+		archive := archives[generation]
+		if archive.ParentGeneration == nil || *archive.ParentGeneration != 0 {
+			t.Fatalf("generation %d parent = %#v; aborted generation entered lineage", generation, archive.ParentGeneration)
+		}
+	}
+}
+
+func TestOperatorFeedbackAttachmentCannotBeReplaced(t *testing.T) {
+	run := t.TempDir()
+	original := OperatorFeedback{
+		TargetGeneration: 2, SourceAbortGeneration: 1,
+		Reason: "immutable operator feedback", SchemaVersion: 1,
+	}
+	if err := persistOperatorFeedback(run, original); err != nil {
+		t.Fatal(err)
+	}
+	replacement := original
+	replacement.Reason = "replacement feedback"
+	if err := persistOperatorFeedback(run, replacement); err == nil || !strings.Contains(err.Error(), "conflicts with immutable state") {
+		t.Fatalf("replacement error = %v", err)
+	}
+	encoded, err := os.ReadFile(filepath.Join(run, operatorFeedbackDirName, operatorFeedbackFilename(2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeOperatorFeedback(encoded)
+	if err != nil || decoded.Reason != original.Reason {
+		t.Fatalf("persisted feedback = %#v, %v", decoded, err)
+	}
+}
+
+func TestPendingAbortFeedbackAttachesThroughContinue(t *testing.T) {
+	run := t.TempDir()
+	hardware := testHardware(t)
+	snapshot := testSnapshot(t, "source\n")
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: hardware, BootISO: []byte("boot-0"),
+		Handoff: "handoff-0", SourceSnapshot: snapshot, KernelELF: []byte("kernel-0"), SuccessorISO: []byte("iso-0"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parent := uint64(0)
+	reason := "pending reason survives until a continue start"
+	if _, err := WriteAbortedArchive(run, AbortedArchive{
+		Generation: 1, ParentGeneration: &parent, Transition: "successor", Hardware: hardware,
+		BootISO: []byte("boot-1"), AbortReason: reason,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 2, ParentGeneration: &parent, Transition: "rollback", Hardware: hardware, BootISO: []byte("boot-2"),
+		Handoff: "handoff-2", SourceSnapshot: snapshot, KernelELF: []byte("kernel-2"), SuccessorISO: []byte("iso-2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := reopenProcessFreeRun(t, run)
+	if err := runtime.ContinueGeneration(); err != nil {
+		t.Fatal(err)
+	}
+	if source, got, ok := runtime.OperatorFeedback(); !ok || source != 1 || got != reason {
+		t.Fatalf("continued feedback = (%d, %q, %t)", source, got, ok)
+	}
+	if handoff, ok := runtime.PreviousHandoff(); !ok || handoff != "handoff-2" {
+		t.Fatalf("continued handoff = %q, %t", handoff, ok)
+	}
+}
+
+func reopenProcessFreeRun(t *testing.T, directory string) *CodexOSRun {
+	t.Helper()
+	run, err := NewCodexOSRun(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.ReopenAtGate(); err != nil {
+		t.Fatal(err)
+	}
+	return run
 }
 
 func TestRollbackSelectionRequiresEarlierCompletedArchive(t *testing.T) {
@@ -285,6 +502,7 @@ func TestSymlinkAndCollisionAreRejectedWithoutMutation(t *testing.T) {
 	before := archiveBytes(t, archive)
 	if _, err := WriteAbortedArchive(run, AbortedArchive{
 		Generation: 0, Transition: "initial", Hardware: hardware,
+		AbortReason: "operator stopped the generation",
 	}); err == nil {
 		t.Fatal("collision publication succeeded")
 	}

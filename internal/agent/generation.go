@@ -201,6 +201,7 @@ type GenerationRuntime interface {
 // for small process-free test/runtime adapters.
 type GenerationPromptRuntime interface {
 	PreviousHandoff() (string, bool)
+	OperatorFeedback() (uint64, string, bool)
 	CurrentTransition() (string, bool)
 	HardwareProfile() qemu.HardwareProfile
 	FeatureRequests() ([]store.FeatureRequest, error)
@@ -3171,6 +3172,14 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 	if rollback {
 		rollbackText = "\n\nThis generation was started from an earlier archived CodexOS state selected by the human operator. Later lineage was abandoned."
 	}
+	feedbackText := ""
+	if value, ok := any(runtime).(interface {
+		OperatorFeedback() (uint64, string, bool)
+	}); ok {
+		if source, reason, present := value.OperatorFeedback(); present {
+			feedbackText = fmt.Sprintf("\n\nOperator feedback from aborted generation %d (not a handoff or source-ancestry record):\n%s", source, reason)
+		}
+	}
 	objectiveText := ""
 	if objective != nil {
 		objectiveText = "\n\nCurrent trusted objective:\n" + *objective
@@ -3189,7 +3198,7 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 		}
 		approvedText = "Approved external feature requests for this run:\n\n" + strings.Join(parts, "\n\n")
 	}
-	return implementorContract + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + objectiveText, nil
+	return implementorContract + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
 }
 
 func currentPromptContextFor(runtime GenerationRuntime) (string, bool, bool, qemu.HardwareProfile, []store.FeatureRequest, error) {

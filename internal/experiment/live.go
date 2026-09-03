@@ -203,6 +203,7 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	zero := uint64(0)
 	r.gateMu.Lock()
 	r.generationNumber = &zero
+	r.currentOperatorFeedback = nil
 	if r.live.bootstrap != nil {
 		handoff := r.live.bootstrap.Handoff
 		r.previousHandoff = &handoff
@@ -798,6 +799,11 @@ func (r *CodexOSRun) recordLiveGenerationStarted(number uint64, parent *uint64, 
 		"transition": transition, "parent_generation": parent, "qemu_pid": pid,
 		"hardware_profile": profile.Profile, "vcpus": profile.VCPUs, "memory_mib": profile.MemoryMiB,
 	})
+	if source, reason, ok := r.OperatorFeedback(); ok {
+		r.recordLive("operator_abort_feedback_attached", &number, map[string]any{
+			"source_abort_generation": source, "reason": reason,
+		})
+	}
 }
 
 func (r *CodexOSRun) liveSerialRecorder(generation uint64, connection string) guest.SerialEventRecorder {

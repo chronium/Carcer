@@ -566,10 +566,11 @@ func writeDisposableBinaryGate(t *testing.T) string {
 		t.Fatal(err)
 	}
 	if _, err := experiment.WriteAbortedArchive(runDirectory, experiment.AbortedArchive{
-		Generation: 0,
-		Transition: "initial",
-		Hardware:   hardware,
-		BootISO:    []byte("disposable archived boot image"),
+		Generation:  0,
+		Transition:  "initial",
+		Hardware:    hardware,
+		BootISO:     []byte("disposable archived boot image"),
+		AbortReason: "operator stopped the generation",
 	}); err != nil {
 		t.Fatal(err)
 	}

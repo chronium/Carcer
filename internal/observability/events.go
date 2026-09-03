@@ -26,6 +26,7 @@ var durableEvents = map[string]struct{}{
 	"feature_approved":                     {},
 	"feature_denied":                       {},
 	"harness_identity_transition_recorded": {},
+	"operator_abort_feedback_attached":     {},
 }
 
 // Error reports malformed durable observability state or an event-log setup

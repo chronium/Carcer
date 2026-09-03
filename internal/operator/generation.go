@@ -23,7 +23,7 @@ type generationRuntime interface {
 	Resume(context.Context) error
 	ContinueGeneration() error
 	ForkFromGeneration(uint64) error
-	AbortGeneration() error
+	AbortGeneration(string) error
 	Close() error
 }
 
@@ -359,9 +359,12 @@ func (c *GenerationController) Rollback(generation uint64) error {
 
 // Abort retires the current Codex session before permanently archiving the
 // running or paused generation as aborted.
-func (c *GenerationController) Abort() error {
+func (c *GenerationController) Abort(reason string) error {
 	if c == nil {
 		return errors.New("CodexOS generation controller is nil")
+	}
+	if err := experiment.ValidateAbortReason(reason); err != nil {
+		return err
 	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
@@ -371,7 +374,7 @@ func (c *GenerationController) Abort() error {
 	if err := c.retireSession(true); err != nil {
 		return err
 	}
-	if err := c.runtime.AbortGeneration(); err != nil {
+	if err := c.runtime.AbortGeneration(reason); err != nil {
 		return err
 	}
 	c.clearGenerationOwnership()

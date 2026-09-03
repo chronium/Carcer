@@ -485,6 +485,7 @@ func archiveGenerationGitAborted(t *testing.T, run string, generation uint64, pa
 	writeGenerationGitHardware(t, archive)
 	writeGenerationGitFile(t, filepath.Join(archive, "boot/codexos.iso"), []byte("boot"))
 	writeGenerationGitFile(t, filepath.Join(archive, "aborted.txt"), []byte(abortMarker))
+	writeGenerationGitFile(t, filepath.Join(archive, "abort-reason.txt"), []byte("operator stopped generation"))
 	writeGenerationGitFile(t, filepath.Join(archive, "qemu.stdout"), nil)
 	writeGenerationGitFile(t, filepath.Join(archive, "qemu.stderr"), nil)
 }

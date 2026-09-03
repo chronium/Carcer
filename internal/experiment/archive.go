@@ -46,6 +46,7 @@ type AbortedArchive struct {
 	Transition       string
 	Hardware         qemu.HardwareManifest
 	BootISO          []byte
+	AbortReason      string
 	QEMUStdout       []byte
 	QEMUStderr       []byte
 	LatestSuccess    *AbortedSuccessEvidence
@@ -82,6 +83,7 @@ type abortedArchiveFiles struct {
 	Transition       string
 	Hardware         qemu.HardwareManifest
 	BootISO          string
+	AbortReason      string
 	QEMUStdout       string
 	QEMUStderr       string
 	LatestSuccess    *AbortedSuccessEvidence
@@ -217,6 +219,9 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 	if err := qemu.ValidateHardwareManifest(input.Hardware); err != nil {
 		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
 	}
+	if err := ValidateAbortReason(input.AbortReason); err != nil {
+		return ArchivedGeneration{}, err
+	}
 	if input.LatestSuccess != nil {
 		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation); err != nil {
 			return ArchivedGeneration{}, err
@@ -240,6 +245,9 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 			return err
 		}
 		if err := writeArchiveFile(staging, abortedMarkerName, []byte(AbortMarker)); err != nil {
+			return err
+		}
+		if err := writeArchiveFile(staging, abortReasonName, []byte(input.AbortReason)); err != nil {
 			return err
 		}
 		if err := writeArchiveFile(staging, filepath.Join(archiveBootName, "codexos.iso"), input.BootISO); err != nil {
@@ -270,6 +278,9 @@ func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (A
 	if err := qemu.ValidateHardwareManifest(input.Hardware); err != nil {
 		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
 	}
+	if err := ValidateAbortReason(input.AbortReason); err != nil {
+		return ArchivedGeneration{}, err
+	}
 	if input.LatestSuccess != nil {
 		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation); err != nil {
 			return ArchivedGeneration{}, err
@@ -293,6 +304,9 @@ func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (A
 			return err
 		}
 		if err := writeArchiveFile(staging, abortedMarkerName, []byte(AbortMarker)); err != nil {
+			return err
+		}
+		if err := writeArchiveFile(staging, abortReasonName, []byte(input.AbortReason)); err != nil {
 			return err
 		}
 		for destination, source := range map[string]string{

@@ -78,6 +78,7 @@ type ArchivedGeneration struct {
 	Outcome          string
 	ArchivePath      string
 	Handoff          *string
+	AbortReason      *string
 	Hardware         qemu.HardwareManifest
 	HarnessIdentity  *provenance.HarnessIdentity
 }
@@ -121,9 +122,10 @@ type CodexOSRun struct {
 	state        RuntimeState
 	live         *liveRun
 
-	generationNumber *uint64
-	previousHandoff  *string
-	pendingFinish    *PendingGenerationFinish
+	generationNumber        *uint64
+	previousHandoff         *string
+	currentOperatorFeedback *OperatorFeedback
+	pendingFinish           *PendingGenerationFinish
 
 	currentParent     *uint64
 	currentTransition string
@@ -376,6 +378,13 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 	if err := ValidateArchivedHistory(archives); err != nil {
 		return err
 	}
+	feedbackRecords, err := loadOperatorFeedbackRecords(r.runDirectory)
+	if err != nil {
+		return err
+	}
+	if err := validateOperatorFeedbackRecords(feedbackRecords, archives); err != nil {
+		return err
+	}
 
 	latest := archives[len(archives)-1]
 	var harnessTransition *provenance.HarnessGateTransition
@@ -432,6 +441,7 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 	r.generationNumber = cloneUint64Pointer(&latest.Generation)
 	r.pendingFinish = pending
 	r.previousHandoff = previous
+	r.currentOperatorFeedback = nil
 	r.gateHarnessTransition = nil
 	if harnessTransition != nil && harnessTransition.RequiresRecord {
 		r.gateHarnessTransition = cloneHarnessGateTransition(harnessTransition)
@@ -508,11 +518,16 @@ func (r *CodexOSRun) ContinueGeneration() error {
 	next := parent + 1
 	image := r.pendingFinish.ISO
 	handoff := r.pendingFinish.HandoffMessage
+	feedback, err := r.attachOperatorFeedback(next)
+	if err != nil {
+		return err
+	}
 	r.generationNumber = &next
 	r.currentParent = &parent
 	r.currentTransition = "successor"
 	r.currentBootImage = image
 	r.previousHandoff = &handoff
+	r.currentOperatorFeedback = feedback
 	r.pendingFinish = nil
 	r.gateHarnessTransition = nil
 	r.state = RuntimeStateRunning
@@ -567,11 +582,16 @@ func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 	parent := generation
 	next := *r.generationNumber + 1
 	handoff := *archived.Handoff
+	feedback, err := r.attachOperatorFeedback(next)
+	if err != nil {
+		return err
+	}
 	r.generationNumber = &next
 	r.currentParent = &parent
 	r.currentTransition = "rollback"
 	r.currentBootImage = image
 	r.previousHandoff = &handoff
+	r.currentOperatorFeedback = feedback
 	r.pendingFinish = nil
 	r.gateHarnessTransition = nil
 	r.state = RuntimeStateRunning
@@ -583,12 +603,15 @@ func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 // this slice, so the durable archive records empty logs; a later runtime owner
 // can supply captured logs through WriteAbortedArchive before exposing this
 // transition in production.
-func (r *CodexOSRun) AbortGeneration() error {
+func (r *CodexOSRun) AbortGeneration(reason string) error {
 	if r == nil {
 		return &GenerationRuntimeError{Reason: "run is nil"}
 	}
 	if r.live != nil {
-		return r.abortLiveGeneration()
+		return r.abortLiveGeneration(reason)
+	}
+	if err := ValidateAbortReason(reason); err != nil {
+		return err
 	}
 	r.gateMu.Lock()
 	defer r.gateMu.Unlock()
@@ -608,6 +631,7 @@ func (r *CodexOSRun) AbortGeneration() error {
 		Transition:       r.currentTransition,
 		Hardware:         r.currentHardware,
 		BootISO:          boot,
+		AbortReason:      reason,
 	}
 	if _, err := WriteAbortedArchive(r.runDirectory, archive); err != nil {
 		return err
@@ -615,6 +639,7 @@ func (r *CodexOSRun) AbortGeneration() error {
 	r.pendingFinish = nil
 	r.retainedFinish = nil
 	r.previousHandoff = nil
+	r.currentOperatorFeedback = nil
 	r.currentBootImage = ""
 	r.state = RuntimeStateAwaitingNextGeneration
 	return nil
@@ -641,6 +666,7 @@ func (r *CodexOSRun) clearStoppedState() {
 	r.pendingFinish = nil
 	r.retainedFinish = nil
 	r.previousHandoff = nil
+	r.currentOperatorFeedback = nil
 	r.currentParent = nil
 	r.currentTransition = ""
 	r.currentBootImage = ""
@@ -852,9 +878,26 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		if !bytes.Equal(abortedBytes, []byte(AbortMarker)) {
 			return ArchivedGeneration{}, errors.New("generation abort marker is malformed")
 		}
+		reasonPath := filepath.Join(archive, abortReasonName)
+		if _, statErr := os.Lstat(reasonPath); statErr == nil {
+			reasonBytes, readErr := readArchiveArtifact(reasonPath, MaxAbortReasonBytes)
+			if readErr != nil {
+				return ArchivedGeneration{}, readErr
+			}
+			reason := string(reasonBytes)
+			if err := ValidateAbortReason(reason); err != nil {
+				return ArchivedGeneration{}, errors.New("generation abort reason is malformed")
+			}
+			result.AbortReason = &reason
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return ArchivedGeneration{}, statErr
+		}
 		names := []string{
 			archiveBootName, archiveMetadataName, hardwareManifestName, abortedMarkerName,
 			stdoutName, stderrName,
+		}
+		if result.AbortReason != nil {
+			names = append(names, abortReasonName)
 		}
 		if harnessIdentity != nil {
 			names = append(names, provenance.GenerationHarnessFilename)

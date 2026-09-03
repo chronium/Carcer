@@ -66,7 +66,7 @@ func TestLiveGenerationFixesHarnessIdentityAcrossEventsAndArchive(t *testing.T) 
 	if err != nil || !recorded.Equal(expected) {
 		t.Fatalf("generation identity = %#v, %v", recorded, err)
 	}
-	if err := run.AbortGeneration(); err != nil {
+	if err := run.AbortGeneration("operator stopped the generation"); err != nil {
 		t.Fatal(err)
 	}
 	archive, err := InspectGeneration(runDirectory, 0)
@@ -92,6 +92,7 @@ func TestLiveGateAutomaticallyRecordsAndReportsHarnessReplacement(t *testing.T) 
 	}
 	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
 		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+		AbortReason: "operator stopped the generation",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +156,7 @@ func TestLiveGateDoesNotRecordHarnessReplacementBeforeReopenConfigurationSucceed
 	}
 	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
 		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+		AbortReason: "operator stopped the generation",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +190,7 @@ func TestLiveGateRejectsHarnessReplacementWithPartialGenerationState(t *testing.
 	}
 	if _, err := WriteAbortedArchive(runDirectory, AbortedArchive{
 		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"), HarnessIdentity: &first,
+		AbortReason: "operator stopped the generation",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +519,7 @@ func TestLiveRunAbortPausedGenerationStreamsArchive(t *testing.T) {
 	if err := run.Pause(ctx); err != nil {
 		t.Fatalf("pause before abort: %v", err)
 	}
-	if err := run.AbortGeneration(); err != nil {
+	if err := run.AbortGeneration("operator stopped the generation"); err != nil {
 		t.Fatalf("abort generation: %v", err)
 	}
 	if state := run.State(); state != RuntimeStateAwaitingNextGeneration {
@@ -789,7 +792,7 @@ func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
 	if _, err := run.ApproveFeatureRequest(request.ID); err == nil || !strings.Contains(err.Error(), "only while awaiting") {
 		t.Fatalf("running feature decision error = %v", err)
 	}
-	if err := run.AbortGeneration(); err != nil {
+	if err := run.AbortGeneration("operator stopped the generation"); err != nil {
 		t.Fatal(err)
 	}
 	approved, err := run.ApproveFeatureRequest(request.ID)
@@ -832,7 +835,7 @@ func TestLiveRunRestoresProvidedAssetsAtReopenedGate(t *testing.T) {
 	if err := run.Start(ctx, initialISO); err != nil {
 		t.Fatal(err)
 	}
-	if err := run.AbortGeneration(); err != nil {
+	if err := run.AbortGeneration("operator stopped the generation"); err != nil {
 		t.Fatal(err)
 	}
 	if err := run.Close(); err != nil {

@@ -1,6 +1,11 @@
 package operator
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"codexos/internal/experiment"
+)
 
 func TestEscapeTerminalTextMakesUntrustedControlsInert(t *testing.T) {
 	hostile := "Capability λ\nFake status\r\x1b[2J\t\x00\u0085\u009b"
@@ -38,5 +43,33 @@ func TestExitInterviewQuestionPreservesQuestionText(t *testing.T) {
 				t.Fatalf("ExitInterviewQuestion(%q) = (%q, %v), want (%q, %v)", test.line, got, ok, test.want, test.ok)
 			}
 		})
+	}
+}
+
+func TestAbortReasonPreservesTextAndEnforcesBounds(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+		ok   bool
+	}{
+		{"abort guest stopped after λ", "guest stopped after λ", true},
+		{"  abort\t  preserve  spacing  ", "preserve  spacing  ", true},
+		{"abort", "", false},
+		{"abort   ", "", false},
+		{"aborted reason", "", false},
+	}
+	for _, test := range tests {
+		got, ok := AbortReason(test.line)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("AbortReason(%q) = (%q, %t), want (%q, %t)", test.line, got, ok, test.want, test.ok)
+		}
+	}
+	if err := experiment.ValidateAbortReason(strings.Repeat("x", experiment.MaxAbortReasonBytes)); err != nil {
+		t.Fatalf("largest valid reason: %v", err)
+	}
+	for _, invalid := range []string{"", " \t", strings.Repeat("x", experiment.MaxAbortReasonBytes+1), string([]byte{0xff})} {
+		if err := experiment.ValidateAbortReason(invalid); err == nil {
+			t.Fatalf("invalid abort reason accepted: %q", invalid)
+		}
 	}
 }
