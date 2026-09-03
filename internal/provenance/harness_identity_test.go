@@ -163,22 +163,20 @@ func TestHarnessIdentityStoreRejectsInconsistentTransitionAncestry(t *testing.T)
 	}
 }
 
-func TestHarnessIdentityStoreReadsEarlierAcknowledgedGateTransition(t *testing.T) {
+func TestHarnessIdentityStoreRejectsNonQuiescentGateTransitionSchema(t *testing.T) {
 	run := filepath.Join(t.TempDir(), "run")
 	store := NewHarnessIdentityStore(run)
 	initial := testHarnessIdentity()
 	if err := store.RecordRunCreation(initial); err != nil {
 		t.Fatal(err)
 	}
-	replacement := initial
-	replacement.Executable.SHA256 = strings.Repeat("d", 64)
 	directory := filepath.Join(run, harnessTransitionDirectory)
 	if err := os.Mkdir(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := encodeHarnessJSON(map[string]any{
 		"acknowledged": true, "after_generation": uint64(3),
-		"current": replacement.AsJSON(), "previous": initial.AsJSON(),
+		"current": initial.AsJSON(), "previous": initial.AsJSON(),
 		"schema_version": HarnessIdentitySchemaVersion, "transition": "gate_reopen",
 	})
 	if err != nil {
@@ -187,9 +185,8 @@ func TestHarnessIdentityStoreReadsEarlierAcknowledgedGateTransition(t *testing.T
 	if err := os.WriteFile(filepath.Join(directory, "transition-000001.json"), encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	transition, err := store.PrepareGateTransition(replacement, 3)
-	if err != nil || transition.RequiresRecord {
-		t.Fatalf("earlier transition record was not preserved: %#v, %v", transition, err)
+	if _, err := store.PrepareGateTransition(initial, 3); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("non-quiescent transition schema error = %v", err)
 	}
 }
 

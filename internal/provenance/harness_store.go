@@ -98,7 +98,7 @@ func (s *HarnessIdentityStore) RecordGateTransition(transition HarnessGateTransi
 		return nil
 	}
 	if (accepted == nil && transition.Previous != nil) || (accepted != nil && (transition.Previous == nil || !accepted.Equal(*transition.Previous))) {
-		return &HarnessIdentityError{Reason: "harness identity changed while gate acknowledgement was pending"}
+		return &HarnessIdentityError{Reason: "harness identity changed while the gate transition was pending"}
 	}
 	directory := filepath.Join(s.run, harnessTransitionDirectory)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
@@ -253,24 +253,15 @@ func decodeHarnessTransition(encoded []byte) (HarnessGateTransition, error) {
 	if err := decoder.Decode(&fields); err != nil {
 		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed", Err: err}
 	}
-	legacyAcknowledged := hasExactHarnessFields(fields,
-		"acknowledged", "after_generation", "current", "previous", "schema_version", "transition")
-	if !legacyAcknowledged && !hasExactHarnessFields(fields,
+	if !hasExactHarnessFields(fields,
 		"after_generation", "current", "previous", "schema_version", "transition") {
 		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
 	}
 	var schema, generation uint64
 	var kind string
 	if json.Unmarshal(fields["schema_version"], &schema) != nil || schema != HarnessIdentitySchemaVersion ||
-		json.Unmarshal(fields["after_generation"], &generation) != nil || json.Unmarshal(fields["transition"], &kind) != nil {
-		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
-	}
-	if legacyAcknowledged {
-		var acknowledged bool
-		if json.Unmarshal(fields["acknowledged"], &acknowledged) != nil || !acknowledged || kind != "gate_reopen" {
-			return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
-		}
-	} else if kind != "quiescent_gate_reopen" {
+		json.Unmarshal(fields["after_generation"], &generation) != nil ||
+		json.Unmarshal(fields["transition"], &kind) != nil || kind != "quiescent_gate_reopen" {
 		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
 	}
 	current, err := ParseHarnessIdentity(fields["current"])
