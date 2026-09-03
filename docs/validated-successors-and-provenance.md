@@ -47,12 +47,15 @@ successful build creates no such success record.
 
 Each Luna consultation similarly receives a stable review ID. A Sol-requested
 review first stores its full originating identity and exact private request and
-proposal, then captures a canonical whole-source snapshot only after the Sol
-turn has quiesced; its terminal `completed` or `interrupted` status is recorded
-with the snapshot identity. Luna's `list` and `read` calls are served solely
-from that immutable snapshot. For every source `read` delivered to Luna,
-trusted evidence stores the requested path/range, result status, returned-byte
-hash and size, and the exact returned bytes. The exact reviewer result and its
+proposal, then captures the same canonical `seed/` source selection used by a
+trusted build only after the Sol turn has quiesced. Non-source guest files are
+excluded; every selected path and byte is independently validated, and an
+invalid selected source path fails capture. The origin's terminal `completed`
+or `interrupted` status is recorded with the snapshot identity. Luna's `list`
+and `read` calls are served solely from that immutable snapshot. For every
+source `read` delivered to Luna, trusted evidence stores the requested
+path/range, result status, returned-byte hash and size, and the exact returned
+bytes. The exact reviewer result and its
 completed, failed, or cancelled outcome are private evidence, followed by the
 single continuation turn identity and status. Operational events expose only
 identities, sizes, and SHA-256 values; provided-asset reads remain excluded.

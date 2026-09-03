@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1206,10 +1207,23 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	runtime := newGenerationTestRuntime(t)
 	activity := observability.NewActivityStream()
 	source := []byte("original-snapshot")
+	buildSnapshot, err := guest.EncodeSourceSnapshot([]guest.SnapshotFile{{Path: "seed/tasks.c", Content: source}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildSnapshotDigest := fmt.Sprintf("%x", sha256.Sum256(buildSnapshot))
+	reviewerSnapshot := buildSnapshot
+	if expectedReviews > 1 {
+		reviewerSnapshot, err = guest.EncodeSourceSnapshot([]guest.SnapshotFile{{Path: "seed/tasks.c", Content: []byte("mutated-after-capture")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewerSnapshotDigest := fmt.Sprintf("%x", sha256.Sum256(reviewerSnapshot))
 	runtime.invoke = func(_ context.Context, name string, _ [][]byte) (guest.ToolResult, error) {
 		switch name {
 		case "list":
-			return guest.ToolResult{Status: 0, Output: []byte("seed/tasks.c\n")}, nil
+			return guest.ToolResult{Status: 0, Output: []byte("test/immutable\nseed/tasks.c\n")}, nil
 		case "read":
 			captured := append([]byte(nil), source...)
 			source = []byte("mutated-after-capture")
@@ -1281,7 +1295,11 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	turnRequest, _ := reviewerRecord["turn_request"].(map[string]any)
 	params, _ := turnRequest["params"].(map[string]any)
 	input, _ := params["input"].([]any)
-	if len(input) != 1 || !strings.Contains(input[0].(map[string]any)["text"].(string), string(proposal)) {
+	reviewerPrompt := ""
+	if len(input) == 1 {
+		reviewerPrompt, _ = input[0].(map[string]any)["text"].(string)
+	}
+	if !strings.Contains(reviewerPrompt, string(proposal)) || !strings.Contains(reviewerPrompt, fmt.Sprintf("Stable source snapshot: sha256=%s bytes=%d.", reviewerSnapshotDigest, len(reviewerSnapshot))) {
 		t.Fatalf("reviewer prompt did not receive the exact proposal: %#v", reviewerRecord)
 	}
 	reviewResult, err := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "result.txt"))
@@ -1290,6 +1308,10 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	}
 	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
 	reviewerIdentity, _ := manifest["reviewer"].(map[string]any)
+	snapshotIdentity, _ := manifest["source_snapshot"].(map[string]any)
+	if snapshotIdentity["size"] != float64(len(buildSnapshot)) || snapshotIdentity["sha256"] != buildSnapshotDigest {
+		t.Fatalf("review snapshot identity differs from trusted build source: %#v", snapshotIdentity)
+	}
 	wantOriginStatus := "interrupted"
 	if mode == "completed-review" {
 		wantOriginStatus = "completed"
@@ -1304,6 +1326,14 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 		}
 	} else if !strings.Contains(string(reviewResult), "independent review failed") {
 		t.Fatalf("review failure was not made explicit to the continuation: %q", reviewResult)
+	}
+	runtime.mu.Lock()
+	calls := append([]generationTestCall(nil), runtime.calls...)
+	runtime.mu.Unlock()
+	for _, call := range calls {
+		if call.name == "read" && len(call.arguments) > 0 && string(call.arguments[0]) == "test/immutable" {
+			t.Fatal("review snapshot read non-source test/immutable")
+		}
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)

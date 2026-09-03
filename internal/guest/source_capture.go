@@ -39,6 +39,12 @@ func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, str
 		if path == "" {
 			return nil, errors.New("source list contains an empty path")
 		}
+		if !strings.HasPrefix(path, "seed/") {
+			continue
+		}
+		if err := validateSourcePath(path); err != nil {
+			return nil, err
+		}
 		requested := maxSnapshotContent - total + 1
 		result, readErr := invoke(ctx, "read", [][]byte{
 			[]byte(path), []byte("0"), []byte(strconv.Itoa(requested)),
