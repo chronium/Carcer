@@ -34,6 +34,7 @@ type CompletedArchive struct {
 	SuccessorISO     []byte
 	QEMUStdout       []byte
 	QEMUStderr       []byte
+	HarnessIdentity  *provenance.HarnessIdentity
 }
 
 // AbortedArchive is the trusted input required to publish one aborted
@@ -48,6 +49,7 @@ type AbortedArchive struct {
 	QEMUStdout       []byte
 	QEMUStderr       []byte
 	LatestSuccess    *AbortedSuccessEvidence
+	HarnessIdentity  *provenance.HarnessIdentity
 }
 
 // AbortedSuccessEvidence is the optional latest-success pair retained in an
@@ -71,6 +73,7 @@ type completedArchiveFiles struct {
 	ISOIdentity      provenance.FileIdentity
 	QEMUStdout       string
 	QEMUStderr       string
+	HarnessIdentity  *provenance.HarnessIdentity
 }
 
 type abortedArchiveFiles struct {
@@ -82,6 +85,7 @@ type abortedArchiveFiles struct {
 	QEMUStdout       string
 	QEMUStderr       string
 	LatestSuccess    *AbortedSuccessEvidence
+	HarnessIdentity  *provenance.HarnessIdentity
 }
 
 // WriteCompletedArchive validates and durably publishes one immutable
@@ -106,6 +110,9 @@ func WriteCompletedArchive(runDirectory string, input CompletedArchive) (Archive
 			return err
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "completed", input.ParentGeneration, input.Transition); err != nil {
+			return err
+		}
+		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
 		}
 		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
@@ -161,6 +168,9 @@ func writeCompletedArchiveFiles(runDirectory string, input completedArchiveFiles
 			return err
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "completed", input.ParentGeneration, input.Transition); err != nil {
+			return err
+		}
+		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
 		}
 		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
@@ -219,6 +229,9 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 		if err := writeArchiveMetadata(staging, input.Generation, "aborted", input.ParentGeneration, input.Transition); err != nil {
 			return err
 		}
+		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
+			return err
+		}
 		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
 		if err != nil {
 			return &GenerationRuntimeError{Reason: "generation hardware manifest is malformed", Err: err}
@@ -267,6 +280,9 @@ func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (A
 			return err
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "aborted", input.ParentGeneration, input.Transition); err != nil {
+			return err
+		}
+		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
 		}
 		hardware, err := qemu.EncodeHardwareManifest(input.Hardware)
@@ -353,6 +369,17 @@ func validateArchiveMetadataInput(generation uint64, parent *uint64, transition 
 		return &GenerationRuntimeError{Reason: "generation archive metadata is malformed"}
 	}
 	return nil
+}
+
+func writeArchiveHarnessIdentity(staging string, identity *provenance.HarnessIdentity) error {
+	if identity == nil {
+		return nil
+	}
+	encoded, err := provenance.EncodeHarnessIdentity(*identity)
+	if err != nil {
+		return &GenerationRuntimeError{Reason: "generation harness identity is malformed", Err: err}
+	}
+	return writeArchiveFile(staging, provenance.GenerationHarnessFilename, encoded)
 }
 
 func makeArchiveLayout(staging string, completed bool) error {

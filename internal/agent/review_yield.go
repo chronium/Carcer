@@ -417,8 +417,11 @@ type snapshotReviewRuntime struct {
 	files []guest.SnapshotFile
 }
 
-func (r *snapshotReviewRuntime) ReviewRunning() bool               { return r.base.ReviewRunning() }
-func (r *snapshotReviewRuntime) GenerationNumber() (uint64, bool)  { return r.base.GenerationNumber() }
+func (r *snapshotReviewRuntime) ReviewRunning() bool              { return r.base.ReviewRunning() }
+func (r *snapshotReviewRuntime) GenerationNumber() (uint64, bool) { return r.base.GenerationNumber() }
+func (r *snapshotReviewRuntime) HarnessIdentity() *provenance.HarnessIdentity {
+	return r.base.HarnessIdentity()
+}
 func (r *snapshotReviewRuntime) EventLog() *observability.EventLog { return r.base.EventLog() }
 func (r *snapshotReviewRuntime) Metrics() *observability.Metrics   { return r.base.Metrics() }
 func (r *snapshotReviewRuntime) ForensicProvenance() *provenance.BuildReviewProvenance {

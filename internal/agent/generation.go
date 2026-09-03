@@ -217,6 +217,10 @@ type GenerationStateRuntime interface {
 	GenerationState() string
 }
 
+type GenerationHarnessIdentityRuntime interface {
+	HarnessIdentity() *provenance.HarnessIdentity
+}
+
 // GenerationGateRuntime is the narrow trusted boundary used before retaining
 // a completed generation's Codex thread. A state name alone is insufficient:
 // the selected successor and handoff must already be frozen by the runtime.
@@ -989,7 +993,9 @@ func (s *GenerationSession) RunInitialTurn() (GenerationResult, error) {
 		s.markUnhealthy()
 		return GenerationResult{}, &GenerationWorkerError{Reason: "Codex planning evidence directory is unavailable"}
 	}
-	evidence, err := provenance.NewPlanningEvidenceStore(s.runtime.RunDirectory()).Begin(generation, s.ThreadID())
+	evidence, err := provenance.NewPlanningEvidenceStoreWithHarnessIdentity(
+		s.runtime.RunDirectory(), generationHarnessIdentity(s.runtime),
+	).Begin(generation, s.ThreadID())
 	if err != nil {
 		s.markUnhealthy()
 		s.record("planning_failed", mergeMaps(s.servingProvenance(), map[string]any{
@@ -2460,6 +2466,9 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 type generationReviewRuntime struct{ GenerationRuntime }
 
 func (r generationReviewRuntime) ReviewRunning() bool { return r.GenerationRunning() }
+func (r generationReviewRuntime) HarnessIdentity() *provenance.HarnessIdentity {
+	return generationHarnessIdentity(r.GenerationRuntime)
+}
 func (r generationReviewRuntime) ForensicProvenance() *provenance.BuildReviewProvenance {
 	if runtime, ok := any(r.GenerationRuntime).(interface {
 		ForensicProvenance() *provenance.BuildReviewProvenance
@@ -2526,12 +2535,27 @@ func (s *GenerationSession) record(event string, data map[string]any) {
 	if ok {
 		pointer = &generation
 	}
+	if identity := generationHarnessIdentity(s.runtime); identity != nil {
+		copy := make(map[string]any, len(data)+1)
+		for key, value := range data {
+			copy[key] = value
+		}
+		copy["harness_identity"] = identity.AsJSON()
+		data = copy
+	}
 	if log := s.runtime.EventLog(); log != nil {
 		log.Record(event, pointer, data)
 	}
 	if metrics := s.runtime.Metrics(); metrics != nil {
 		metrics.Record(event, data)
 	}
+}
+
+func generationHarnessIdentity(runtime GenerationRuntime) *provenance.HarnessIdentity {
+	if provider, ok := any(runtime).(GenerationHarnessIdentityRuntime); ok {
+		return provenance.CloneHarnessIdentity(provider.HarnessIdentity())
+	}
+	return nil
 }
 
 func (s *GenerationSession) markUnhealthy() {

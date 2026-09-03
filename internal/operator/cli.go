@@ -26,6 +26,7 @@ type Options struct {
 	ProvidedAssetsConfigured bool
 	OTLPEndpoint             string
 	UseTUI                   bool
+	AcknowledgeHarnessChange bool
 }
 
 // NewCommand constructs the compatible Cobra command and invokes run only
@@ -36,6 +37,7 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 	var resumeAtGate bool
 	var plain bool
 	var tui bool
+	var acknowledgeHarnessChange bool
 
 	command := &cobra.Command{
 		Use:           "codexos",
@@ -72,6 +74,9 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 			if inheritanceRequested && options.InheritFromGeneration < 0 {
 				return errors.New("--inherit-from-generation must not be negative")
 			}
+			if acknowledgeHarnessChange && !resumeSet {
+				return errors.New("--acknowledge-harness-change is valid only with --resume-at-gate")
+			}
 
 			if plain && tui {
 				return errors.New("--plain and --tui are mutually exclusive")
@@ -85,6 +90,7 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 			options.InheritanceRequested = inheritanceRequested
 			options.ProvidedAssetsConfigured = flags.Changed("provided-assets")
 			options.UseTUI = tui || (terminalSupported && !plain)
+			options.AcknowledgeHarnessChange = acknowledgeHarnessChange
 			if run == nil {
 				return errors.New("CodexOS operator runner is unavailable")
 			}
@@ -104,6 +110,7 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 	flags.StringVar(&options.OTLPEndpoint, "otlp-endpoint", "", "OTLP/HTTP metrics endpoint")
 	flags.BoolVar(&plain, "plain", false, "force the line-oriented console even on an interactive terminal")
 	flags.BoolVar(&tui, "tui", false, "require the full-screen interactive terminal interface")
+	flags.BoolVar(&acknowledgeHarnessChange, "acknowledge-harness-change", false, "acknowledge a harness identity replacement while reopening a generation gate")
 	_ = command.MarkFlagRequired("run-directory")
 	return command
 }

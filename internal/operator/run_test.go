@@ -254,8 +254,7 @@ func TestRunnerReopensArchivedGateThroughPlainConsole(t *testing.T) {
 
 	var output bytes.Buffer
 	err = runWithIO(context.Background(), Options{
-		RunDirectory: runDirectory,
-		ResumeAtGate: true,
+		RunDirectory: runDirectory, ResumeAtGate: true, AcknowledgeHarnessChange: true,
 	}, strings.NewReader("quit\n"), &output)
 	if err != nil {
 		t.Fatalf("run archived gate: %v", err)
@@ -376,6 +375,11 @@ func TestRunnerRejectsOtherInvalidOptionsBeforeCreatingRunDirectory(t *testing.T
 			name:    "one-sided Git",
 			options: Options{ResumeAtGate: true, GitRepository: "repo"},
 			want:    "--git-repository and --git-base-ref must be supplied together",
+		},
+		{
+			name:    "harness acknowledgement outside gate",
+			options: Options{InitialISO: "seed.iso", AcknowledgeHarnessChange: true},
+			want:    "--acknowledge-harness-change is valid only with --resume-at-gate",
 		},
 	}
 	for _, test := range tests {

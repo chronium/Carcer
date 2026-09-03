@@ -353,3 +353,27 @@ func TestForensicProvenanceErrorUnwrapsCause(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestBuildAndReviewEvidenceCarryFixedHarnessIdentity(t *testing.T) {
+	identity := testHarnessIdentity()
+	store := NewBuildReviewProvenanceWithHarnessIdentity(t.TempDir(), &identity)
+	build, err := store.BeginBuild(8, []byte("snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := store.BeginReview(8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(build.directory, "manifest.json"), filepath.Join(review.directory, "manifest.json")} {
+		manifest := readForensicManifest(t, path)
+		encoded, err := json.Marshal(manifest["harness_identity"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual, err := ParseHarnessIdentity(encoded)
+		if err != nil || !actual.Equal(identity) {
+			t.Fatalf("%s harness identity = %#v, %v", path, actual, err)
+		}
+	}
+}

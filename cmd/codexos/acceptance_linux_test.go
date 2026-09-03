@@ -38,6 +38,7 @@ func TestCodexOSBinaryOperatesAtDisposableGate(t *testing.T) {
 		command := exec.CommandContext(ctx, binary,
 			"--run-directory", runDirectory,
 			"--resume-at-gate",
+			"--acknowledge-harness-change",
 			"--plain",
 		)
 		command.Stdin = strings.NewReader("quit\n")
@@ -79,6 +80,7 @@ func TestCodexOSBinaryOperatesAtDisposableGate(t *testing.T) {
 		command := exec.CommandContext(ctx, binary,
 			"--run-directory", runDirectory,
 			"--resume-at-gate",
+			"--acknowledge-harness-change",
 			"--tui",
 		)
 		command.Stdin = slave

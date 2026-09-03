@@ -39,6 +39,9 @@ func (r *CodexOSRun) completeLiveGeneration(generation *liveGeneration, number u
 	transition := r.currentTransition
 	hardware := r.currentHardware
 	r.gateMu.Unlock()
+	if err := r.recordHarnessGenerationStart(number); err != nil {
+		return err
+	}
 
 	if r.liveGeneration() != generation {
 		return &GenerationRuntimeError{Reason: "CodexOS live generation ownership changed"}
@@ -52,7 +55,8 @@ func (r *CodexOSRun) completeLiveGeneration(generation *liveGeneration, number u
 	}
 	archive, err := writeCompletedArchiveFiles(r.runDirectory, completedArchiveFiles{
 		Generation: number, ParentGeneration: parent, Transition: transition, Hardware: hardware,
-		BootISO: generation.bootISO, Handoff: pending.HandoffMessage, SourceSnapshot: pending.SourceSnapshot,
+		HarnessIdentity: r.HarnessIdentity(),
+		BootISO:         generation.bootISO, Handoff: pending.HandoffMessage, SourceSnapshot: pending.SourceSnapshot,
 		KernelELF: pending.KernelELF, SuccessorISO: pending.ISO,
 		KernelIdentity: validated.KernelIdentity, ISOIdentity: validated.ISOIdentity,
 		QEMUStdout: generation.stdoutPath, QEMUStderr: generation.stderrPath,
@@ -129,6 +133,14 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 		r.clearLiveTransition()
 		return err
 	}
+	if err := r.recordHarnessGenerationStart(next); err != nil {
+		closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+		if closeErr == nil {
+			_ = os.RemoveAll(generation.workspace)
+		}
+		r.clearLiveTransition()
+		return errors.Join(err, closeErr)
+	}
 	r.installLiveGeneration(generation)
 	r.gateMu.Lock()
 	r.generationNumber = &next
@@ -198,6 +210,14 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 		r.clearLiveTransition()
 		return err
 	}
+	if err := r.recordHarnessGenerationStart(next); err != nil {
+		closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+		if closeErr == nil {
+			_ = os.RemoveAll(generation.workspace)
+		}
+		r.clearLiveTransition()
+		return errors.Join(err, closeErr)
+	}
 	r.installLiveGeneration(generation)
 	handoff := *archived.Handoff
 	r.gateMu.Lock()
@@ -234,6 +254,9 @@ func (r *CodexOSRun) abortLiveGeneration() error {
 	transition := r.currentTransition
 	hardware := r.currentHardware
 	r.gateMu.Unlock()
+	if err := r.recordHarnessGenerationStart(number); err != nil {
+		return err
+	}
 	generation := r.liveGeneration()
 	if generation == nil {
 		return &GenerationRuntimeError{Reason: "CodexOS live generation is unavailable"}
@@ -260,7 +283,8 @@ func (r *CodexOSRun) abortLiveGeneration() error {
 	}
 	_, err := writeAbortedArchiveFiles(r.runDirectory, abortedArchiveFiles{
 		Generation: number, ParentGeneration: parent, Transition: transition, Hardware: hardware,
-		BootISO: generation.bootISO, QEMUStdout: generation.stdoutPath, QEMUStderr: generation.stderrPath,
+		HarnessIdentity: r.HarnessIdentity(),
+		BootISO:         generation.bootISO, QEMUStdout: generation.stdoutPath, QEMUStderr: generation.stderrPath,
 		LatestSuccess: latest,
 	})
 	if err != nil {

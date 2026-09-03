@@ -980,6 +980,18 @@ func (c *PlainConsole) record(event string, data map[string]any) {
 }
 
 func (c *PlainConsole) recordAt(event string, generation *uint64, data map[string]any) {
+	if provider, ok := any(c.runtime).(interface {
+		HarnessIdentity() *provenance.HarnessIdentity
+	}); ok {
+		if identity := provider.HarnessIdentity(); identity != nil {
+			copy := make(map[string]any, len(data)+1)
+			for key, value := range data {
+				copy[key] = value
+			}
+			copy["harness_identity"] = identity.AsJSON()
+			data = copy
+		}
+	}
 	if log := c.runtime.EventLog(); log != nil {
 		log.Record(event, generation, data)
 	}

@@ -77,8 +77,9 @@ func RunWithIO(ctx context.Context, options Options, input io.Reader, output io.
 // disposable acceptance boundary. The public runner supplies the zero value;
 // no test setting is exposed through the operator CLI or guest state.
 type runnerConfiguration struct {
-	live    experiment.LiveRunOptions
-	session agent.GenerationSessionOptions
+	live            experiment.LiveRunOptions
+	session         agent.GenerationSessionOptions
+	harnessIdentity *provenance.HarnessIdentity
 }
 
 func runWithIO(ctx context.Context, options Options, input io.Reader, output io.Writer) (resultErr error) {
@@ -141,6 +142,9 @@ func runWithIOConfigured(
 	if initialISOConfigured == options.ResumeAtGate {
 		return errors.New("exactly one of --initial-iso and --resume-at-gate must be supplied")
 	}
+	if options.AcknowledgeHarnessChange && !options.ResumeAtGate {
+		return errors.New("--acknowledge-harness-change is valid only with --resume-at-gate")
+	}
 	if (options.GitRepository == "") != (options.GitBaseRef == "") {
 		return errors.New("--git-repository and --git-base-ref must be supplied together")
 	}
@@ -155,15 +159,29 @@ func runWithIOConfigured(
 	if inheritanceRequested && !gitConfigured {
 		return errors.New("cross-run inheritance requires Git provenance options")
 	}
+	harnessIdentity := provenance.CloneHarnessIdentity(configuration.harnessIdentity)
+	if harnessIdentity == nil {
+		captured, captureErr := provenance.CaptureCurrentHarnessIdentity()
+		if captureErr != nil {
+			return captureErr
+		}
+		harnessIdentity = &captured
+	}
 	if inheritanceRequested {
-		if _, err := store.InitializeCrossRunBootstrap(
+		if _, err := store.InitializeCrossRunBootstrapWithHarnessIdentity(
 			options.RunDirectory,
 			options.InitialISO,
 			options.InheritFromRun,
 			uint64(options.InheritFromGeneration),
 			options.GitRepository,
 			options.GitBaseRef,
+			harnessIdentity,
 		); err != nil {
+			return err
+		}
+	}
+	if !options.ResumeAtGate && !inheritanceRequested {
+		if err := provenance.NewHarnessIdentityStore(options.RunDirectory).RecordRunCreation(*harnessIdentity); err != nil {
 			return err
 		}
 	}
@@ -201,6 +219,8 @@ func runWithIOConfigured(
 	liveOptions.EventLog = eventLog
 	liveOptions.Metrics = metrics
 	liveOptions.ActivityStream = activity
+	liveOptions.HarnessIdentity = harnessIdentity
+	liveOptions.AcknowledgeHarnessChange = options.AcknowledgeHarnessChange
 	runtime, err = experiment.NewLiveCodexOSRun(options.RunDirectory, liveOptions)
 	if err != nil {
 		return err

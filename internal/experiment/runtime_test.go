@@ -10,8 +10,32 @@ import (
 	"testing"
 
 	"codexos/internal/guest"
+	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 )
+
+func TestGenerationArchiveCarriesHarnessIdentityWithoutChangingLegacyMetadata(t *testing.T) {
+	run := t.TempDir()
+	identity := experimentHarnessIdentity()
+	archive, err := WriteCompletedArchive(run, CompletedArchive{
+		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"),
+		Handoff: "handoff", SourceSnapshot: testSnapshot(t, "source\n"), KernelELF: []byte("kernel"),
+		SuccessorISO: []byte("iso"), HarnessIdentity: &identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archive.HarnessIdentity == nil || !archive.HarnessIdentity.Equal(identity) {
+		t.Fatalf("archive harness identity = %#v", archive.HarnessIdentity)
+	}
+	metadata, err := os.ReadFile(filepath.Join(archive.ArchivePath, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(metadata, []byte("harness")) {
+		t.Fatalf("legacy archive metadata was changed: %s", metadata)
+	}
+}
 
 func TestCompletedArchiveGateAndContinue(t *testing.T) {
 	run := t.TempDir()
@@ -29,6 +53,9 @@ func TestCompletedArchiveGateAndContinue(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if archive.HarnessIdentity != nil {
+		t.Fatalf("legacy archive acquired a fabricated harness identity: %#v", archive.HarnessIdentity)
 	}
 	before := archiveBytes(t, archive.ArchivePath)
 	runState, err := NewCodexOSRun(run)
@@ -346,6 +373,18 @@ func testHardware(t *testing.T) qemu.HardwareManifest {
 		t.Fatal(err)
 	}
 	return hardware
+}
+
+func experimentHarnessIdentity() provenance.HarnessIdentity {
+	return provenance.HarnessIdentity{
+		SchemaVersion:    provenance.HarnessIdentitySchemaVersion,
+		RepositoryCommit: strings.Repeat("a", 40),
+		Executable:       provenance.FileIdentity{SHA256: strings.Repeat("b", 64), Size: 42},
+		Build: provenance.HarnessBuildIdentity{
+			GoVersion: "go-test", ModulePath: "codexos", ModuleVersion: "v-test",
+			SettingsSHA256: strings.Repeat("c", 64),
+		},
+	}
 }
 
 func testSnapshot(t *testing.T, source string) []byte {

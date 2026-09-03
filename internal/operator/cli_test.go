@@ -59,6 +59,7 @@ func TestCommandOpeningDisplayAndPairingValidation(t *testing.T) {
 		{"inheritance opening", []string{"--run-directory", "run", "--resume-at-gate", "--inherit-from-run", "old", "--inherit-from-generation", "1", "--git-repository", "repo", "--git-base-ref", "base"}, "cross-run inheritance is valid only with --initial-iso"},
 		{"inheritance provenance", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "1"}, "cross-run inheritance requires Git provenance options"},
 		{"negative inherited generation", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--inherit-from-run", "old", "--inherit-from-generation", "-1", "--git-repository", "repo", "--git-base-ref", "base"}, "--inherit-from-generation must not be negative"},
+		{"harness acknowledgement gate only", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--acknowledge-harness-change"}, "--acknowledge-harness-change is valid only with --resume-at-gate"},
 		{"display exclusive", []string{"--run-directory", "run", "--initial-iso", "seed.iso", "--plain", "--tui"}, "--plain and --tui are mutually exclusive"},
 		{"positional arguments rejected", []string{"--run-directory", "run", "--resume-at-gate", "extra"}, "unknown command \"extra\""},
 	}
@@ -78,6 +79,21 @@ func TestCommandOpeningDisplayAndPairingValidation(t *testing.T) {
 				t.Fatal("runner was called after invalid arguments")
 			}
 		})
+	}
+}
+
+func TestCommandCarriesHarnessAcknowledgementAtGate(t *testing.T) {
+	var received Options
+	command := NewCommand(false, func(_ context.Context, options Options) error {
+		received = options
+		return nil
+	})
+	command.SetArgs([]string{"--run-directory", "run", "--resume-at-gate", "--acknowledge-harness-change"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !received.ResumeAtGate || !received.AcknowledgeHarnessChange {
+		t.Fatalf("gate acknowledgement was lost: %#v", received)
 	}
 }
 

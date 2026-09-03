@@ -48,6 +48,7 @@ var reviewFocuses = map[string]struct{}{
 type ReviewRuntime interface {
 	ReviewRunning() bool
 	GenerationNumber() (uint64, bool)
+	HarnessIdentity() *provenance.HarnessIdentity
 	InvokeTool(context.Context, string, [][]byte) (guest.ToolResult, error)
 	EventLog() *observability.EventLog
 	Metrics() *observability.Metrics
@@ -726,6 +727,14 @@ func (w *ReviewWorker) finish(runtime ReviewRuntime, generation *uint64, evidenc
 }
 
 func (w *ReviewWorker) record(runtime ReviewRuntime, event string, generation *uint64, data map[string]any) {
+	if identity := runtime.HarnessIdentity(); identity != nil {
+		copy := make(map[string]any, len(data)+1)
+		for key, value := range data {
+			copy[key] = value
+		}
+		copy["harness_identity"] = identity.AsJSON()
+		data = copy
+	}
 	if log := runtime.EventLog(); log != nil {
 		log.Record(event, generation, data)
 	}

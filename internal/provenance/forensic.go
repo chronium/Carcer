@@ -74,9 +74,10 @@ type ForensicEventRecorder func(event string, generation uint64, data map[string
 // BuildReviewProvenance allocates run-local immutable build and review
 // evidence.  The optional recorder receives structured, non-content events.
 type BuildReviewProvenance struct {
-	root     string
-	recorder ForensicEventRecorder
-	mutex    sync.Mutex
+	root            string
+	recorder        ForensicEventRecorder
+	harnessIdentity *HarnessIdentity
+	mutex           sync.Mutex
 }
 
 func NewBuildReviewProvenance(runDirectory string, recorder ...ForensicEventRecorder) *BuildReviewProvenance {
@@ -88,6 +89,12 @@ func NewBuildReviewProvenance(runDirectory string, recorder ...ForensicEventReco
 		root:     filepath.Join(runDirectory, "build-review-provenance"),
 		recorder: eventRecorder,
 	}
+}
+
+func NewBuildReviewProvenanceWithHarnessIdentity(runDirectory string, identity *HarnessIdentity, recorder ...ForensicEventRecorder) *BuildReviewProvenance {
+	store := NewBuildReviewProvenance(runDirectory, recorder...)
+	store.harnessIdentity = CloneHarnessIdentity(identity)
+	return store
 }
 
 // BeginBuild reserves an attempt ID before any build processing occurs.  A
@@ -105,6 +112,12 @@ func (s *BuildReviewProvenance) BeginBuild(generation uint64, snapshot []byte) (
 		"attempt_id":     attemptID,
 		"stage":          "received",
 		"outcome":        "incomplete",
+	}
+	if s.harnessIdentity != nil {
+		if err := ValidateHarnessIdentity(*s.harnessIdentity); err != nil {
+			return nil, err
+		}
+		manifest["harness_identity"] = s.harnessIdentity.AsJSON()
 	}
 	if snapshot != nil {
 		manifest["source_snapshot"] = map[string]any{
@@ -142,6 +155,12 @@ func (s *BuildReviewProvenance) BeginReview(generation uint64) (*ReviewEvidence,
 		"capture_outcome":   "in_progress",
 		"evidence_complete": false,
 		"source_reads":      []map[string]any{},
+	}
+	if s.harnessIdentity != nil {
+		if err := ValidateHarnessIdentity(*s.harnessIdentity); err != nil {
+			return nil, err
+		}
+		manifest["harness_identity"] = s.harnessIdentity.AsJSON()
 	}
 	if err := writeForensicJSON(filepath.Join(directory, "manifest.json"), manifest); err != nil {
 		return nil, err

@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"codexos/internal/guest"
+	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 )
 
@@ -50,6 +51,7 @@ const (
 	archiveHandoffLimit          int64 = 16 * 1024
 	archiveSnapshotLimit         int64 = 1024 * 1024
 	archiveForensicManifestLimit int64 = 1024 * 1024
+	archiveHarnessIdentityLimit  int64 = 256 * 1024
 	abortBootImageLimit          int64 = 128 * 1024 * 1024
 )
 
@@ -77,6 +79,7 @@ type ArchivedGeneration struct {
 	ArchivePath      string
 	Handoff          *string
 	Hardware         qemu.HardwareManifest
+	HarnessIdentity  *provenance.HarnessIdentity
 }
 
 // PendingGenerationFinish identifies the exact immutable successor selected
@@ -371,6 +374,26 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 	}
 
 	latest := archives[len(archives)-1]
+	var harnessTransition provenance.HarnessGateTransition
+	if r.live != nil && r.live.options.HarnessIdentity != nil {
+		if r.live.harnessStore == nil {
+			return &GenerationRuntimeError{Reason: "harness identity store is unavailable"}
+		}
+		harnessTransition, err = r.live.harnessStore.PrepareGateTransition(
+			*r.live.options.HarnessIdentity, latest.Generation, r.live.options.AcknowledgeHarnessChange,
+		)
+		if err != nil {
+			return err
+		}
+		if err := r.live.harnessStore.RecordGateTransition(harnessTransition); err != nil {
+			return err
+		}
+		if harnessTransition.RequiresRecord {
+			r.recordLive("harness_identity_transition_acknowledged", &latest.Generation, map[string]any{
+				"after_generation": latest.Generation, "previous_identity": harnessIdentityJSON(harnessTransition.Previous),
+			})
+		}
+	}
 	if r.live != nil {
 		effectiveGeneration := latest.Generation
 		if effectiveGeneration != ^uint64(0) {
@@ -423,6 +446,13 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 		})
 	}
 	return nil
+}
+
+func harnessIdentityJSON(identity *provenance.HarnessIdentity) any {
+	if identity == nil {
+		return nil
+	}
+	return identity.AsJSON()
 }
 
 // ContinueGeneration explicitly starts the next generation from the selected
@@ -718,6 +748,21 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 			return ArchivedGeneration{}, fmt.Errorf("generation archive artifact is missing: %s", required)
 		}
 	}
+	var harnessIdentity *provenance.HarnessIdentity
+	harnessPath := filepath.Join(archive, provenance.GenerationHarnessFilename)
+	if _, statErr := os.Lstat(harnessPath); statErr == nil {
+		harnessBytes, readErr := readArchiveArtifact(harnessPath, archiveHarnessIdentityLimit)
+		if readErr != nil {
+			return ArchivedGeneration{}, readErr
+		}
+		identity, parseErr := provenance.ParseHarnessIdentity(harnessBytes)
+		if parseErr != nil {
+			return ArchivedGeneration{}, errors.New("generation harness identity is malformed")
+		}
+		harnessIdentity = &identity
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return ArchivedGeneration{}, statErr
+	}
 
 	result := ArchivedGeneration{
 		Generation:       generation,
@@ -726,6 +771,7 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		Outcome:          metadata.outcome,
 		ArchivePath:      archive,
 		Hardware:         hardware,
+		HarnessIdentity:  provenance.CloneHarnessIdentity(harnessIdentity),
 	}
 	if metadata.outcome == "completed" {
 		for _, directory := range []string{
@@ -767,10 +813,14 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		}
 		handoff := string(handoffBytes)
 		result.Handoff = &handoff
-		if err := validateArchiveNames(archive, []string{
+		names := []string{
 			archiveBootName, archiveMetadataName, hardwareManifestName, handoffName,
 			sourceSnapshotName, sourceName, successorName, stdoutName, stderrName,
-		}); err != nil {
+		}
+		if harnessIdentity != nil {
+			names = append(names, provenance.GenerationHarnessFilename)
+		}
+		if err := validateArchiveNames(archive, names); err != nil {
 			return ArchivedGeneration{}, err
 		}
 	} else {
@@ -784,6 +834,9 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		names := []string{
 			archiveBootName, archiveMetadataName, hardwareManifestName, abortedMarkerName,
 			stdoutName, stderrName,
+		}
+		if harnessIdentity != nil {
+			names = append(names, provenance.GenerationHarnessFilename)
 		}
 		manifestPath := filepath.Join(archive, latestSuccessManifestName)
 		snapshotPath := filepath.Join(archive, latestSuccessSnapshotName)

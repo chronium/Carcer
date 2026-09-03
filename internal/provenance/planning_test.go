@@ -168,6 +168,18 @@ func TestPlanningEvidenceWriteFailurePreservesManifest(t *testing.T) {
 	}
 }
 
+func TestPlanningEvidenceCarriesFixedHarnessIdentity(t *testing.T) {
+	identity := testHarnessIdentity()
+	evidence, err := NewPlanningEvidenceStoreWithHarnessIdentity(t.TempDir(), &identity).Begin(2, "thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := readManifest(t, filepath.Join(evidence.directory, "manifest.json"))
+	if manifest.HarnessIdentity == nil || !manifest.HarnessIdentity.Equal(identity) {
+		t.Fatalf("planning harness identity = %#v", manifest.HarnessIdentity)
+	}
+}
+
 func TestPlanningEvidenceNonDirectoryRootMatchesAllocationConflict(t *testing.T) {
 	run := t.TempDir()
 	if err := os.WriteFile(filepath.Join(run, "planning-evidence"), []byte("not a directory"), 0o600); err != nil {
