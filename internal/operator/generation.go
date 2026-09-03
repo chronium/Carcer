@@ -600,6 +600,19 @@ func (c *GenerationController) SessionThreadID() string {
 	return session.ThreadID()
 }
 
+func (c *GenerationController) ReviewYieldState() agent.ReviewYieldState {
+	if c == nil {
+		return agent.ReviewYieldIdle
+	}
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return agent.ReviewYieldIdle
+	}
+	return session.ReviewYieldState()
+}
+
 // NextTurnKind reports how StartTurn would use the current generation session.
 // It is operator presentation state, not an admission reservation.
 func (c *GenerationController) NextTurnKind() string {

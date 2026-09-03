@@ -364,6 +364,35 @@ func (r *CodexOSRun) InvokeTool(ctx context.Context, name string, arguments [][]
 	return result, nil
 }
 
+// CaptureReviewSource holds the live runtime operation lock across every guest
+// exchange so a reviewer receives one immutable, explicitly identified source
+// snapshot rather than a sequence of independently mutable reads.
+func (r *CodexOSRun) CaptureReviewSource(ctx context.Context) ([]byte, error) {
+	if r == nil || r.live == nil {
+		return nil, &GenerationRuntimeError{Reason: "CodexOS run has no live runtime configuration"}
+	}
+	if ctx == nil {
+		return nil, &GenerationRuntimeError{Reason: "review source capture context is nil"}
+	}
+	r.live.operationMu.Lock()
+	defer r.live.operationMu.Unlock()
+	generation, number, err := r.requireRunningLiveGeneration()
+	if err != nil {
+		return nil, err
+	}
+	operationContext, cancelOperation := r.liveOperationContext(ctx)
+	defer cancelOperation()
+	snapshot, err := guest.CaptureSourceSnapshot(operationContext, generation.toolClient.InvokeTool)
+	if err != nil {
+		r.recordLive("review_source_snapshot_failed", &number, map[string]any{})
+		return nil, err
+	}
+	r.recordLive("review_source_snapshot_captured", &number, map[string]any{
+		"source_snapshot_sha256": sha256Hex(snapshot), "source_snapshot_bytes": len(snapshot),
+	})
+	return snapshot, nil
+}
+
 func (r *CodexOSRun) Pause(ctx context.Context) error {
 	if r == nil || r.live == nil {
 		return &GenerationRuntimeError{Reason: "CodexOS run has no live runtime configuration"}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"codexos/internal/agent"
 	"codexos/internal/experiment"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
@@ -1126,6 +1127,20 @@ func (c *PlainConsole) exitInterviewState() string {
 func (c *PlainConsole) CodexTurnState() string {
 	if c == nil {
 		return "stopped"
+	}
+	switch c.controller.ReviewYieldState() {
+	case agent.ReviewYieldStoppingOrigin:
+		return "yielding for review"
+	case agent.ReviewYieldAwaitingReview:
+		return "awaiting review"
+	case agent.ReviewYieldReviewing:
+		return "reviewing"
+	case agent.ReviewYieldAwaitingContinuation:
+		return "review ready"
+	case agent.ReviewYieldFailed:
+		return "review failed"
+	case agent.ReviewYieldResuming:
+		return "resuming review"
 	}
 	if turn := c.currentTurn(); turn != nil {
 		if turn.phase == "initial" || turn.phase == "planning" {

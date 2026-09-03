@@ -100,8 +100,10 @@ exact resource-label spelling depends on the central Alloy/Loki configuration:
 Trusted build-attempt events additionally connect receipt, decoding, artifact
 identity, candidate start, READY, protocol validation, final outcome, and
 latest-success using one generation-scoped `build_attempt_id`. Reviewer
-lifecycle events carry a `review_id`, and `review_source_read` records the guest
-source range and exact returned-byte identity. Hashes and IDs are structured
+lifecycle events carry a `review_id`. Review-yield events bind the originating
+request/call/thread/turn/phase to a stable source-snapshot identity and the one
+continuation turn; `review_source_read` records a snapshot-backed source range
+and exact returned-byte identity. Hashes and IDs are structured
 event data for forensic correlation only; they are never metric attributes or
 labels. Exact retained bytes and authoritative manifests remain in the private
 run-local `build-review-provenance/` tree described in
@@ -125,7 +127,7 @@ only a successful planning attempt atomically publishes the immutable final
 if the generation later aborts.
 
 Operational `planning_started`, `planning_completed`, `planning_interrupted`,
-and `planning_failed` events contain serving/turn provenance and, for a captured
+`planning_yielded`, and `planning_failed` events contain serving/turn provenance and, for a captured
 response, only its byte count and digest. Plan text is excluded from JSONL event
 payloads, OTLP metrics and labels, fresh-successor prompts, successor handoffs,
 generation Git provenance, and public tags. Within the current generation it
@@ -138,10 +140,12 @@ Queueing, result readiness, response-write attempts, and the single terminal
 delivery, rejection, or orphaning outcome carry the originating JSON-RPC request,
 call, thread, turn, and phase identities. Turn-terminal evidence also records any
 still-pending call IDs. A response write is only an attempt; the matching
-app-server `item/completed` notification is the delivery evidence. Reviewer
-execution may therefore complete even though its
-outer result was orphaned; the two outcomes are never conflated, and review text
-is not included in these events. A planning turn with an orphaned call is recorded
+app-server `item/completed` notification is the delivery evidence. An admitted
+review request instead records `tool_result_yielded`, closes the origin to later
+tool admission, and never records result-ready, response-write, delivered, or
+orphaned evidence. Reviewer completion and the later trusted continuation remain
+separate states, and review text
+is not included in operational events. A planning turn with an orphaned ordinary call is recorded
 as failed and remains retryable instead of advancing to implementation. The
 isolated reviewer applies the same delivery proof to its own read-only calls and
 quiesces them before its process and workspace are retired.

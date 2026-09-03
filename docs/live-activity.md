@@ -49,6 +49,11 @@ ordered activity stream only; it neither approves the plan nor inserts an
 operator gate. The exact final plan is retained separately as private run-local
 evidence and is not made persistent through the TUI transcript.
 
+During a requested review boundary the same header reports yielding, awaiting
+review, reviewing, review ready, review failed, or resuming review. These are
+read-only views of the session lifecycle; the TUI does not carry findings or
+drive transitions.
+
 Streaming agent messages remain safe plain text so token deltas do not trigger
 repeated Markdown parsing and reflow. The authoritative completed message
 updates the same logical row and renders as Markdown. Terminal controls are

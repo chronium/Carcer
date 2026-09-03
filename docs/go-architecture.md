@@ -138,10 +138,14 @@ shutdown. It also validates cumulative token usage and derives non-duplicating
 metric deltas. The generation session uses that client for same-thread planning
 and implementation turns with per-turn cancellation and bounded callback joins.
 `internal/agent` also owns a fresh, isolated reviewer process, workspace, and
-thread for each consultation. The reviewer exposes only dynamically discovered
-read-only guest tools through a narrow cycle-free runtime boundary, records
-source reads and immutable review evidence, attributes activity and token
-metrics, and has a bounded cancellation and process-reaping path. Generation
+thread for each consultation. A review request closes the originating Sol turn
+to new tools, quiesces it, captures source atomically under the live runtime's
+serialized operation lock, and exposes only snapshot-backed read tools to Luna.
+The exact findings return through one trusted continuation on the same Sol
+process, thread, and phase. Request, proposal, snapshot, and findings bytes are
+private evidence; operational events carry only identities and digests. The
+reviewer attributes activity and token metrics and has a bounded cancellation
+and process-reaping path. Generation
 sessions expose the distinct planning and implementation permission profiles,
 freeze their discovered dynamic-tool set for one ephemeral thread, retain
 private planning evidence, and keep planning continuations in that thread.
@@ -149,7 +153,10 @@ Implementor and reviewer sessions share one turn-scoped dynamic-call router:
 writing a JSON-RPC result is only an attempt, while a matching terminal
 `dynamicToolCall` item proves delivery. Unresolved planning calls fail the
 attempt retryably and block implementation, and both session types join their
-tool callbacks before advancing or removing isolated state.
+tool callbacks before advancing or removing isolated state. Review yields are
+the deliberate exception: their originating request is rejected after admission,
+recorded as `yielded` rather than delivered, and replaced by the trusted
+continuation lifecycle instead of a long-running dynamic-tool response.
 After a matching frozen finish, that same healthy thread may be retained at the
 gate for tool-less read-only exit-interview turns. Retention leases the exact
 completed-generation gate, so continuation and rollback cannot invalidate the

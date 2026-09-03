@@ -44,7 +44,9 @@ type generationTestRuntime struct {
 	tools          []string
 	calls          []generationTestCall
 	invoke         func(context.Context, string, [][]byte) (guest.ToolResult, error)
+	capture        func(context.Context) ([]byte, error)
 	eventLog       *observability.EventLog
+	provenance     *provenance.BuildReviewProvenance
 	metrics        *observability.Metrics
 	previous       string
 	previousSet    bool
@@ -68,7 +70,7 @@ func newGenerationTestRuntime(t *testing.T) *generationTestRuntime {
 		t.Fatal(err)
 	}
 	t.Cleanup(eventLog.Close)
-	return &generationTestRuntime{
+	runtime := &generationTestRuntime{
 		root:       root,
 		running:    true,
 		generation: 12,
@@ -77,6 +79,10 @@ func newGenerationTestRuntime(t *testing.T) *generationTestRuntime {
 		profile:    qemu.TestHardwareProfile,
 		callNotify: make(chan string, 32),
 	}
+	runtime.provenance = provenance.NewBuildReviewProvenance(root, func(event string, generation uint64, data map[string]any) {
+		eventLog.Record(event, &generation, data)
+	})
+	return runtime
 }
 
 func (r *generationTestRuntime) GenerationRunning() bool { return r.running }
@@ -135,6 +141,18 @@ func (r *generationTestRuntime) InvokeTool(ctx context.Context, name string, arg
 func (r *generationTestRuntime) RunDirectory() string              { return r.root }
 func (r *generationTestRuntime) EventLog() *observability.EventLog { return r.eventLog }
 func (r *generationTestRuntime) Metrics() *observability.Metrics   { return r.metrics }
+func (r *generationTestRuntime) ForensicProvenance() *provenance.BuildReviewProvenance {
+	return r.provenance
+}
+func (r *generationTestRuntime) CaptureReviewSource(ctx context.Context) ([]byte, error) {
+	r.mu.Lock()
+	capture := r.capture
+	r.mu.Unlock()
+	if capture != nil {
+		return capture(ctx)
+	}
+	return guest.CaptureSourceSnapshot(ctx, r.InvokeTool)
+}
 func (r *generationTestRuntime) PreviousHandoff() (string, bool) {
 	return r.previous, r.previousSet || r.previous != ""
 }
@@ -281,6 +299,20 @@ func TestGenerationToolSchemasPreserveAdvertisementOrderAndFeatureJSON(t *testin
 	}
 	if got, want := strings.Join(names, ","), "read,list,build,list_requests"; got != want {
 		t.Fatalf("tool order = %q, want %q", got, want)
+	}
+	reviewSchema, _ := reviewDynamicFunction()["inputSchema"].(map[string]any)
+	required, _ := reviewSchema["required"].([]string)
+	if len(required) != 1 || required[0] != "proposal" {
+		t.Fatalf("review required arguments = %#v, want proposal", required)
+	}
+	runtime := newGenerationTestRuntime(t)
+	reviewSession := NewGenerationSession(runtime, GenerationSessionOptions{})
+	_, err = reviewSession.beginReviewYield(map[string]any{"params": map[string]any{
+		"callId": "review-call", "threadId": "thread", "turnId": "turn",
+		"namespace": nil, "tool": "review", "arguments": map[string]any{"focus": "general"},
+	}}, &dynamicCallRouting{requestID: "review-request", callID: "review-call"}, "thread", "turn", "implementation")
+	if err == nil || err.Error() != "review requires the actual proposed plan or change" {
+		t.Fatalf("implementation review without proposal error = %v", err)
 	}
 
 	requests := []store.FeatureRequest{
@@ -625,9 +657,74 @@ func TestGenerationSessionJoinsTerminalTurnToolBeforeImplementation(t *testing.T
 	}
 }
 
-func TestGenerationSessionDoesNotImplementUndeliveredReview(t *testing.T) {
-	recordPath := filepath.Join(t.TempDir(), "generation-orphaned-review.json")
+func TestGenerationSessionYieldsPlanningReviewAndResumesExactlyOnce(t *testing.T) {
+	assertGenerationPlanningReviewYield(t, "orphaned-review", "success", 3, 1)
+}
+
+func TestGenerationSessionReviewYieldSurvivesCompletedOriginRace(t *testing.T) {
+	assertGenerationPlanningReviewYield(t, "completed-review", "success", 3, 1)
+}
+
+func TestGenerationSessionReviewFailureResumesWithExplicitResult(t *testing.T) {
+	assertGenerationPlanningReviewYield(t, "orphaned-review", "failure", 3, 1)
+}
+
+func TestGenerationSessionReviewEvidenceSetupFailureStillYields(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-evidence-failure.json")
 	setGenerationHelper(t, "orphaned-review", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	if err := os.WriteFile(filepath.Join(runtime.root, "build-review-provenance"), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activity := observability.NewActivityStream()
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ActivityStream: activity, StopTimeout: time.Second,
+	})
+	result, err := session.RunInitialTurn()
+	if err != nil || result.TurnStatus != "completed" || !session.Healthy() || !session.PlanningCompleted() {
+		t.Fatalf("review evidence failure lifecycle = %#v, %v; healthy=%t planning=%t", result, err, session.Healthy(), session.PlanningCompleted())
+	}
+	if reason := runtime.eventLog.DegradedReason(); !strings.Contains(reason, "review yield setup evidence is unavailable") {
+		t.Fatalf("review evidence degradation = %q", reason)
+	}
+	events, err := os.ReadFile(runtime.eventLog.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(events, []byte(`"event":"tool_result_yielded"`)) {
+		t.Fatalf("valid review fell through the ordinary tool path:\n%s", events)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(events))
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := event["data"].(map[string]any)
+		if data["call_id"] == "generation-call-0" && event["event"] == "tool_response_write_attempted" {
+			t.Fatalf("valid review fell through the ordinary tool path: %#v", event)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range activity.Drain() {
+		if event.Kind == observability.ActivityToolStarted && event.Data["tool"] == "review" {
+			t.Fatalf("failed review boundary left an ordinary tool activity active: %#v", event)
+		}
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionSupportsSequentialPlanningAndImplementationReviews(t *testing.T) {
+	assertGenerationPlanningReviewYield(t, "sequential-reviews", "success", 5, 3)
+}
+
+func TestGenerationSessionFailsClosedWhenReviewContinuationCannotStart(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-resume-failed.json")
+	setGenerationHelper(t, "review-resume-failed", recordPath)
 	t.Setenv(reviewerHelperMode, "success")
 	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
 	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
@@ -638,32 +735,575 @@ func TestGenerationSessionDoesNotImplementUndeliveredReview(t *testing.T) {
 	session := NewGenerationSession(runtime, GenerationSessionOptions{
 		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
 	})
-	result, err := session.RunInitialTurn()
-	if err != nil || result.TurnStatus != "failed" {
-		t.Fatalf("orphaned review planning result = %#v, %v", result, err)
+	if _, err := session.RunInitialTurn(); err == nil || !strings.Contains(err.Error(), "synthetic continuation start failure") {
+		t.Fatalf("continuation start error = %v", err)
 	}
-	if !session.Healthy() || !session.PlanningRetryRequired() || session.PlanningCompleted() {
-		t.Fatalf("orphaned review retry state: healthy=%t required=%t completed=%t", session.Healthy(), session.PlanningRetryRequired(), session.PlanningCompleted())
+	if session.Healthy() || session.PlanningCompleted() {
+		t.Fatalf("failed continuation remained admissible: healthy=%t planning=%t", session.Healthy(), session.PlanningCompleted())
 	}
 	session.mu.Lock()
 	turnNumber := session.turnNumber
 	session.mu.Unlock()
 	if turnNumber != 1 {
-		t.Fatalf("implementation started after undelivered review: turn number = %d", turnNumber)
+		t.Fatalf("implementation or duplicate continuation started: turn number = %d", turnNumber)
+	}
+	if _, err := session.RunPlanningContinuationTurn(); err == nil || !strings.Contains(err.Error(), "unusable") {
+		t.Fatalf("ambiguous continuation retry = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionPauseCancelsReviewAndResumesTrustedContinuation(t *testing.T) {
+	assertGenerationSessionPauseDefersTrustedReviewContinuation(t, "orphaned-review", "interrupted")
+}
+
+func TestGenerationSessionCompletedReviewOriginPauseKeepsPlanningIncomplete(t *testing.T) {
+	assertGenerationSessionPauseDefersTrustedReviewContinuation(t, "completed-review", "completed")
+}
+
+func assertGenerationSessionPauseDefersTrustedReviewContinuation(t *testing.T, mode, originStatus string) {
+	t.Helper()
+	recordPath := filepath.Join(t.TempDir(), "generation-review-pause.json")
+	setGenerationHelper(t, mode, recordPath)
+	t.Setenv(reviewerHelperMode, "hold")
+	reviewerRecordPath := filepath.Join(t.TempDir(), "reviewer-hold.json")
+	t.Setenv(reviewerHelperRecord, reviewerRecordPath)
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan struct {
+		result GenerationResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := session.RunInitialTurn()
+		resultChannel <- struct {
+			result GenerationResult
+			err    error
+		}{result, err}
+	}()
+	waitForReviewerFile(t, reviewerRecordPath)
+	reviewerPID := int(readReviewerJSON(t, reviewerRecordPath)["pid"].(float64))
+	if session.ReviewYieldState() != ReviewYieldReviewing {
+		t.Fatalf("review state before pause = %q", session.ReviewYieldState())
+	}
+	if err := session.InterruptTurn(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := <-resultChannel
+	if interrupted.err != nil || interrupted.result.TurnStatus != "interrupted" || session.PlanningCompleted() {
+		t.Fatalf("paused review result = %#v, %v", interrupted.result, interrupted.err)
+	}
+	if generationProcessAlive(reviewerPID) {
+		t.Fatalf("cancelled reviewer process %d remains alive", reviewerPID)
+	}
+	if session.ReviewYieldState() != ReviewYieldFailed {
+		t.Fatalf("review state after pause = %q", session.ReviewYieldState())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	session.mu.Unlock()
+	if turnNumber != 1 {
+		t.Fatalf("deferred review continuation advanced planning: turn number = %d", turnNumber)
+	}
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	if manifest["origin_status"] != originStatus {
+		t.Fatalf("paused review origin status = %#v, want %q", manifest["origin_status"], originStatus)
+	}
+	resumed, err := session.RunPlanningContinuationTurn()
+	if err != nil || resumed.TurnStatus != "completed" || !session.PlanningCompleted() {
+		t.Fatalf("trusted review continuation did not resume planning: %#v, %v", resumed, err)
+	}
+	resultBytes, err := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "result.txt"))
+	if err != nil || !strings.Contains(string(resultBytes), "review was cancelled") {
+		t.Fatalf("cancelled review result = %q, %v", resultBytes, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionPauseInterruptsActiveReviewContinuation(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-resume-interrupt.json")
+	setGenerationHelper(t, "review-resume-interrupt", recordPath)
+	t.Setenv(reviewerHelperMode, "success")
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	continuationToolStarted := make(chan struct{})
+	var continuationOnce sync.Once
+	var session *GenerationSession
+	runtime.invoke = func(_ context.Context, name string, _ [][]byte) (guest.ToolResult, error) {
+		if session != nil && session.ReviewYieldState() == ReviewYieldResuming {
+			continuationOnce.Do(func() { close(continuationToolStarted) })
+		}
+		switch name {
+		case "list":
+			return guest.ToolResult{Status: 0, Output: []byte("seed/tasks.c\n")}, nil
+		case "read":
+			return guest.ToolResult{Status: 0, Output: []byte("stable-source")}, nil
+		default:
+			return guest.ToolResult{Status: 0}, nil
+		}
+	}
+	session = NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan struct {
+		result GenerationResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := session.RunInitialTurn()
+		resultChannel <- struct {
+			result GenerationResult
+			err    error
+		}{result, err}
+	}()
+	select {
+	case <-continuationToolStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("trusted review continuation did not start")
+	}
+	if session.ReviewYieldState() != ReviewYieldResuming {
+		t.Fatalf("review state before continuation pause = %q", session.ReviewYieldState())
+	}
+	pid, pidOK := session.ProcessPID()
+	threadID := session.ThreadID()
+	if !pidOK || pid <= 0 || threadID == "" {
+		t.Fatalf("active continuation identity = pid %d (%t), thread %q", pid, pidOK, threadID)
+	}
+	if err := session.InterruptTurn(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := <-resultChannel
+	if interrupted.err != nil || interrupted.result.TurnStatus != "interrupted" || session.PlanningCompleted() {
+		t.Fatalf("interrupted review continuation = %#v, %v", interrupted.result, interrupted.err)
+	}
+	resumed, err := session.RunPlanningContinuationTurn()
+	if err != nil || resumed.TurnStatus != "completed" || !session.PlanningCompleted() {
+		t.Fatalf("planning after paused review continuation = %#v, %v", resumed, err)
+	}
+	if resumedPID, ok := session.ProcessPID(); !ok || resumedPID != pid || session.ThreadID() != threadID {
+		t.Fatalf("pause replaced Sol process/thread: pid %d (%t), thread %q", resumedPID, ok, session.ThreadID())
+	}
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	if manifest["continuation_status"] != "interrupted" {
+		t.Fatalf("review continuation status = %#v", manifest["continuation_status"])
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionCloseQuiescesStoppingReviewOrigin(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-origin-hold.json")
+	setGenerationHelper(t, "review-origin-hold", recordPath)
+	t.Setenv(reviewerHelperMode, "success")
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := session.RunInitialTurn()
+		resultChannel <- err
+	}()
+	waitForReviewerFile(t, recordPath)
+	if session.ReviewYieldState() != ReviewYieldStoppingOrigin {
+		t.Fatalf("review state before close = %q", session.ReviewYieldState())
+	}
+	pid, ok := session.ProcessPID()
+	if !ok || pid <= 0 {
+		t.Fatalf("stopping-origin app-server PID = %d, %t", pid, ok)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("closing a stopping review origin: %v", err)
+	}
+	select {
+	case err := <-resultChannel:
+		if err == nil {
+			t.Fatal("closed review origin unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("review origin did not return after session close")
+	}
+	waitForGenerationProcessExit(t, pid)
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	if manifest["review_outcome"] != "cancelled" || manifest["stage"] != "awaiting_continuation" {
+		t.Fatalf("closed review evidence = %#v", manifest)
+	}
+	result, err := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "result.txt"))
+	if err != nil || !strings.Contains(string(result), "cancelled") {
+		t.Fatalf("closed review result = %q, %v", result, err)
+	}
+}
+
+func TestGenerationSessionCloseCancelsReviewSnapshotCapture(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-capture-close.json")
+	setGenerationHelper(t, "orphaned-review", recordPath)
+	runtime := newGenerationTestRuntime(t)
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	runtime.capture = func(ctx context.Context) ([]byte, error) {
+		close(entered)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	}
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
+	})
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := session.RunInitialTurn()
+		resultChannel <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("review snapshot capture did not start")
+	}
+	if session.ReviewYieldState() != ReviewYieldAwaitingReview {
+		t.Fatalf("review state before capture close = %q", session.ReviewYieldState())
+	}
+	pid, ok := session.ProcessPID()
+	if !ok || pid <= 0 {
+		t.Fatalf("capture app-server PID = %d, %t", pid, ok)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("closing during review capture: %v", err)
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("Close returned before snapshot capture quiesced")
+	}
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generation turn did not return after capture close")
+	}
+	waitForGenerationProcessExit(t, pid)
+}
+
+func TestGenerationSessionCloseCancelsActiveReviewer(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-reviewer-close.json")
+	setGenerationHelper(t, "orphaned-review", recordPath)
+	t.Setenv(reviewerHelperMode, "hold")
+	reviewerRecordPath := filepath.Join(t.TempDir(), "reviewer-close.json")
+	t.Setenv(reviewerHelperRecord, reviewerRecordPath)
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := session.RunInitialTurn()
+		resultChannel <- err
+	}()
+	waitForReviewerFile(t, reviewerRecordPath)
+	if session.ReviewYieldState() != ReviewYieldReviewing {
+		t.Fatalf("review state before reviewer close = %q", session.ReviewYieldState())
+	}
+	reviewerPID := int(readReviewerJSON(t, reviewerRecordPath)["pid"].(float64))
+	implementorPID, ok := session.ProcessPID()
+	if !ok || implementorPID <= 0 {
+		t.Fatalf("reviewing app-server PID = %d, %t", implementorPID, ok)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("closing during active review: %v", err)
+	}
+	select {
+	case <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generation turn did not return after reviewer close")
+	}
+	waitForGenerationProcessExit(t, implementorPID)
+	waitForGenerationProcessExit(t, reviewerPID)
+}
+
+func TestGenerationSessionCloseCancelsActiveReviewContinuation(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-continuation-close.json")
+	setGenerationHelper(t, "review-resume-hold", recordPath)
+	t.Setenv(reviewerHelperMode, "success")
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := session.RunInitialTurn()
+		resultChannel <- err
+	}()
+	waitForReviewerFile(t, recordPath)
+	if session.ReviewYieldState() != ReviewYieldResuming {
+		t.Fatalf("review state before continuation close = %q", session.ReviewYieldState())
+	}
+	pid, ok := session.ProcessPID()
+	if !ok || pid <= 0 {
+		t.Fatalf("resuming app-server PID = %d, %t", pid, ok)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("closing during review continuation: %v", err)
+	}
+	select {
+	case err := <-resultChannel:
+		if err == nil {
+			t.Fatal("closed review continuation unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("review continuation did not return after close")
+	}
+	waitForGenerationProcessExit(t, pid)
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	if manifest["stage"] != "completed" || manifest["continuation_status"] != "failed" {
+		t.Fatalf("closed continuation evidence = %#v", manifest)
+	}
+}
+
+func TestGenerationSessionSlowSnapshotThenReviewSuccessUsesQuiescentBoundary(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-review-slow.json")
+	setGenerationHelper(t, "orphaned-review", recordPath)
+	t.Setenv(reviewerHelperMode, "success")
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runtime := newGenerationTestRuntime(t)
+	runtime.capture = func(ctx context.Context) ([]byte, error) {
+		close(entered)
+		select {
+		case <-release:
+			return guest.EncodeSourceSnapshot([]guest.SnapshotFile{{Path: "seed/tasks.c", Content: []byte("stable-source")}})
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan error, 1)
+	go func() {
+		_, err := session.RunInitialTurn()
+		resultChannel <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stable snapshot capture did not begin")
+	}
+	if session.ReviewYieldState() != ReviewYieldAwaitingReview {
+		t.Fatalf("state during slow capture = %q", session.ReviewYieldState())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	turnID := session.turnID
+	activeTools := session.activeTools
+	session.mu.Unlock()
+	if turnNumber != 1 || turnID != "" || activeTools != 0 {
+		t.Fatalf("origin was not quiescent before capture: turns=%d turn=%q tools=%d", turnNumber, turnID, activeTools)
+	}
+	close(release)
+	select {
+	case err := <-resultChannel:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow successful review did not resume")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerationSessionPauseResumesPendingImplementationReview(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "generation-implementation-review-pause.json")
+	setGenerationHelper(t, "implementation-review", recordPath)
+	t.Setenv(reviewerHelperMode, "hold")
+	reviewerRecordPath := filepath.Join(t.TempDir(), "reviewer-implementation-hold.json")
+	t.Setenv(reviewerHelperRecord, reviewerRecordPath)
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, StopTimeout: time.Second,
+	})
+	resultChannel := make(chan GenerationResult, 1)
+	errChannel := make(chan error, 1)
+	go func() {
+		result, err := session.RunInitialTurn()
+		resultChannel <- result
+		errChannel <- err
+	}()
+	waitForReviewerFile(t, reviewerRecordPath)
+	if err := session.InterruptTurn(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-resultChannel; result.TurnStatus != "interrupted" {
+		t.Fatalf("paused implementation review result = %#v", result)
+	}
+	if err := <-errChannel; err != nil {
+		t.Fatal(err)
+	}
+	if !session.PlanningCompleted() || session.ReviewYieldState() != ReviewYieldFailed {
+		t.Fatalf("paused implementation review state: planning=%t review=%q", session.PlanningCompleted(), session.ReviewYieldState())
+	}
+	resumed, err := session.RunContinuationTurn()
+	if err != nil || resumed.TurnStatus != "completed" || session.ReviewYieldState() != ReviewYieldIdle {
+		t.Fatalf("implementation review continuation = %#v, %v, state=%q", resumed, err, session.ReviewYieldState())
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string, expectedTurns, expectedReviews int) {
+	t.Helper()
+	recordPath := filepath.Join(t.TempDir(), "generation-orphaned-review.json")
+	setGenerationHelper(t, mode, recordPath)
+	t.Setenv(reviewerHelperMode, reviewerMode)
+	reviewerRecordPath := filepath.Join(t.TempDir(), "reviewer.json")
+	t.Setenv(reviewerHelperRecord, reviewerRecordPath)
+	reviewerExecutable := filepath.Join(t.TempDir(), "reviewer-helper")
+	wrapper := "#!/bin/sh\nunset " + generationHelperMode + " " + generationHelperRecord + " " + generationHelperToolReady + "\nexec \"" + os.Args[0] + "\" \"$@\"\n"
+	if err := os.WriteFile(reviewerExecutable, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newGenerationTestRuntime(t)
+	activity := observability.NewActivityStream()
+	source := []byte("original-snapshot")
+	runtime.invoke = func(_ context.Context, name string, _ [][]byte) (guest.ToolResult, error) {
+		switch name {
+		case "list":
+			return guest.ToolResult{Status: 0, Output: []byte("seed/tasks.c\n")}, nil
+		case "read":
+			captured := append([]byte(nil), source...)
+			source = []byte("mutated-after-capture")
+			return guest.ToolResult{Status: 0, Output: captured}, nil
+		default:
+			return guest.ToolResult{Status: 0}, nil
+		}
+	}
+	session := NewGenerationSession(runtime, GenerationSessionOptions{
+		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, ActivityStream: activity, StopTimeout: time.Second,
+	})
+	result, err := session.RunInitialTurn()
+	if err != nil || result.TurnStatus != "completed" {
+		t.Fatalf("yielded review result = %#v, %v", result, err)
+	}
+	if !session.Healthy() || session.PlanningRetryRequired() || !session.PlanningCompleted() {
+		t.Fatalf("yielded review state: healthy=%t required=%t completed=%t", session.Healthy(), session.PlanningRetryRequired(), session.PlanningCompleted())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	session.mu.Unlock()
+	if turnNumber != uint64(expectedTurns) {
+		t.Fatalf("planning review did not produce exactly one continuation before implementation: turn number = %d", turnNumber)
 	}
 	events, err := os.ReadFile(runtime.eventLog.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(events, []byte(`"event":"review_completed"`)) ||
-		!bytes.Contains(events, []byte(`"event":"tool_response_write_attempted"`)) ||
-		!bytes.Contains(events, []byte(`"event":"tool_result_orphaned"`)) ||
-		!bytes.Contains(events, []byte(`"call_id":"generation-call-0"`)) {
-		t.Fatalf("missing review delivery lifecycle evidence:\n%s", events)
+	reviewEvent := `"event":"review_completed"`
+	if reviewerMode == "failure" {
+		reviewEvent = `"event":"review_failed"`
 	}
-	result, err = session.RunPlanningContinuationTurn()
-	if err != nil || result.TurnStatus != "completed" || !session.PlanningCompleted() {
-		t.Fatalf("review planning retry sequence = %#v, %v", result, err)
+	if !bytes.Contains(events, []byte(reviewEvent)) ||
+		!bytes.Contains(events, []byte(`"event":"tool_result_yielded"`)) ||
+		!bytes.Contains(events, []byte(`"event":"review_yield_resuming"`)) ||
+		!bytes.Contains(events, []byte(`"call_id":"generation-call-0"`)) {
+		t.Fatalf("missing review yield lifecycle evidence:\n%s", events)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(events))
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := event["data"].(map[string]any)
+		if data["call_id"] == "generation-call-0" && (event["event"] == "tool_response_write_attempted" || event["event"] == "tool_result_delivered" || event["event"] == "tool_result_orphaned") {
+			t.Fatalf("yielded review was represented as an ordinary tool result: %#v", event)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(events, []byte(`"event":"tool_result_yielded"`)); got != expectedReviews {
+		t.Fatalf("yielded review count = %d, want %d", got, expectedReviews)
+	}
+	for _, event := range activity.Drain() {
+		if event.Kind == observability.ActivityToolStarted && event.Data["tool"] == "review" {
+			t.Fatalf("yielded review left an ordinary tool activity active: %#v", event)
+		}
+	}
+	proposal, err := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "proposal.txt"))
+	if err != nil || string(proposal) != "Inspect first, then implement the smallest useful change." {
+		t.Fatalf("private proposal = %q, %v", proposal, err)
+	}
+	if bytes.Contains(events, proposal) {
+		t.Fatal("operational event log exposed the private review proposal")
+	}
+	reviewerRecord := readReviewerJSON(t, reviewerRecordPath)
+	turnRequest, _ := reviewerRecord["turn_request"].(map[string]any)
+	params, _ := turnRequest["params"].(map[string]any)
+	input, _ := params["input"].([]any)
+	if len(input) != 1 || !strings.Contains(input[0].(map[string]any)["text"].(string), string(proposal)) {
+		t.Fatalf("reviewer prompt did not receive the exact proposal: %#v", reviewerRecord)
+	}
+	reviewResult, err := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "result.txt"))
+	if err != nil || bytes.Contains(events, reviewResult) {
+		t.Fatalf("private review result boundary = %q, %v", reviewResult, err)
+	}
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	reviewerIdentity, _ := manifest["reviewer"].(map[string]any)
+	wantOriginStatus := "interrupted"
+	if mode == "completed-review" {
+		wantOriginStatus = "completed"
+	}
+	if reviewerIdentity["thread_id"] == "" || reviewerIdentity["turn_id"] == "" || manifest["continuation_turn_id"] == "" || manifest["origin_status"] != wantOriginStatus {
+		t.Fatalf("review/continuation identities are incomplete: %#v", manifest)
+	}
+	if reviewerMode == "success" {
+		readEvidence, readErr := os.ReadFile(filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "read-000001.bin"))
+		if readErr != nil || string(readEvidence) != "ginal" || string(reviewResult) != "No meaningful issues found." {
+			t.Fatalf("successful reviewer did not use the stable snapshot: read=%q result=%q err=%v", readEvidence, reviewResult, readErr)
+		}
+	} else if !strings.Contains(string(reviewResult), "independent review failed") {
+		t.Fatalf("review failure was not made explicit to the continuation: %q", reviewResult)
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -1828,7 +2468,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "success" && mode != "worker-success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -1894,7 +2534,22 @@ func runGenerationFakeAppServer() {
 	if mode == "terminal-before-tool-result" {
 		turnCount = 3
 	}
-	if mode == "orphaned-review" {
+	if mode == "orphaned-review" || mode == "completed-review" || mode == "review-resume-failed" {
+		turnCount = 3
+	}
+	if mode == "review-resume-interrupt" {
+		turnCount = 4
+	}
+	if mode == "review-resume-hold" {
+		turnCount = 2
+	}
+	if mode == "review-origin-hold" {
+		turnCount = 1
+	}
+	if mode == "sequential-reviews" {
+		turnCount = 5
+	}
+	if mode == "implementation-review" {
 		turnCount = 3
 	}
 	if mode == "interview" {
@@ -1920,8 +2575,17 @@ func runGenerationFakeAppServer() {
 	}
 	for index := 0; index < turnCount; index++ {
 		turn := expect("turn/start")
+		if mode == "review-resume-failed" && index == 1 {
+			send(map[string]any{"id": turn["id"], "error": map[string]any{"code": -32000, "message": "synthetic continuation start failure"}})
+			writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
+			select {}
+		}
 		turnID := fmt.Sprintf("generation-turn-%d-%d", os.Getpid(), index)
 		respond(turn, map[string]any{"turn": map[string]any{"id": turnID}})
+		if mode == "review-resume-hold" && index == 1 {
+			writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
+			select {}
+		}
 		if mode == "interview-hold" && index == 2 {
 			send(map[string]any{"method": "item/completed", "params": map[string]any{
 				"threadId": threadID, "turnId": turnID, "item": map[string]any{
@@ -1941,10 +2605,12 @@ func runGenerationFakeAppServer() {
 		tool := "list"
 		namespace := any("codexos")
 		arguments := map[string]any{}
-		if mode == "orphaned-review" && index == 0 {
+		sequentialReview := mode == "sequential-reviews" && (index == 0 || index == 1 || index == 3)
+		implementationReview := mode == "implementation-review" && index == 1
+		if ((mode == "orphaned-review" || mode == "completed-review" || mode == "review-resume-failed" || mode == "review-resume-interrupt" || mode == "review-resume-hold" || mode == "review-origin-hold") && index == 0) || sequentialReview || implementationReview {
 			tool = "review"
 			namespace = nil
-			arguments = map[string]any{"focus": "general"}
+			arguments = map[string]any{"focus": "general", "proposal": "Inspect first, then implement the smallest useful change."}
 		}
 		if ((mode == "success" || mode == "worker-success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			tool = "write"
@@ -1955,6 +2621,30 @@ func runGenerationFakeAppServer() {
 			"callId": callID, "threadId": threadID, "turnId": turnID,
 			"namespace": namespace, "tool": tool, "arguments": arguments,
 		}})
+		if ((mode == "orphaned-review" || mode == "completed-review" || mode == "review-resume-failed" || mode == "review-resume-interrupt" || mode == "review-resume-hold" || mode == "review-origin-hold") && index == 0) || sequentialReview || implementationReview {
+			if mode == "completed-review" {
+				send(map[string]any{"method": "turn/completed", "params": map[string]any{
+					"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{}, "status": "completed"},
+				}})
+			}
+			rejected := read()
+			messages = append(messages, rejected)
+			if rejected["id"] != callID || rejected["error"] == nil {
+				os.Exit(27)
+			}
+			interrupt := expect("turn/interrupt")
+			if mode == "review-origin-hold" {
+				writeGenerationRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "messages": messages})
+				select {}
+			}
+			respond(interrupt, map[string]any{})
+			if mode != "completed-review" {
+				send(map[string]any{"method": "turn/completed", "params": map[string]any{
+					"threadId": threadID, "turn": map[string]any{"id": turnID, "items": []any{}, "status": "interrupted"},
+				}})
+			}
+			continue
+		}
 		terminalBeforeToolResult := mode == "terminal-before-tool-result" && index == 0
 		if terminalBeforeToolResult {
 			deadline := time.Now().Add(2 * time.Second)
@@ -1993,6 +2683,9 @@ func runGenerationFakeAppServer() {
 			if mode == "resume-failed" {
 				interruptAt = 0
 			}
+			if mode == "review-resume-interrupt" {
+				interruptAt = 1
+			}
 			if mode == "interview-interrupt" {
 				interruptAt = 2
 			}
@@ -2029,6 +2722,9 @@ func runGenerationFakeAppServer() {
 		}
 		if mode == "resume-failed" {
 			interruptAt = 0
+		}
+		if mode == "review-resume-interrupt" {
+			interruptAt = 1
 		}
 		if mode == "interview-interrupt" {
 			interruptAt = 2

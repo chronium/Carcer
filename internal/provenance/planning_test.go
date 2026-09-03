@@ -103,6 +103,40 @@ func TestInterruptedResumedAndFailedPlanningEvidence(t *testing.T) {
 	}
 }
 
+func TestPlanningReviewYieldKeepsProposalPrivateAndPlanIncomplete(t *testing.T) {
+	run := t.TempDir()
+	evidence, err := NewPlanningEvidenceStore(run).Begin(7, "thread-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := evidence.RecordStarted("turn-origin"); err != nil {
+		t.Fatal(err)
+	}
+	proposal := "Exact proposed plan.\nReview this before implementation."
+	identity, err := evidence.RecordYielded(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(run, "planning-evidence", "generation-0007")
+	manifest := readManifest(t, filepath.Join(directory, "manifest.json"))
+	if manifest.Stage != "awaiting_resume" || manifest.Outcome != "incomplete" || manifest.Attempts[0].Outcome != "yielded_for_review" {
+		t.Fatalf("yielded planning manifest = %#v", manifest)
+	}
+	if identity.Size != uint64(len(proposal)) || manifest.Attempts[0].ResponseFile != "attempt-0001-proposal.txt" {
+		t.Fatalf("proposal identity = %#v, attempt = %#v", identity, manifest.Attempts[0])
+	}
+	if _, err := os.Stat(filepath.Join(directory, "response.txt")); !os.IsNotExist(err) {
+		t.Fatalf("review proposal was published as the final plan: %v", err)
+	}
+	if err := evidence.RecordStarted("turn-continuation"); err != nil {
+		t.Fatal(err)
+	}
+	final := "Final plan after advisory review."
+	if _, err := evidence.Complete("completed", &final); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPlanningEvidenceWriteFailurePreservesManifest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory mode failure is Unix-specific")

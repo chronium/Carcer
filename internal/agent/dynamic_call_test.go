@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -264,6 +265,43 @@ func TestDynamicCallRouterReleasesObservedCallbackThatNeverStarts(t *testing.T) 
 	}
 	if countDynamicCallEvents(dynamicCallTestEvents(eventsMu, events), "tool_result_orphaned") != 1 {
 		t.Fatal("released orphan did not retain its terminal evidence")
+	}
+}
+
+func TestDynamicCallRouterYieldIsTerminalAndLateDuplicateCannotReopenTurn(t *testing.T) {
+	router, events, eventsMu := newDynamicCallTestRouter()
+	message := dynamicCallTestMessage("server-1", "call-1", "thread-1", "turn-1", "review")
+	route := router.ensure(message, "thread-1", "turn-1", "planning")
+	if route == nil || !router.reserveHandler(route) || !router.startHandler(route) {
+		t.Fatal("review route was not admitted")
+	}
+	if !router.finish(route, "yielded", "") {
+		t.Fatal("review route did not become yielded")
+	}
+	if pending := router.orphanUnresolved("thread-1", "turn-1", "planning", "completed"); len(pending) != 0 {
+		t.Fatalf("yielded route became pending: %#v", pending)
+	}
+	router.finishHandler(route)
+	if len(router.calls) != 0 {
+		t.Fatalf("yielded route was not pruned: %#v", router.calls)
+	}
+	if duplicate := router.ensure(message, "thread-1", "turn-1", "planning"); duplicate != nil {
+		t.Fatalf("late duplicate reopened a terminal turn: %#v", duplicate)
+	}
+	eventsSnapshot := dynamicCallTestEvents(eventsMu, events)
+	if countDynamicCallEvents(eventsSnapshot, "tool_result_yielded") != 1 || countDynamicCallEvents(eventsSnapshot, "tool_result_orphaned") != 0 {
+		t.Fatalf("yield terminal events = %#v", eventsSnapshot)
+	}
+}
+
+func TestDynamicCallRouterBoundsTerminalTurnTombstones(t *testing.T) {
+	router, _, _ := newDynamicCallTestRouter()
+	for index := 0; index < maxTerminalDynamicTurns+20; index++ {
+		turnID := fmt.Sprintf("turn-%d", index)
+		router.orphanUnresolved("thread-1", turnID, "continuation", "completed")
+	}
+	if len(router.terminalTurns) != maxTerminalDynamicTurns || len(router.terminalOrder) != maxTerminalDynamicTurns {
+		t.Fatalf("terminal tombstones = %d/%d", len(router.terminalTurns), len(router.terminalOrder))
 	}
 }
 

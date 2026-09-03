@@ -70,11 +70,14 @@ type ReviewOptions struct {
 	Objective        *string
 	Focus            string
 	Request          *string
+	Proposal         *string
+	SourceSnapshot   provenance.FileIdentity
 	Model            string
 	ReasoningEffort  string
 	ReasoningSummary string
 	ServiceTier      string
 	Origin           map[string]any
+	Evidence         *provenance.ReviewEvidence
 }
 
 // ReviewWorkerError reports a failed isolated reviewer consultation.
@@ -181,9 +184,12 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 	if hasGeneration {
 		generationPointer = &generation
 	}
+	if options.Evidence != nil && (!hasGeneration || options.Evidence.Generation() != generation) {
+		return "", &ReviewWorkerError{Reason: "review evidence belongs to another generation"}
+	}
 
-	var evidence *provenance.ReviewEvidence
-	if hasGeneration {
+	evidence := options.Evidence
+	if evidence == nil && hasGeneration {
 		if store := runtime.ForensicProvenance(); store != nil {
 			evidence, err = store.BeginReview(generation)
 			if err != nil {
@@ -407,7 +413,7 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 	}()
 	turnID, err = server.StartTurn(runContext, codexapp.StartTurnOptions{
 		ThreadID:          threadID,
-		Prompt:            reviewerPrompt(options.Objective, options.Focus, options.Request),
+		Prompt:            reviewerPrompt(options.Objective, options.Focus, options.Request, options.Proposal, options.SourceSnapshot),
 		Model:             options.Model,
 		Effort:            options.ReasoningEffort,
 		ReasoningSummary:  options.ReasoningSummary,
@@ -415,14 +421,19 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		PermissionProfile: reviewerPermissionProfile,
 	})
 	setRoute(threadID, turnID)
-	turnReadyOnce.Do(func() { close(turnReady) })
-	turnStarted = true
 	if err != nil {
 		if w.isCancelled(runContext) {
 			return "", &ReviewWorkerError{Reason: "Codex reviewer consultation was cancelled", Err: err}
 		}
 		return "", reviewError(err)
 	}
+	if evidence != nil {
+		if err := evidence.RecordReviewerTurn(threadID, turnID); err != nil {
+			w.degrade(runtime, "review forensic provenance was incomplete: "+err.Error())
+		}
+	}
+	turnReadyOnce.Do(func() { close(turnReady) })
+	turnStarted = true
 	w.publish(generationPointer, observability.ActivityReviewer, observability.ActivityTurnStarted, map[string]any{
 		"focus": options.Focus,
 	}, threadID, turnID, "")
@@ -765,6 +776,7 @@ func normalizeReviewOptions(options ReviewOptions) (ReviewOptions, error) {
 	for name, value := range map[string]*string{
 		"objective": options.Objective,
 		"request":   options.Request,
+		"proposal":  options.Proposal,
 	} {
 		if value == nil {
 			continue
@@ -1129,7 +1141,7 @@ func dynamicFunction(name, description string, properties map[string]any, requir
 	}
 }
 
-func reviewerPrompt(objective *string, focus string, request *string) string {
+func reviewerPrompt(objective *string, focus string, request, proposal *string, snapshot provenance.FileIdentity) string {
 	objectiveText := "No trusted per-generation objective was supplied."
 	if objective != nil {
 		objectiveText = "Trusted current objective:\n" + *objective
@@ -1138,12 +1150,17 @@ func reviewerPrompt(objective *string, focus string, request *string) string {
 	if request != nil {
 		requestText = "Implementor review request:\n" + *request
 	}
+	proposalText := "No explicit proposal was supplied."
+	if proposal != nil {
+		proposalText = "Implementor's exact proposed plan or change:\n" + *proposal
+	}
+	snapshotText := fmt.Sprintf("Stable source snapshot: sha256=%s bytes=%d.", snapshot.SHA256, snapshot.Size)
 	return "You are a read-only reviewer for the current CodexOS generation.\n\n" +
 		"CodexOS is an autonomous experiment evolving toward a general-purpose " +
 		"operating system. Doom is the first major interactive userland milestone, " +
 		"not the final purpose of the OS.\n\n" +
-		"Another Codex implementor is actively developing the current mutable " +
-		"source. You are here only to inspect that work and provide an independent " +
+		"The implementor's originating turn is fully quiescent. The read tools expose " +
+		"one stable, explicitly captured source snapshot. You are here only to inspect that work and provide an independent " +
 		"technical review.\n\n" +
 		"Read enough of the current source through the available codexos tools to " +
 		"understand the work in context.\n\n" +
@@ -1166,5 +1183,5 @@ func reviewerPrompt(objective *string, focus string, request *string) string {
 		"meaningful issues, say exactly that clearly. Your findings are advisory; " +
 		"the implementor decides what to do with them.\n\n" +
 		"Review focus: " + focus + ". Prioritize that focus, while still reporting any " +
-		"blocking issue you discover.\n\n" + objectiveText + "\n\n" + requestText
+		"blocking issue you discover.\n\n" + snapshotText + "\n\n" + objectiveText + "\n\n" + requestText + "\n\n" + proposalText
 }

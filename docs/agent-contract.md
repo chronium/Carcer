@@ -12,6 +12,16 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
+Contract version 8 retains the version 7 behavioral contract and makes review
+requests explicit turn-yield boundaries. The requesting Sol turn is stopped and
+fully quiesced before a stable source snapshot is captured and Luna starts.
+Every review request supplies the exact proposed plan or change. Luna's exact
+result, including an explicit failure or cancellation, is delivered through
+exactly one trusted continuation on the same app-server process, thread, and
+phase. A review is advisory rather than an approval gate. Operator pause may
+leave that continuation pending; planning remains incomplete and implementation
+cannot start while a planning review continuation is pending.
+
 Contract version 7 retains the version 6 behavioral contract and changes each
 fresh generation's first `agent` command into two sequential turns on one
 ephemeral app-server thread. The first is a neutral planning phase; after it

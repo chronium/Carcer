@@ -155,6 +155,20 @@ func (s *BuildReviewProvenance) BeginReview(generation uint64) (*ReviewEvidence,
 	}, nil
 }
 
+// ReviewYieldOrigin is the stable identity of an implementor review request.
+// Request and Proposal are stored only in the private review evidence; callers
+// must not copy either value into operational events.
+type ReviewYieldOrigin struct {
+	RequestID any
+	CallID    string
+	ThreadID  string
+	TurnID    string
+	Phase     string
+	Focus     string
+	Request   *string
+	Proposal  *string
+}
+
 func (s *BuildReviewProvenance) allocate(generation uint64, kind string) (string, string, error) {
 	generationDirectory := filepath.Join(s.root, fmt.Sprintf("generation-%04d", generation))
 	if err := os.MkdirAll(generationDirectory, 0o777); err != nil {
@@ -583,6 +597,228 @@ type ReviewEvidence struct {
 func (e *ReviewEvidence) ReviewID() string { return e.reviewID }
 
 func (e *ReviewEvidence) Generation() uint64 { return e.generation }
+
+// RecordYieldRequested persists the exact implementor request before its turn
+// is interrupted. The manifest contains identities for private text files, not
+// their contents.
+func (e *ReviewEvidence) RecordYieldRequested(origin ReviewYieldOrigin) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if origin.CallID == "" || origin.ThreadID == "" || origin.TurnID == "" || origin.Phase == "" || origin.Focus == "" {
+		return &ForensicProvenanceError{Reason: "review yield identity is incomplete"}
+	}
+	if e.manifest["stage"] != "started" {
+		return &ForensicProvenanceError{Reason: "review yield has already been recorded"}
+	}
+	for name, value := range map[string]string{
+		"call ID": origin.CallID, "thread ID": origin.ThreadID, "turn ID": origin.TurnID,
+		"phase": origin.Phase, "focus": origin.Focus,
+	} {
+		if !utf8.ValidString(value) {
+			return &ForensicProvenanceError{Reason: "review yield " + name + " is not valid UTF-8"}
+		}
+	}
+	yield := map[string]any{
+		"request_id": origin.RequestID,
+		"call_id":    origin.CallID,
+		"thread_id":  origin.ThreadID,
+		"turn_id":    origin.TurnID,
+		"phase":      origin.Phase,
+		"focus":      origin.Focus,
+	}
+	for name, value := range map[string]*string{"request": origin.Request, "proposal": origin.Proposal} {
+		identity, err := e.writePrivateText(name+".txt", value)
+		if err != nil {
+			return err
+		}
+		yield[name] = identity
+	}
+	e.manifest["yield"] = yield
+	e.manifest["stage"] = "yield_requested"
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_yield_requested", nil)
+	return nil
+}
+
+// RecordAwaitingReview stores the stable source snapshot after the originating
+// implementor turn has fully quiesced and before the reviewer is started.
+func (e *ReviewEvidence) RecordAwaitingReview(snapshot []byte, originStatus string) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if e.manifest["stage"] != "yield_requested" {
+		return &ForensicProvenanceError{Reason: "review yield is not ready for a source snapshot"}
+	}
+	if originStatus != "completed" && originStatus != "interrupted" {
+		return &ForensicProvenanceError{Reason: "review origin did not quiesce with a supported status"}
+	}
+	const filename = "source.snapshot"
+	if err := writeForensicBytes(filepath.Join(e.directory, filename), snapshot); err != nil {
+		e.irrecoverablyIncomplete = true
+		e.markCaptureIncomplete()
+		return err
+	}
+	e.manifest["source_snapshot"] = map[string]any{
+		"sha256": hashBytes(snapshot), "size": uint64(len(snapshot)), "file": filename,
+	}
+	e.manifest["origin_status"] = originStatus
+	e.manifest["stage"] = "awaiting_review"
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_yield_awaiting_review", map[string]any{"origin_status": originStatus})
+	return nil
+}
+
+// RecordReviewResult stores the exact trusted continuation payload after Luna
+// exits. outcome is completed, failed, or cancelled; result is always the text
+// that will be supplied to the resumed Sol turn.
+func (e *ReviewEvidence) RecordReviewResult(outcome, result string) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if outcome != "completed" && outcome != "failed" && outcome != "cancelled" {
+		return &ForensicProvenanceError{Reason: "review yield outcome is invalid"}
+	}
+	stage, _ := e.manifest["stage"].(string)
+	if stage == "awaiting_continuation" || stage == "resuming" || stage == "completed" && e.manifest["continuation_result"] != nil {
+		return &ForensicProvenanceError{Reason: "review result has already been recorded"}
+	}
+	identity, err := e.writePrivateText("result.txt", &result)
+	if err != nil {
+		return err
+	}
+	e.manifest["continuation_result"] = identity
+	e.manifest["review_outcome"] = outcome
+	if e.manifest["capture_outcome"] == "in_progress" {
+		e.manifest["capture_outcome"] = "incomplete"
+		e.manifest["evidence_complete"] = false
+	}
+	e.manifest["stage"] = "awaiting_continuation"
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_yield_ready_to_resume", map[string]any{"review_outcome": outcome})
+	return nil
+}
+
+// RecordReviewerTurn binds the isolated Luna process' ephemeral thread and
+// turn to this review without exposing any prompt or response text.
+func (e *ReviewEvidence) RecordReviewerTurn(threadID, turnID string) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if threadID == "" || turnID == "" || !utf8.ValidString(threadID) || !utf8.ValidString(turnID) {
+		return &ForensicProvenanceError{Reason: "reviewer turn identity is invalid"}
+	}
+	if _, exists := e.manifest["reviewer"]; exists {
+		return &ForensicProvenanceError{Reason: "reviewer turn identity has already been recorded"}
+	}
+	e.manifest["reviewer"] = map[string]any{"thread_id": threadID, "turn_id": turnID}
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_turn_identified", map[string]any{"reviewer_thread_id": threadID, "reviewer_turn_id": turnID})
+	return nil
+}
+
+// RecordContinuationStarted binds the one trusted continuation to its exact
+// app-server turn. A second start is rejected to preserve exactly-once resume.
+func (e *ReviewEvidence) RecordContinuationStarted(turnID string) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if !utf8.ValidString(turnID) || turnID == "" {
+		return &ForensicProvenanceError{Reason: "review continuation turn ID is invalid"}
+	}
+	if e.manifest["stage"] != "awaiting_continuation" {
+		return &ForensicProvenanceError{Reason: "review continuation cannot start from the current state"}
+	}
+	if _, exists := e.manifest["continuation_turn_id"]; exists {
+		return &ForensicProvenanceError{Reason: "review continuation has already started"}
+	}
+	e.manifest["continuation_turn_id"] = turnID
+	e.manifest["stage"] = "resuming"
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_yield_resuming", map[string]any{"continuation_turn_id": turnID})
+	return nil
+}
+
+// RecordContinuationFinished closes the yield lifecycle without changing the
+// independent reviewer outcome.
+func (e *ReviewEvidence) RecordContinuationFinished(status string) error {
+	if e == nil {
+		return &ForensicProvenanceError{Reason: "review evidence is unavailable"}
+	}
+	if status != "completed" && status != "interrupted" && status != "failed" {
+		return &ForensicProvenanceError{Reason: "review continuation status is invalid"}
+	}
+	if e.manifest["stage"] != "resuming" {
+		return &ForensicProvenanceError{Reason: "review continuation is not active"}
+	}
+	e.manifest["continuation_status"] = status
+	e.manifest["stage"] = "completed"
+	if err := e.update(); err != nil {
+		return err
+	}
+	e.recordYieldEvent("review_yield_completed", map[string]any{"continuation_status": status})
+	return nil
+}
+
+func (e *ReviewEvidence) writePrivateText(filename string, value *string) (map[string]any, error) {
+	present := value != nil
+	contents := []byte{}
+	if present {
+		if !utf8.ValidString(*value) {
+			return nil, &ForensicProvenanceError{Reason: "review yield text is not valid UTF-8"}
+		}
+		contents = []byte(*value)
+	}
+	if err := writeForensicBytes(filepath.Join(e.directory, filename), contents); err != nil {
+		e.irrecoverablyIncomplete = true
+		e.markCaptureIncomplete()
+		return nil, err
+	}
+	return map[string]any{
+		"present": present, "sha256": hashBytes(contents), "size": uint64(len(contents)), "file": filename,
+	}, nil
+}
+
+func (e *ReviewEvidence) recordYieldEvent(event string, extra map[string]any) {
+	if e.recorder == nil {
+		return
+	}
+	data := map[string]any{"review_id": e.reviewID, "stage": e.manifest["stage"]}
+	if yield, ok := e.manifest["yield"].(map[string]any); ok {
+		for _, name := range []string{"request_id", "call_id", "thread_id", "turn_id", "phase", "focus"} {
+			data[name] = yield[name]
+		}
+		for _, name := range []string{"request", "proposal"} {
+			if identity, ok := yield[name].(map[string]any); ok {
+				data[name+"_present"] = identity["present"]
+				data[name+"_sha256"] = identity["sha256"]
+				data[name+"_bytes"] = identity["size"]
+			}
+		}
+	}
+	if identity, ok := e.manifest["source_snapshot"].(map[string]any); ok {
+		data["source_snapshot_sha256"] = identity["sha256"]
+		data["source_snapshot_bytes"] = identity["size"]
+	}
+	if identity, ok := e.manifest["continuation_result"].(map[string]any); ok {
+		data["continuation_result_sha256"] = identity["sha256"]
+		data["continuation_result_bytes"] = identity["size"]
+	}
+	for key, value := range extra {
+		data[key] = value
+	}
+	e.recorder(event, e.generation, data)
+}
 
 // RecordSourceRead stores the exact returned bytes before publishing the
 // corresponding manifest entry. Offset, length, and status intentionally use
