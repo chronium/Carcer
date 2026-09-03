@@ -58,8 +58,11 @@ func TestCaptureSourceSnapshotMatchesTrustedBuildSourceSelection(t *testing.T) {
 }
 
 func TestCaptureSourceSnapshotRejectsInvalidSelectedSourcePath(t *testing.T) {
-	invoke := func(_ context.Context, name string, _ [][]byte) (ToolResult, error) {
+	invoke := func(_ context.Context, name string, arguments [][]byte) (ToolResult, error) {
 		if name == "list" {
+			if len(arguments) != 1 || string(arguments[0]) != "seed/" {
+				t.Fatalf("source list arguments = %q", arguments)
+			}
 			return ToolResult{Status: 0, Output: []byte("seed/../escape.c\n")}, nil
 		}
 		t.Fatalf("invalid source path reached %q", name)
@@ -87,8 +90,11 @@ func TestCaptureSourceSnapshotRejectsOutOfPrefixListResult(t *testing.T) {
 }
 
 func TestCaptureSourceSnapshotRejectsContentBeyondSnapshotBoundary(t *testing.T) {
-	invoke := func(_ context.Context, name string, _ [][]byte) (ToolResult, error) {
+	invoke := func(_ context.Context, name string, arguments [][]byte) (ToolResult, error) {
 		if name == "list" {
+			if len(arguments) != 1 || string(arguments[0]) != "seed/" {
+				t.Fatalf("source list arguments = %q", arguments)
+			}
 			return ToolResult{Status: 0, Output: []byte("seed/large\n")}, nil
 		}
 		return ToolResult{Status: 0, Output: bytes.Repeat([]byte("x"), maxSnapshotContent+1)}, nil
