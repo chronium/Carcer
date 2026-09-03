@@ -6,5 +6,5 @@
 #define INVOKE_TOOL_RESPONSE 0x8002u
 #define HOST_SERVICE_REQUEST 3u
 #define HOST_SERVICE_RESPONSE 0x8003u
-#define FRAME_MAX_PAYLOAD (128u*1024u*1024u)
-void frame_send_header(uint16_t,uint32_t,uint32_t);void frame_write_u16(uint16_t);void frame_write_u32(uint32_t);__attribute__((noreturn))void protocol_loop(void);
+#define FM (128u*1024u*1024u)
+void ph(uint16_t,uint32_t,uint32_t);void pw16(uint16_t);void pw32(uint32_t);__attribute__((noreturn))void ploop(void);
