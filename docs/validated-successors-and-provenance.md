@@ -45,12 +45,17 @@ removed. Kernel and ISO bytes are not duplicated there; their hashes and sizes
 identify the exact artifacts validated by the attempt. An abort before any
 successful build creates no such success record.
 
-Each Luna consultation similarly receives a stable review ID. For every
-persistent guest-source `read` delivered to Luna, trusted evidence stores the
-requested path/range, result status, returned-byte hash and size, and the exact
-returned bytes. This records what Luna actually received without changing its
-tools or results. It is range evidence, not an invented atomic whole-source
-snapshot, and it deliberately excludes provided-asset reads.
+Each Luna consultation similarly receives a stable review ID. A Sol-requested
+review first stores its full originating identity and exact private request and
+proposal, then captures a canonical whole-source snapshot only after the Sol
+turn has quiesced; its terminal `completed` or `interrupted` status is recorded
+with the snapshot identity. Luna's `list` and `read` calls are served solely
+from that immutable snapshot. For every source `read` delivered to Luna,
+trusted evidence stores the requested path/range, result status, returned-byte
+hash and size, and the exact returned bytes. The exact reviewer result and its
+completed, failed, or cancelled outcome are private evidence, followed by the
+single continuation turn identity and status. Operational events expose only
+identities, sizes, and SHA-256 values; provided-asset reads remain excluded.
 
 Build evidence is mandatory and fails closed. If trusted provenance storage
 cannot allocate an attempt or durably preserve its required source/artifact
@@ -60,13 +65,16 @@ READY, and canonical protocol validation must still succeed. The additional
 failure case is trusted infrastructure failure, not guest build failure.
 
 Review evidence has the opposite operational policy because observation must
-not change Luna's consultation. A capture failure leaves Luna's exact tool
-result and review outcome unchanged, degrades observability, and durably marks
-`evidence_complete: false` whenever storage remains writable. The manifest
-records `review_outcome` independently from `capture_outcome`. It may claim
-complete evidence only after every referenced source-read file has been
-verified against its recorded size and SHA-256. A historical review manifest
-without these fields does not imply complete capture.
+not change Luna's consultation. A source-read evidence failure leaves Luna's
+exact tool result and review outcome unchanged, degrades observability, and
+durably marks `evidence_complete: false` whenever storage remains writable. A
+failure to establish the yield evidence or stable snapshot instead becomes an
+explicit failed review result in Sol's trusted continuation; it cannot make the
+request fall back to the ordinary tool-delivery path. The manifest records
+`review_outcome` independently from `capture_outcome`. It may claim complete
+evidence only after every referenced source-read file has been verified against
+its recorded size and SHA-256. A historical review manifest without these
+fields does not imply complete capture.
 
 Manifests and byte evidence are written atomically and remain private run-local
 infrastructure: they are not agent context, dynamic tools, metric labels,
