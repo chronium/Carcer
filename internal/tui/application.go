@@ -1179,7 +1179,11 @@ func (a *Application) regionLayout() applicationRegionLayout {
 func (a *Application) desiredComposerRows() int {
 	width := max(1, a.width)
 	if prompt := a.confirmationText(); prompt != "" {
-		return min(maxComposerRows, countWrappedLines(prompt, width))
+		if ansi.StringWidth(prompt) <= width {
+			return 1
+		}
+		question := confirmationQuestion(prompt)
+		return min(maxComposerRows, countWrappedLines(question, width)+1)
 	}
 	contentWidth := max(1, width-ansi.StringWidth(a.composer.Prompt))
 	return min(maxComposerRows, countWrappedLines(a.composer.Value(), contentWidth))
@@ -1245,13 +1249,58 @@ func (a *Application) viewText(layout applicationRegionLayout) string {
 	}
 	composerText := a.composer.View()
 	if confirmation := a.confirmationText(); confirmation != "" {
-		composerText = ansi.Hardwrap(confirmation, max(1, a.width), true)
+		rows = append(rows, renderConfirmationRows(confirmation, a.width, layout.composerText)...)
+	} else {
+		rows = append(rows, fixedRows(composerText, a.width, layout.composerText, composerForeground, composerBackground)...)
 	}
-	rows = append(rows, fixedRows(composerText, a.width, layout.composerText, composerForeground, composerBackground)...)
 	for range layout.composerBottomPadding {
 		rows = append(rows, paintRow("", a.width, composerForeground, composerBackground))
 	}
 	return strings.Join(rows, "\n")
+}
+
+func renderConfirmationRows(value string, width, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	width = max(1, width)
+	const indicator = "[y/N]"
+	question := confirmationQuestion(value)
+	if height == 1 {
+		if width <= ansi.StringWidth(indicator) {
+			return []string{paintRow(indicator, width, composerForeground, composerBackground)}
+		}
+		available := width - ansi.StringWidth(indicator) - 1
+		question = ansi.Truncate(question, available, "…")
+		return []string{paintRow(question+" "+indicator, width, composerForeground, composerBackground)}
+	}
+
+	questionLines := strings.Split(ansi.Hardwrap(question, width, true), "\n")
+	questionHeight := height - 1
+	truncated := len(questionLines) > questionHeight
+	if truncated {
+		questionLines = questionLines[:questionHeight]
+		last := len(questionLines) - 1
+		if width == 1 {
+			questionLines[last] = "…"
+		} else {
+			questionLines[last] = ansi.Truncate(questionLines[last], width-1, "") + "…"
+		}
+	}
+	rows := make([]string, 0, height)
+	for _, line := range questionLines {
+		rows = append(rows, paintRow(line, width, composerForeground, composerBackground))
+	}
+	for len(rows) < questionHeight {
+		rows = append(rows, paintRow("", width, composerForeground, composerBackground))
+	}
+	rows = append(rows, paintRow(indicator, width, composerForeground, composerBackground))
+	return rows
+}
+
+func confirmationQuestion(value string) string {
+	value = strings.TrimSpace(value)
+	return strings.TrimSpace(strings.TrimSuffix(value, "[y/N]"))
 }
 
 type transcriptRowLayout struct {

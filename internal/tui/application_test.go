@@ -875,6 +875,35 @@ func TestApplicationHeaderTracksPlanningReviewAndImplementationTransitions(t *te
 			t.Fatalf("%s/%s header = %q", transition.agent, transition.phase, header)
 		}
 	}
+	app.SetStatus(StatusSnapshot{
+		RunName: "phase", RuntimeState: "running", SolState: "review failed",
+		ActiveAgent: "Luna", ActivePhase: "review failed",
+	})
+	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
+	if !strings.Contains(header, "Luna review failed") {
+		t.Fatalf("failed review header = %q", header)
+	}
+}
+
+func TestApplicationLongConfirmationKeepsQuestionAndIndicatorVisible(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{})
+	app.Update(tea.WindowSizeMsg{Width: 28, Height: 8})
+	request := &confirmationRequest{
+		prompt: "Abandon generation 12 and roll back to generation 9? This discards the current mutable source and cannot be undone. [y/N]",
+		reply:  make(chan bool, 1),
+	}
+	app.Update(request)
+
+	layout := app.regionLayout()
+	plainRows := strings.Split(ansi.Strip(app.View().Content), "\n")
+	start := layout.header + layout.transcript + layout.separator + layout.composerTopPadding
+	composer := strings.Join(plainRows[start:start+layout.composerText], "\n")
+	if !strings.Contains(composer, "Abandon generation 12") {
+		t.Fatalf("confirmation lost its opening question:\n%s", composer)
+	}
+	if got := strings.Count(composer, "[y/N]"); got != 1 || !strings.Contains(plainRows[start+layout.composerText-1], "[y/N]") {
+		t.Fatalf("confirmation indicator is not retained once at the bottom:\n%s", composer)
+	}
 }
 
 func TestApplicationExpandedUnicodeToolDetailsRemainInViewport(t *testing.T) {

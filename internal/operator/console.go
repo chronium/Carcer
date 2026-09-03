@@ -1172,8 +1172,10 @@ func (c *PlainConsole) CodexActivity() (string, string) {
 			phase = "review handoff"
 		}
 		return "Sol", phase
-	case agent.ReviewYieldAwaitingReview, agent.ReviewYieldReviewing, agent.ReviewYieldFailed:
+	case agent.ReviewYieldAwaitingReview, agent.ReviewYieldReviewing:
 		return "Luna", "review"
+	case agent.ReviewYieldFailed:
+		return "Luna", "review failed"
 	case agent.ReviewYieldAwaitingContinuation, agent.ReviewYieldResuming:
 		return "Sol", "review continuation"
 	}
