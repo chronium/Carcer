@@ -81,6 +81,66 @@ type CrossRunBootstrap struct {
 	DestinationHarnessIdentity *provenance.HarnessIdentity
 }
 
+type crossRunFeatureLedgerJSON struct {
+	Requests []crossRunFeatureRequestJSON `json:"requests"`
+}
+
+type crossRunFeatureRequestJSON struct {
+	Description string `json:"description"`
+	Generation  uint64 `json:"generation"`
+	ID          uint64 `json:"id"`
+	Status      string `json:"status"`
+	Title       string `json:"title"`
+}
+
+type crossRunManifestJSON struct {
+	FeatureRequests crossRunFeatureRequestsJSON `json:"feature_requests"`
+	GitBase         crossRunGitBaseJSON         `json:"git_base"`
+	Handoff         crossRunFileJSON            `json:"handoff"`
+	Harness         *crossRunHarnessJSON        `json:"harness,omitempty"`
+	SchemaVersion   uint64                      `json:"schema_version"`
+	Source          crossRunSourceJSON          `json:"source"`
+	SuccessorISO    provenance.FileIdentity     `json:"successor_iso"`
+}
+
+type crossRunFeatureRequestsJSON struct {
+	Count  int      `json:"count"`
+	File   string   `json:"file"`
+	IDs    []uint64 `json:"ids"`
+	SHA256 string   `json:"sha256"`
+	Size   uint64   `json:"size"`
+}
+
+type crossRunGitBaseJSON struct {
+	Commit string `json:"commit"`
+	Ref    string `json:"ref"`
+}
+
+type crossRunFileJSON struct {
+	File   string `json:"file"`
+	SHA256 string `json:"sha256"`
+	Size   uint64 `json:"size"`
+}
+
+type crossRunHarnessJSON struct {
+	Destination      crossRunHarnessIdentityJSON  `json:"destination"`
+	SourceGeneration *crossRunHarnessIdentityJSON `json:"source_generation"`
+}
+
+type crossRunHarnessIdentityJSON struct {
+	Build            provenance.HarnessBuildIdentity `json:"build"`
+	DirtyTreeSHA256  *string                         `json:"dirty_tree_sha256"`
+	Executable       provenance.FileIdentity         `json:"executable"`
+	RepositoryCommit string                          `json:"repository_commit"`
+	RepositoryDirty  bool                            `json:"repository_dirty"`
+	SchemaVersion    uint64                          `json:"schema_version"`
+}
+
+type crossRunSourceJSON struct {
+	Generation uint64 `json:"generation"`
+	Run        string `json:"run"`
+}
+
 // VerifyInitialISO verifies that initialISO is the exact selected successor
 // recorded by this bootstrap. A symlink supplied by a caller is resolved in
 // the same way as pathlib.Path.resolve() in the Python harness.
@@ -1223,21 +1283,20 @@ func decodeCrossRunRawObject(contents []byte) (map[string]json.RawMessage, error
 }
 
 func crossRunFeatureLedgerBytes(requests []FeatureRequest) ([]byte, error) {
-	records := make([]map[string]any, len(requests))
+	records := make([]crossRunFeatureRequestJSON, len(requests))
 	for index, request := range requests {
-		records[index] = map[string]any{
-			"description": request.Description,
-			"generation":  request.Generation,
-			"id":          request.ID,
-			"status":      request.Status,
-			"title":       request.Title,
+		records[index] = crossRunFeatureRequestJSON{
+			Description: request.Description,
+			Generation:  request.Generation,
+			ID:          request.ID,
+			Status:      request.Status,
+			Title:       request.Title,
 		}
 	}
-	value := map[string]any{"requests": records}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
+	if err := encoder.Encode(crossRunFeatureLedgerJSON{Requests: records}); err != nil {
 		return nil, err
 	}
 	return unescapeJSONLineSeparators(output.Bytes()), nil
@@ -1249,42 +1308,31 @@ func crossRunManifestBytes(bootstrap *CrossRunBootstrap, handoff []byte, request
 		ids = []uint64{}
 	}
 	version := crossRunBootstrapLegacySchema
-	value := map[string]any{
-		"feature_requests": map[string]any{
-			"count":  requestCount,
-			"file":   CrossRunBootstrapFeatureLedger,
-			"ids":    ids,
-			"sha256": bootstrap.FeatureLedgerSHA256,
-			"size":   bootstrap.FeatureLedgerSize,
+	handoffIdentity := crossRunBytesIdentity(handoff)
+	value := crossRunManifestJSON{
+		FeatureRequests: crossRunFeatureRequestsJSON{
+			Count: requestCount, File: CrossRunBootstrapFeatureLedger, IDs: ids,
+			SHA256: bootstrap.FeatureLedgerSHA256, Size: bootstrap.FeatureLedgerSize,
 		},
-		"git_base": map[string]any{
-			"commit": bootstrap.GitBaseCommit,
-			"ref":    bootstrap.GitBaseRef,
+		GitBase: crossRunGitBaseJSON{
+			Commit: bootstrap.GitBaseCommit, Ref: bootstrap.GitBaseRef,
 		},
-		"handoff": map[string]any{
-			"file":   CrossRunBootstrapHandoff,
-			"sha256": crossRunBytesIdentity(handoff).SHA256,
-			"size":   uint64(len(handoff)),
+		Handoff: crossRunFileJSON{
+			File: CrossRunBootstrapHandoff, SHA256: handoffIdentity.SHA256, Size: uint64(len(handoff)),
 		},
-		"schema_version": version,
-		"source": map[string]any{
-			"generation": bootstrap.SourceGeneration,
-			"run":        bootstrap.SourceRun,
+		SchemaVersion: version,
+		Source: crossRunSourceJSON{
+			Generation: bootstrap.SourceGeneration, Run: bootstrap.SourceRun,
 		},
-		"successor_iso": map[string]any{
-			"sha256": bootstrap.SuccessorISOSHA256,
-			"size":   bootstrap.SuccessorISOSize,
+		SuccessorISO: provenance.FileIdentity{
+			SHA256: bootstrap.SuccessorISOSHA256, Size: bootstrap.SuccessorISOSize,
 		},
 	}
 	if bootstrap.DestinationHarnessIdentity != nil {
-		version = crossRunBootstrapSchemaVersion
-		value["schema_version"] = version
-		var source any
-		if bootstrap.SourceHarnessIdentity != nil {
-			source = bootstrap.SourceHarnessIdentity.AsJSON()
-		}
-		value["harness"] = map[string]any{
-			"destination": bootstrap.DestinationHarnessIdentity.AsJSON(), "source_generation": source,
+		value.SchemaVersion = crossRunBootstrapSchemaVersion
+		value.Harness = &crossRunHarnessJSON{
+			Destination:      crossRunHarnessJSONValue(*bootstrap.DestinationHarnessIdentity),
+			SourceGeneration: crossRunOptionalHarnessIdentity(bootstrap.SourceHarnessIdentity),
 		}
 	}
 	var output bytes.Buffer
@@ -1295,6 +1343,22 @@ func crossRunManifestBytes(bootstrap *CrossRunBootstrap, handoff []byte, request
 		return nil, err
 	}
 	return unescapeJSONLineSeparators(output.Bytes()), nil
+}
+
+func crossRunOptionalHarnessIdentity(identity *provenance.HarnessIdentity) *crossRunHarnessIdentityJSON {
+	if identity == nil {
+		return nil
+	}
+	value := crossRunHarnessJSONValue(*identity)
+	return &value
+}
+
+func crossRunHarnessJSONValue(identity provenance.HarnessIdentity) crossRunHarnessIdentityJSON {
+	return crossRunHarnessIdentityJSON{
+		Build: identity.Build, DirtyTreeSHA256: identity.DirtyTreeSHA256,
+		Executable: identity.Executable, RepositoryCommit: identity.RepositoryCommit,
+		RepositoryDirty: identity.RepositoryDirty, SchemaVersion: identity.SchemaVersion,
+	}
 }
 
 func crossRunBytesIdentity(contents []byte) crossRunIdentity {
