@@ -633,6 +633,7 @@ func (c *PlainConsole) ShowStartup() error {
 	c.printLine("Run directory: " + c.runtime.RunDirectory())
 	c.reconcileGit()
 	if c.runtime.State() == experiment.RuntimeStateAwaitingNextGeneration {
+		c.printHarnessGateTransition(c.runtime.PresentationSnapshot().HarnessTransition)
 		if err := c.printGate(); err != nil {
 			return err
 		}
@@ -642,6 +643,41 @@ func (c *PlainConsole) ShowStartup() error {
 	c.printLine("")
 	c.printLine("Type 'help' for commands.")
 	return nil
+}
+
+func (c *PlainConsole) printHarnessGateTransition(transition *provenance.HarnessGateTransition) {
+	if transition == nil || !transition.RequiresRecord {
+		return
+	}
+	c.printLine("")
+	c.printLine("Harness identity changed at this validated generation gate.")
+	c.printLine("Previous harness identity:")
+	c.printHarnessIdentity(transition.Previous)
+	c.printLine("Current harness identity:")
+	c.printHarnessIdentity(&transition.Current)
+	c.printLine("The transition is recorded; continue or rollback authorizes the current harness to start the next generation.")
+}
+
+func (c *PlainConsole) printHarnessIdentity(identity *provenance.HarnessIdentity) {
+	if identity == nil {
+		c.printLine("  unavailable (legacy run without harness identity provenance)")
+		return
+	}
+	dirty := "clean"
+	if identity.RepositoryDirty {
+		dirty = "dirty; tree SHA-256 " + *identity.DirtyTreeSHA256
+	}
+	build := identity.Build
+	c.printLine("  Repository commit: " + identity.RepositoryCommit)
+	c.printLine("  Repository state: " + dirty)
+	c.printLine(fmt.Sprintf("  Executable: SHA-256 %s; %d bytes", identity.Executable.SHA256, identity.Executable.Size))
+	c.printLine("  Build module: " + EscapeTerminalText(build.ModulePath+" "+build.ModuleVersion, false))
+	c.printLine("  Build module sum: " + EscapeTerminalText(build.ModuleSum, false))
+	c.printLine("  Go version: " + EscapeTerminalText(build.GoVersion, false))
+	c.printLine("  Build settings SHA-256: " + build.SettingsSHA256)
+	c.printLine(fmt.Sprintf("  Embedded VCS: %s; revision %s; time %s; modified %t",
+		EscapeTerminalText(build.VCS, false), EscapeTerminalText(build.VCSRevision, false),
+		EscapeTerminalText(build.VCSTime, false), build.VCSModified))
 }
 
 func (c *PlainConsole) printHelp() {

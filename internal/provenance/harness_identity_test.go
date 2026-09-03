@@ -81,7 +81,7 @@ func TestHarnessIdentityDistinguishesBinaryReplacement(t *testing.T) {
 	}
 }
 
-func TestHarnessIdentityStoreRequiresAcknowledgedGateReplacement(t *testing.T) {
+func TestHarnessIdentityStoreRecordsChangedIdentityAtQuiescentGate(t *testing.T) {
 	repository, binary := cleanHarnessFixture(t)
 	initial, err := CaptureHarnessIdentity(repository, binary, testHarnessBuildIdentity())
 	if err != nil {
@@ -95,7 +95,7 @@ func TestHarnessIdentityStoreRequiresAcknowledgedGateReplacement(t *testing.T) {
 	if err := store.VerifyCurrent(initial); err != nil {
 		t.Fatalf("same identity verification: %v", err)
 	}
-	same, err := store.PrepareGateTransition(initial, 4, false)
+	same, err := store.PrepareGateTransition(initial, 4)
 	if err != nil || same.RequiresRecord {
 		t.Fatalf("same identity gate = %#v, %v", same, err)
 	}
@@ -107,27 +107,21 @@ func TestHarnessIdentityStoreRequiresAcknowledgedGateReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.VerifyCurrent(replacement); err == nil {
-		t.Fatal("replacement identity verified before acknowledgement")
+		t.Fatal("replacement identity verified before its gate transition")
 	}
-	if _, err := store.PrepareGateTransition(replacement, 4, false); err == nil || !strings.Contains(err.Error(), "--acknowledge-harness-change") {
-		t.Fatalf("unacknowledged replacement error = %v", err)
-	}
-	transition, err := store.PrepareGateTransition(replacement, 4, true)
+	transition, err := store.PrepareGateTransition(replacement, 4)
 	if err != nil || !transition.RequiresRecord || transition.Previous == nil || !transition.Previous.Equal(initial) {
-		t.Fatalf("acknowledged transition = %#v, %v", transition, err)
+		t.Fatalf("gate transition = %#v, %v", transition, err)
 	}
 	if err := store.RecordGateTransition(transition); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := store.PrepareGateTransition(replacement, 4, false)
+	accepted, err := store.PrepareGateTransition(replacement, 4)
 	if err != nil || accepted.RequiresRecord {
 		t.Fatalf("recorded replacement was not accepted: %#v, %v", accepted, err)
 	}
 	legacy := NewHarnessIdentityStore(filepath.Join(t.TempDir(), "legacy"))
-	if _, err := legacy.PrepareGateTransition(initial, 9, false); err == nil {
-		t.Fatal("legacy identity absence was silently accepted")
-	}
-	legacyTransition, err := legacy.PrepareGateTransition(initial, 9, true)
+	legacyTransition, err := legacy.PrepareGateTransition(initial, 9)
 	if err != nil || !legacyTransition.RequiresRecord || legacyTransition.Previous != nil {
 		t.Fatalf("legacy gate transition = %#v, %v", legacyTransition, err)
 	}
@@ -136,6 +130,66 @@ func TestHarnessIdentityStoreRequiresAcknowledgedGateReplacement(t *testing.T) {
 	}
 	if err := legacy.RecordGateTransition(legacyTransition); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHarnessIdentityStoreRejectsInconsistentTransitionAncestry(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "run")
+	store := NewHarnessIdentityStore(run)
+	initial := testHarnessIdentity()
+	if err := store.RecordRunCreation(initial); err != nil {
+		t.Fatal(err)
+	}
+	replacement := initial
+	replacement.Executable.SHA256 = strings.Repeat("d", 64)
+	transition, err := store.PrepareGateTransition(replacement, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordGateTransition(transition); err != nil {
+		t.Fatal(err)
+	}
+	inconsistent := initial
+	inconsistent.RepositoryCommit = strings.Repeat("e", 40)
+	encoded, err := EncodeHarnessIdentity(inconsistent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, RunHarnessIdentityFilename), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PrepareGateTransition(replacement, 3); err == nil || !strings.Contains(err.Error(), "does not descend") {
+		t.Fatalf("inconsistent ancestry error = %v", err)
+	}
+}
+
+func TestHarnessIdentityStoreReadsEarlierAcknowledgedGateTransition(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "run")
+	store := NewHarnessIdentityStore(run)
+	initial := testHarnessIdentity()
+	if err := store.RecordRunCreation(initial); err != nil {
+		t.Fatal(err)
+	}
+	replacement := initial
+	replacement.Executable.SHA256 = strings.Repeat("d", 64)
+	directory := filepath.Join(run, harnessTransitionDirectory)
+	if err := os.Mkdir(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeHarnessJSON(map[string]any{
+		"acknowledged": true, "after_generation": uint64(3),
+		"current": replacement.AsJSON(), "previous": initial.AsJSON(),
+		"schema_version": HarnessIdentitySchemaVersion, "transition": "gate_reopen",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "transition-000001.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := store.PrepareGateTransition(replacement, 3)
+	if err != nil || transition.RequiresRecord {
+		t.Fatalf("earlier transition record was not preserved: %#v, %v", transition, err)
 	}
 }
 

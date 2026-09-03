@@ -131,6 +131,8 @@ type CodexOSRun struct {
 	currentHardware   qemu.HardwareManifest
 	retainedFinish    *uint64
 	transitioning     bool
+
+	gateHarnessTransition *provenance.HarnessGateTransition
 }
 
 // NewCodexOSRun opens a stopped run object.  Creating the run directory is
@@ -196,6 +198,7 @@ type RunPresentationSnapshot struct {
 	Generation             uint64
 	HasGeneration          bool
 	PendingFeatureRequests int
+	HarnessTransition      *provenance.HarnessGateTransition
 }
 
 // PresentationSnapshot never enters live operation serialization, so a guest
@@ -212,6 +215,7 @@ func (r *CodexOSRun) PresentationSnapshot() RunPresentationSnapshot {
 		snapshot.Generation = *r.generationNumber
 		snapshot.HasGeneration = true
 	}
+	snapshot.HarnessTransition = cloneHarnessGateTransition(r.gateHarnessTransition)
 	r.gateMu.Unlock()
 	if r.live != nil {
 		snapshot.PendingFeatureRequests = int(r.live.pendingFeatures.Load())
@@ -374,25 +378,16 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 	}
 
 	latest := archives[len(archives)-1]
-	var harnessTransition provenance.HarnessGateTransition
+	var harnessTransition *provenance.HarnessGateTransition
 	if r.live != nil && r.live.options.HarnessIdentity != nil {
 		if r.live.harnessStore == nil {
 			return &GenerationRuntimeError{Reason: "harness identity store is unavailable"}
 		}
-		harnessTransition, err = r.live.harnessStore.PrepareGateTransition(
-			*r.live.options.HarnessIdentity, latest.Generation, r.live.options.AcknowledgeHarnessChange,
-		)
+		prepared, err := r.live.harnessStore.PrepareGateTransition(*r.live.options.HarnessIdentity, latest.Generation)
 		if err != nil {
 			return err
 		}
-		if err := r.live.harnessStore.RecordGateTransition(harnessTransition); err != nil {
-			return err
-		}
-		if harnessTransition.RequiresRecord {
-			r.recordLive("harness_identity_transition_acknowledged", &latest.Generation, map[string]any{
-				"after_generation": latest.Generation, "previous_identity": harnessIdentityJSON(harnessTransition.Previous),
-			})
-		}
+		harnessTransition = &prepared
 	}
 	if r.live != nil {
 		effectiveGeneration := latest.Generation
@@ -423,10 +418,24 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 		value := *latest.Handoff
 		previous = &value
 	}
+	if harnessTransition != nil && harnessTransition.RequiresRecord {
+		if err := r.live.harnessStore.RecordGateTransition(*harnessTransition); err != nil {
+			return err
+		}
+		r.recordLive("harness_identity_transition_recorded", &latest.Generation, map[string]any{
+			"after_generation":  latest.Generation,
+			"previous_identity": harnessIdentityJSON(harnessTransition.Previous),
+			"current_identity":  harnessTransition.Current.AsJSON(),
+		})
+	}
 
 	r.generationNumber = cloneUint64Pointer(&latest.Generation)
 	r.pendingFinish = pending
 	r.previousHandoff = previous
+	r.gateHarnessTransition = nil
+	if harnessTransition != nil && harnessTransition.RequiresRecord {
+		r.gateHarnessTransition = cloneHarnessGateTransition(harnessTransition)
+	}
 	if r.live != nil {
 		r.currentParent = nil
 		r.currentTransition = ""
@@ -453,6 +462,16 @@ func harnessIdentityJSON(identity *provenance.HarnessIdentity) any {
 		return nil
 	}
 	return identity.AsJSON()
+}
+
+func cloneHarnessGateTransition(transition *provenance.HarnessGateTransition) *provenance.HarnessGateTransition {
+	if transition == nil {
+		return nil
+	}
+	clone := *transition
+	clone.Previous = provenance.CloneHarnessIdentity(transition.Previous)
+	clone.Current = *provenance.CloneHarnessIdentity(&transition.Current)
+	return &clone
 }
 
 // ContinueGeneration explicitly starts the next generation from the selected
@@ -495,6 +514,7 @@ func (r *CodexOSRun) ContinueGeneration() error {
 	r.currentBootImage = image
 	r.previousHandoff = &handoff
 	r.pendingFinish = nil
+	r.gateHarnessTransition = nil
 	r.state = RuntimeStateRunning
 	return nil
 }
@@ -553,6 +573,7 @@ func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 	r.currentBootImage = image
 	r.previousHandoff = &handoff
 	r.pendingFinish = nil
+	r.gateHarnessTransition = nil
 	r.state = RuntimeStateRunning
 	return nil
 }

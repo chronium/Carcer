@@ -150,6 +150,7 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 	r.currentHardware = hardware
 	r.previousHandoff = &handoff
 	r.pendingFinish = nil
+	r.gateHarnessTransition = nil
 	r.transitioning = false
 	r.state = RuntimeStateRunning
 	r.gateMu.Unlock()
@@ -228,6 +229,7 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 	r.currentHardware = hardware
 	r.previousHandoff = &handoff
 	r.pendingFinish = nil
+	r.gateHarnessTransition = nil
 	r.transitioning = false
 	r.state = RuntimeStateRunning
 	r.gateMu.Unlock()
@@ -336,6 +338,7 @@ func (r *CodexOSRun) failLiveGeneration(generation *liveGeneration, cleanup bool
 	r.currentParent = nil
 	r.currentTransition = ""
 	r.currentHardware = qemu.HardwareManifest{}
+	r.gateHarnessTransition = nil
 	r.transitioning = false
 	r.state = RuntimeStateStopped
 	r.gateMu.Unlock()

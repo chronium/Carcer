@@ -18,7 +18,7 @@ const (
 	harnessTransitionDirectory = "harness-transitions"
 )
 
-// HarnessIdentityStore owns immutable run, generation, and acknowledged gate
+// HarnessIdentityStore owns immutable run, generation, and quiescent-gate
 // identity records. It never repairs or fills identity into old archives.
 type HarnessIdentityStore struct {
 	run string
@@ -67,10 +67,9 @@ func (s *HarnessIdentityStore) VerifyCurrent(identity HarnessIdentity) error {
 	return nil
 }
 
-// PrepareGateTransition performs the read-only admission decision. A changed
-// or historically unavailable identity is rejected unless the operator has
-// explicitly acknowledged replacement at a generation gate.
-func (s *HarnessIdentityStore) PrepareGateTransition(current HarnessIdentity, afterGeneration uint64, acknowledged bool) (HarnessGateTransition, error) {
+// PrepareGateTransition performs the read-only provenance check before a
+// validated, fully quiescent generation gate records a harness replacement.
+func (s *HarnessIdentityStore) PrepareGateTransition(current HarnessIdentity, afterGeneration uint64) (HarnessGateTransition, error) {
 	if err := ValidateHarnessIdentity(current); err != nil {
 		return HarnessGateTransition{}, err
 	}
@@ -78,12 +77,9 @@ func (s *HarnessIdentityStore) PrepareGateTransition(current HarnessIdentity, af
 	if err != nil {
 		return HarnessGateTransition{}, err
 	}
-	changed := previous == nil || !previous.Equal(current)
-	if changed && !acknowledged {
-		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness identity changed or is unavailable; reopen at the generation gate with --acknowledge-harness-change"}
-	}
 	return HarnessGateTransition{
-		AfterGeneration: afterGeneration, Current: current, Previous: CloneHarnessIdentity(previous), RequiresRecord: changed,
+		AfterGeneration: afterGeneration, Current: current, Previous: CloneHarnessIdentity(previous),
+		RequiresRecord: previous == nil || !previous.Equal(current),
 	}, nil
 }
 
@@ -113,9 +109,11 @@ func (s *HarnessIdentityStore) RecordGateTransition(transition HarnessGateTransi
 		return err
 	}
 	value := map[string]any{
-		"acknowledged": true, "after_generation": transition.AfterGeneration,
-		"current": transition.Current.AsJSON(), "previous": nil,
-		"schema_version": HarnessIdentitySchemaVersion, "transition": "gate_reopen",
+		"after_generation": transition.AfterGeneration,
+		"current":          transition.Current.AsJSON(),
+		"previous":         nil,
+		"schema_version":   HarnessIdentitySchemaVersion,
+		"transition":       "quiescent_gate_reopen",
 	}
 	if transition.Previous != nil {
 		value["previous"] = transition.Previous.AsJSON()
@@ -252,21 +250,27 @@ func nextHarnessTransition(directory string) (uint64, error) {
 func decodeHarnessTransition(encoded []byte) (HarnessGateTransition, error) {
 	var fields map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	if err := decoder.Decode(&fields); err != nil || len(fields) != 6 {
+	if err := decoder.Decode(&fields); err != nil {
 		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed", Err: err}
 	}
-	for _, key := range []string{"acknowledged", "after_generation", "current", "previous", "schema_version", "transition"} {
-		if _, ok := fields[key]; !ok {
-			return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
-		}
+	legacyAcknowledged := hasExactHarnessFields(fields,
+		"acknowledged", "after_generation", "current", "previous", "schema_version", "transition")
+	if !legacyAcknowledged && !hasExactHarnessFields(fields,
+		"after_generation", "current", "previous", "schema_version", "transition") {
+		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
 	}
 	var schema, generation uint64
-	var acknowledged bool
 	var kind string
 	if json.Unmarshal(fields["schema_version"], &schema) != nil || schema != HarnessIdentitySchemaVersion ||
-		json.Unmarshal(fields["after_generation"], &generation) != nil ||
-		json.Unmarshal(fields["acknowledged"], &acknowledged) != nil || !acknowledged ||
-		json.Unmarshal(fields["transition"], &kind) != nil || kind != "gate_reopen" {
+		json.Unmarshal(fields["after_generation"], &generation) != nil || json.Unmarshal(fields["transition"], &kind) != nil {
+		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
+	}
+	if legacyAcknowledged {
+		var acknowledged bool
+		if json.Unmarshal(fields["acknowledged"], &acknowledged) != nil || !acknowledged || kind != "gate_reopen" {
+			return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
+		}
+	} else if kind != "quiescent_gate_reopen" {
 		return HarnessGateTransition{}, &HarnessIdentityError{Reason: "harness transition is malformed"}
 	}
 	current, err := ParseHarnessIdentity(fields["current"])

@@ -28,17 +28,16 @@ const (
 // LiveRunOptions contains trusted harness inputs for concrete generation
 // execution. No field is populated from guest state.
 type LiveRunOptions struct {
-	QEMUExecutable           string
-	HardwareProfile          qemu.HardwareProfile
-	BuildConfig              build.Config
-	ReadyTimeout             time.Duration
-	CandidateReadyTimeout    time.Duration
-	ProvidedAssetsDirectory  *string
-	EventLog                 *observability.EventLog
-	Metrics                  *observability.Metrics
-	ActivityStream           *observability.ActivityStream
-	HarnessIdentity          *provenance.HarnessIdentity
-	AcknowledgeHarnessChange bool
+	QEMUExecutable          string
+	HardwareProfile         qemu.HardwareProfile
+	BuildConfig             build.Config
+	ReadyTimeout            time.Duration
+	CandidateReadyTimeout   time.Duration
+	ProvidedAssetsDirectory *string
+	EventLog                *observability.EventLog
+	Metrics                 *observability.Metrics
+	ActivityStream          *observability.ActivityStream
+	HarnessIdentity         *provenance.HarnessIdentity
 }
 
 type liveRun struct {

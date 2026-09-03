@@ -21,11 +21,11 @@ const (
 )
 
 var durableEvents = map[string]struct{}{
-	"generation_completed":                     {},
-	"generation_aborted":                       {},
-	"feature_approved":                         {},
-	"feature_denied":                           {},
-	"harness_identity_transition_acknowledged": {},
+	"generation_completed":                 {},
+	"generation_aborted":                   {},
+	"feature_approved":                     {},
+	"feature_denied":                       {},
+	"harness_identity_transition_recorded": {},
 }
 
 // Error reports malformed durable observability state or an event-log setup
