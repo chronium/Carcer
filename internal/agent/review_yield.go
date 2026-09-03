@@ -103,8 +103,8 @@ func (s *GenerationSession) beginReviewYield(message map[string]any, routing *dy
 	if err != nil {
 		return nil, err
 	}
-	if phase == "planning" && (proposal == nil || strings.TrimSpace(*proposal) == "") {
-		return nil, errors.New("planning review requires the actual proposed plan")
+	if proposal == nil || strings.TrimSpace(*proposal) == "" {
+		return nil, errors.New("review requires the actual proposed plan or change")
 	}
 
 	generation, ok := s.sessionGeneration()
@@ -250,6 +250,8 @@ func (s *GenerationSession) runReviewableTurn(prompt, phase string) (GenerationR
 		}
 		s.mu.Unlock()
 		if paused {
+			result.TurnStatus = "interrupted"
+			result.RuntimeState = s.runtimeState()
 			result.Summary = "Codex review completed; the trusted continuation is awaiting resume."
 			return result, nil
 		}

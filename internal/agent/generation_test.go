@@ -300,6 +300,20 @@ func TestGenerationToolSchemasPreserveAdvertisementOrderAndFeatureJSON(t *testin
 	if got, want := strings.Join(names, ","), "read,list,build,list_requests"; got != want {
 		t.Fatalf("tool order = %q, want %q", got, want)
 	}
+	reviewSchema, _ := reviewDynamicFunction()["inputSchema"].(map[string]any)
+	required, _ := reviewSchema["required"].([]string)
+	if len(required) != 1 || required[0] != "proposal" {
+		t.Fatalf("review required arguments = %#v, want proposal", required)
+	}
+	runtime := newGenerationTestRuntime(t)
+	reviewSession := NewGenerationSession(runtime, GenerationSessionOptions{})
+	_, err = reviewSession.beginReviewYield(map[string]any{"params": map[string]any{
+		"callId": "review-call", "threadId": "thread", "turnId": "turn",
+		"namespace": nil, "tool": "review", "arguments": map[string]any{"focus": "general"},
+	}}, &dynamicCallRouting{requestID: "review-request", callID: "review-call"}, "thread", "turn", "implementation")
+	if err == nil || err.Error() != "review requires the actual proposed plan or change" {
+		t.Fatalf("implementation review without proposal error = %v", err)
+	}
 
 	requests := []store.FeatureRequest{
 		{ID: 2, Generation: 9, Title: "Second", Description: "B", Status: store.FeatureDenied},
@@ -742,8 +756,17 @@ func TestGenerationSessionFailsClosedWhenReviewContinuationCannotStart(t *testin
 }
 
 func TestGenerationSessionPauseCancelsReviewAndResumesTrustedContinuation(t *testing.T) {
+	assertGenerationSessionPauseDefersTrustedReviewContinuation(t, "orphaned-review", "interrupted")
+}
+
+func TestGenerationSessionCompletedReviewOriginPauseKeepsPlanningIncomplete(t *testing.T) {
+	assertGenerationSessionPauseDefersTrustedReviewContinuation(t, "completed-review", "completed")
+}
+
+func assertGenerationSessionPauseDefersTrustedReviewContinuation(t *testing.T, mode, originStatus string) {
+	t.Helper()
 	recordPath := filepath.Join(t.TempDir(), "generation-review-pause.json")
-	setGenerationHelper(t, "orphaned-review", recordPath)
+	setGenerationHelper(t, mode, recordPath)
 	t.Setenv(reviewerHelperMode, "hold")
 	reviewerRecordPath := filepath.Join(t.TempDir(), "reviewer-hold.json")
 	t.Setenv(reviewerHelperRecord, reviewerRecordPath)
@@ -784,6 +807,16 @@ func TestGenerationSessionPauseCancelsReviewAndResumesTrustedContinuation(t *tes
 	}
 	if session.ReviewYieldState() != ReviewYieldFailed {
 		t.Fatalf("review state after pause = %q", session.ReviewYieldState())
+	}
+	session.mu.Lock()
+	turnNumber := session.turnNumber
+	session.mu.Unlock()
+	if turnNumber != 1 {
+		t.Fatalf("deferred review continuation advanced planning: turn number = %d", turnNumber)
+	}
+	manifest := readReviewerJSON(t, filepath.Join(runtime.root, "build-review-provenance", "generation-0012", "review-000001", "manifest.json"))
+	if manifest["origin_status"] != originStatus {
+		t.Fatalf("paused review origin status = %#v, want %q", manifest["origin_status"], originStatus)
 	}
 	resumed, err := session.RunPlanningContinuationTurn()
 	if err != nil || resumed.TurnStatus != "completed" || !session.PlanningCompleted() {

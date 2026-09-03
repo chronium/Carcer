@@ -51,7 +51,7 @@ const (
 	listRequestsToolDescription       = "List the authoritative run-level external feature requests and their current pending, approved, or denied status. Pending requests are recorded advisory requests, not provisioned or promised, and carry no ETA or approval probability. Under trusted operator semantics, approved requests have already been provisioned and are usable only within the exact provisioned scope; denied requests are unavailable under that request. This read-only tool does not modify requests."
 	listProvidedAssetsToolDescription = "Ask the running CodexOS guest to list the immutable provided assets it can access through its advertised development tool."
 	readProvidedAssetToolDescription  = "Ask the running CodexOS guest to read an exact byte range from a provided asset through its advertised development tool. This does not give Codex direct access to trusted host asset storage."
-	reviewToolDescription             = "Yield the current turn, then consult a fresh independent reviewer over one stable CodexOS guest-source snapshot. Planning calls must include the exact proposed plan. The reviewer is advisory and cannot modify CodexOS; its exact result returns in one trusted continuation on this thread."
+	reviewToolDescription             = "Yield the current turn, then consult a fresh independent reviewer over one stable CodexOS guest-source snapshot. Every call must include the exact proposed plan or change. The reviewer is advisory and cannot modify CodexOS; its exact result returns in one trusted continuation on this thread."
 )
 
 // implementorConfig is intentionally kept as a concrete app-server config
@@ -2882,9 +2882,9 @@ func dynamicToolNamespaceInOrder(selected map[string]struct{}, order []string) m
 func reviewDynamicFunction() map[string]any {
 	return dynamicFunction("review", reviewToolDescription, map[string]any{
 		"request":  map[string]any{"type": "string"},
-		"proposal": map[string]any{"type": "string", "description": "The exact proposed plan or change to review. Required during planning."},
+		"proposal": map[string]any{"type": "string", "description": "The exact proposed plan or change to review."},
 		"focus":    map[string]any{"type": "string", "enum": []string{"general", "correctness", "design", "security", "performance"}, "default": "general"},
-	}, nil)
+	}, []string{"proposal"})
 }
 
 func validateGenerationToolCall(values map[string]any, threadID, turnID string) error {
