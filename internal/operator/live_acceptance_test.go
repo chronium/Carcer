@@ -134,11 +134,11 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 
 	sendDisposableCommand(t, cancel, inputWriter, result, "continue\n")
 	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 1: RUNNING")
-	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort first acceptance stop\ny\n")
 	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 1 aborted.")
 	sendDisposableCommand(t, cancel, inputWriter, result, "rollback 0\ny\n")
 	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 2 started from generation 0.")
-	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort second acceptance stop\ny\n")
 	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 2 aborted.")
 	if _, err := io.WriteString(inputWriter, "quit\n"); err != nil {
 		stopErr := stopDisposableRunner(cancel, inputWriter, result)
@@ -246,15 +246,16 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 	for generation, want := range map[uint64]struct {
 		transition string
 		parent     uint64
+		reason     string
 	}{
-		1: {transition: "successor", parent: 0},
-		2: {transition: "rollback", parent: 0},
+		1: {transition: "successor", parent: 0, reason: "first acceptance stop"},
+		2: {transition: "rollback", parent: 0, reason: "second acceptance stop"},
 	} {
 		item, err := loaded.InspectGeneration(generation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if item.Outcome != "aborted" || item.Transition != want.transition || item.ParentGeneration == nil || *item.ParentGeneration != want.parent {
+		if item.Outcome != "aborted" || item.Transition != want.transition || item.ParentGeneration == nil || *item.ParentGeneration != want.parent || item.AbortReason == nil || *item.AbortReason != want.reason {
 			t.Fatalf("generation %d archive = %#v", generation, item)
 		}
 	}
@@ -274,6 +275,15 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 			t.Fatalf("event %q missing or out of order:\n%s", event, events)
 		}
 		previous = index
+	}
+	if !bytes.Contains(events, []byte(`"event":"operator_abort_feedback_attached"`)) ||
+		!bytes.Contains(events, []byte(`"source_abort_generation":1`)) ||
+		!bytes.Contains(events, []byte(`"reason":"first acceptance stop"`)) {
+		t.Fatalf("feedback attachment event is incomplete:\n%s", events)
+	}
+	attachment, err := os.ReadFile(filepath.Join(runDirectory, "operator-feedback", "generation-0002.json"))
+	if err != nil || !bytes.Contains(attachment, []byte(`"reason": "first acceptance stop"`)) {
+		t.Fatalf("durable feedback attachment = %s, %v", attachment, err)
 	}
 }
 
@@ -352,7 +362,7 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 		GitBaseRef:            "source/generation-0000",
 		InheritFromRun:        sourceRun,
 		InheritFromGeneration: 0,
-	}, strings.NewReader("status\nfeatures\nfeature 1\nfeature 2\nabort\ny\nquit\n"), &output, runnerConfiguration{
+	}, strings.NewReader("status\nfeatures\nfeature 1\nfeature 2\nabort cross-run acceptance stop\ny\nquit\n"), &output, runnerConfiguration{
 		live: experiment.LiveRunOptions{
 			QEMUExecutable: qemuExecutable, HardwareProfile: qemu.TestHardwareProfile,
 			ReadyTimeout: 3 * time.Second,
@@ -497,7 +507,7 @@ func TestRunnerAbortsDuringBlockedLargeHostResponse(t *testing.T) {
 	}
 
 	abortStarted := time.Now()
-	sendDisposableCommand(t, cancel, inputWriter, result, "abort\ny\n")
+	sendDisposableCommand(t, cancel, inputWriter, result, "abort blocked exchange acceptance stop\ny\n")
 	waitForDisposableOutput(t, cancel, inputWriter, result, &output, "Generation 0 aborted.")
 	if elapsed := time.Since(abortStarted); elapsed > 10*time.Second {
 		stopErr := stopDisposableRunner(cancel, inputWriter, result)

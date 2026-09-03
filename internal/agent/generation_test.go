@@ -51,6 +51,9 @@ type generationTestRuntime struct {
 	metrics        *observability.Metrics
 	previous       string
 	previousSet    bool
+	feedbackSource uint64
+	feedback       string
+	feedbackSet    bool
 	transition     string
 	profile        qemu.HardwareProfile
 	requests       []store.FeatureRequest
@@ -90,6 +93,10 @@ func (r *generationTestRuntime) GenerationRunning() bool { return r.running }
 
 func (r *generationTestRuntime) GenerationNumber() (uint64, bool) {
 	return r.generation, true
+}
+
+func (r *generationTestRuntime) OperatorFeedback() (uint64, string, bool) {
+	return r.feedbackSource, r.feedback, r.feedbackSet
 }
 
 func (r *generationTestRuntime) ListTools(ctx context.Context) ([]string, error) {
@@ -199,6 +206,9 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	runtime := newGenerationTestRuntime(t)
 	runtime.previous = "Inherited handoff."
 	runtime.transition = "rollback"
+	runtime.feedbackSource = 11
+	runtime.feedback = "Operator saw a lockup.\nPreserve these exact words λ."
+	runtime.feedbackSet = true
 	runtime.requests = []store.FeatureRequest{
 		{ID: 1, Generation: 12, Title: "Approved", Description: "Provisioned.", Status: store.FeatureApproved},
 		{ID: 2, Generation: 12, Title: "Pending", Description: "Not provisioned.", Status: store.FeaturePending},
@@ -216,6 +226,7 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 		"Trusted provided-asset host services",
 		"Inherited handoff.",
 		"Later lineage was abandoned.",
+		"Operator feedback from aborted generation 11 (not a handoff or source-ancestry record):\nOperator saw a lockup.\nPreserve these exact words λ.",
 		"Trusted objective.",
 		"#1: Approved\nProvisioned.",
 	} {
@@ -225,6 +236,13 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Not provisioned.") {
 		t.Fatal("planning prompt exposed a non-approved feature request")
+	}
+	if strings.Count(prompt, runtime.feedback) != 1 || strings.Contains(prompt, "Previous generation handoff:\n"+runtime.feedback) {
+		t.Fatalf("abort feedback was duplicated or merged into handoff:\n%s", prompt)
+	}
+	retried, err := planningPrompt(runtime, &objective)
+	if err != nil || !strings.Contains(retried, runtime.feedback) {
+		t.Fatalf("planning retry lost operator feedback: %v\n%s", err, retried)
 	}
 	runtime.featureErr = errors.New("feature request state unavailable")
 	promptSession := NewGenerationSession(runtime, GenerationSessionOptions{Objective: &objective})

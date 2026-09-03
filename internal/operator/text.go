@@ -65,3 +65,19 @@ func ExitInterviewQuestion(commandLine string) (string, bool) {
 	}
 	return question, true
 }
+
+// AbortReason recognizes "abort REASON" while preserving the supplied reason
+// after trimming only command-separator whitespace.
+func AbortReason(commandLine string) (string, bool) {
+	commandLine = strings.TrimRight(commandLine, "\r\n")
+	stripped := strings.TrimLeftFunc(commandLine, unicode.IsSpace)
+	if !strings.HasPrefix(stripped, "abort") || len(stripped) == len("abort") {
+		return "", false
+	}
+	separator, _ := utf8.DecodeRuneInString(stripped[len("abort"):])
+	if !unicode.IsSpace(separator) {
+		return "", false
+	}
+	reason := strings.TrimLeftFunc(stripped[len("abort"):], unicode.IsSpace)
+	return reason, reason != ""
+}

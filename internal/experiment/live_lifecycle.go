@@ -76,6 +76,7 @@ func (r *CodexOSRun) completeLiveGeneration(generation *liveGeneration, number u
 		ISO:            filepath.Join(archive.ArchivePath, successorName, "codexos.iso"),
 	}
 	r.previousHandoff = &handoff
+	r.currentOperatorFeedback = nil
 	r.currentBootImage = ""
 	r.currentParent = nil
 	r.currentTransition = ""
@@ -141,6 +142,15 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 		r.clearLiveTransition()
 		return errors.Join(err, closeErr)
 	}
+	feedback, err := r.attachOperatorFeedback(next)
+	if err != nil {
+		closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+		if closeErr == nil {
+			_ = os.RemoveAll(generation.workspace)
+		}
+		r.clearLiveTransition()
+		return errors.Join(err, closeErr)
+	}
 	r.installLiveGeneration(generation)
 	r.gateMu.Lock()
 	r.generationNumber = &next
@@ -149,6 +159,7 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 	r.currentBootImage = generation.bootISO
 	r.currentHardware = hardware
 	r.previousHandoff = &handoff
+	r.currentOperatorFeedback = feedback
 	r.pendingFinish = nil
 	r.gateHarnessTransition = nil
 	r.transitioning = false
@@ -219,6 +230,15 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 		r.clearLiveTransition()
 		return errors.Join(err, closeErr)
 	}
+	feedback, err := r.attachOperatorFeedback(next)
+	if err != nil {
+		closeErr := closeLiveGeneration(generation, defaultGenerationStopTimeout)
+		if closeErr == nil {
+			_ = os.RemoveAll(generation.workspace)
+		}
+		r.clearLiveTransition()
+		return errors.Join(err, closeErr)
+	}
 	r.installLiveGeneration(generation)
 	handoff := *archived.Handoff
 	r.gateMu.Lock()
@@ -228,6 +248,7 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 	r.currentBootImage = generation.bootISO
 	r.currentHardware = hardware
 	r.previousHandoff = &handoff
+	r.currentOperatorFeedback = feedback
 	r.pendingFinish = nil
 	r.gateHarnessTransition = nil
 	r.transitioning = false
@@ -239,7 +260,10 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 	return nil
 }
 
-func (r *CodexOSRun) abortLiveGeneration() error {
+func (r *CodexOSRun) abortLiveGeneration(reason string) error {
+	if err := ValidateAbortReason(reason); err != nil {
+		return err
+	}
 	r.live.operationMu.Lock()
 	defer r.live.operationMu.Unlock()
 	r.gateMu.Lock()
@@ -287,6 +311,7 @@ func (r *CodexOSRun) abortLiveGeneration() error {
 		Generation: number, ParentGeneration: parent, Transition: transition, Hardware: hardware,
 		HarnessIdentity: r.HarnessIdentity(),
 		BootISO:         generation.bootISO, QEMUStdout: generation.stdoutPath, QEMUStderr: generation.stderrPath,
+		AbortReason:   reason,
 		LatestSuccess: latest,
 	})
 	if err != nil {
@@ -299,6 +324,7 @@ func (r *CodexOSRun) abortLiveGeneration() error {
 	r.pendingFinish = nil
 	r.retainedFinish = nil
 	r.previousHandoff = nil
+	r.currentOperatorFeedback = nil
 	r.currentBootImage = ""
 	r.currentParent = nil
 	r.currentTransition = ""
@@ -307,7 +333,7 @@ func (r *CodexOSRun) abortLiveGeneration() error {
 	r.gateMu.Unlock()
 	r.setObservedLiveState()
 	r.recordLive("generation_aborted", &number, map[string]any{
-		"transition": transition, "duration_seconds": nonNegativeLiveDuration(generation.startedAt),
+		"transition": transition, "duration_seconds": nonNegativeLiveDuration(generation.startedAt), "reason": reason,
 	})
 	return nil
 }
@@ -334,6 +360,7 @@ func (r *CodexOSRun) failLiveGeneration(generation *liveGeneration, cleanup bool
 	r.pendingFinish = nil
 	r.retainedFinish = nil
 	r.previousHandoff = nil
+	r.currentOperatorFeedback = nil
 	r.currentBootImage = ""
 	r.currentParent = nil
 	r.currentTransition = ""

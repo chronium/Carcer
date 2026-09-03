@@ -163,7 +163,7 @@ func TestRunnerStartsPausesAndAbortsDisposableGeneration(t *testing.T) {
 	err = runWithIOConfigured(ctx, Options{
 		RunDirectory: runDirectory,
 		InitialISO:   initialISO,
-	}, strings.NewReader("status\npause\nabort\ny\nquit\n"), &output, runnerConfiguration{
+	}, strings.NewReader("status\npause\nabort test requested stop\ny\nquit\n"), &output, runnerConfiguration{
 		live: experiment.LiveRunOptions{
 			QEMUExecutable:  qemuExecutable,
 			HardwareProfile: qemu.TestHardwareProfile,
@@ -195,7 +195,7 @@ func TestRunnerStartsPausesAndAbortsDisposableGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if archive.Outcome != "aborted" || archive.Transition != "initial" {
+	if archive.Outcome != "aborted" || archive.Transition != "initial" || archive.AbortReason == nil || *archive.AbortReason != "test requested stop" {
 		t.Fatalf("archive = %#v", archive)
 	}
 	workspaces, err := filepath.Glob(filepath.Join(runDirectory, ".generation-*"))
@@ -216,6 +216,9 @@ func TestRunnerStartsPausesAndAbortsDisposableGeneration(t *testing.T) {
 			t.Fatalf("event %q missing or out of order:\n%s", event, events)
 		}
 		previous = index
+	}
+	if !bytes.Contains(events, []byte(`"event":"generation_aborted"`)) || !bytes.Contains(events, []byte(`"reason":"test requested stop"`)) {
+		t.Fatalf("durable abort event omitted reason:\n%s", events)
 	}
 }
 
@@ -244,10 +247,11 @@ func TestRunnerReopensArchivedGateThroughPlainConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := experiment.WriteAbortedArchive(runDirectory, experiment.AbortedArchive{
-		Generation: 0,
-		Transition: "initial",
-		Hardware:   hardware,
-		BootISO:    []byte("archived boot image"),
+		Generation:  0,
+		Transition:  "initial",
+		Hardware:    hardware,
+		BootISO:     []byte("archived boot image"),
+		AbortReason: "operator stopped the generation",
 	}); err != nil {
 		t.Fatal(err)
 	}

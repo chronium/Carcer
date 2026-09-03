@@ -435,6 +435,7 @@ type crossRunArchivedGeneration struct {
 	Outcome         string
 	ArchivePath     string
 	Handoff         *string
+	AbortReason     *string
 	HarnessIdentity *provenance.HarnessIdentity
 }
 
@@ -646,6 +647,16 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 		}
 		expected := map[string]struct{}{
 			"boot": {}, "metadata.json": {}, "hardware.json": {}, "aborted.txt": {}, "qemu.stdout": {}, "qemu.stderr": {},
+		}
+		reasonPath := filepath.Join(path, "abort-reason.txt")
+		if crossRunPathExists(reasonPath) {
+			reason, readErr := readCrossRunRegular(path, "abort-reason.txt")
+			if readErr != nil || len(reason) > 8*1024 || !utf8.Valid(reason) || strings.TrimSpace(string(reason)) == "" {
+				return archive, crossRunArchiveError(expectedGeneration, errors.New("generation abort reason is malformed"))
+			}
+			value := string(reason)
+			archive.AbortReason = &value
+			expected["abort-reason.txt"] = struct{}{}
 		}
 		if archive.HarnessIdentity != nil {
 			expected[provenance.GenerationHarnessFilename] = struct{}{}

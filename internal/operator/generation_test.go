@@ -36,6 +36,7 @@ type operatorTestRuntime struct {
 	continueAttempts int
 	forkAttempts     int
 	abortAttempts    int
+	abortReason      string
 }
 
 func newOperatorTestRuntime(t *testing.T) *operatorTestRuntime {
@@ -176,11 +177,12 @@ func (r *operatorTestRuntime) ForkFromGeneration(uint64) error {
 	return errors.New("unused rollback")
 }
 
-func (r *operatorTestRuntime) AbortGeneration() error {
+func (r *operatorTestRuntime) AbortGeneration(reason string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.abortAttempts++
 	r.abortCalls++
+	r.abortReason = reason
 	r.state = "awaiting_next_generation"
 	return nil
 }
@@ -435,7 +437,7 @@ func TestGenerationControllerRejectsLifecycleCommandsAfterClose(t *testing.T) {
 		"pause":    func() error { return controller.Pause(ctx) },
 		"continue": controller.ContinueGeneration,
 		"rollback": func() error { return controller.Rollback(0) },
-		"abort":    controller.Abort,
+		"abort":    func() error { return controller.Abort("operator stopped the generation") },
 	} {
 		if err := call(); err == nil {
 			t.Fatalf("closed controller accepted %s", name)
