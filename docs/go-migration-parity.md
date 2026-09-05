@@ -66,4 +66,8 @@ legacy archive layout. Provisioned runs freeze an additional `source-capacity.js
 in each archive and can accept 1 MiB content plus framing. Python is unchanged
 and does not support this opt-in persisted extension. Original recorded archive
 limits are used for history, Git reconciliation, and inheritance validation;
-fresh destinations still default to 64 KiB and reject oversized inherited source.
+fresh destinations default to 64 KiB and reject oversized inherited source.
+The Go-only `--inherit-source-capacity 1048576` flag can explicitly provision a
+larger destination during cross-run bootstrap. Validation occurs before state
+creation and the setting is published atomically with bootstrap provenance.
+Seed-only startup and gate reopening reject that flag.

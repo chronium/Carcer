@@ -334,6 +334,8 @@ func TestRunnerRejectsInvalidInheritanceBeforeCreatingRunDirectory(t *testing.T)
 		options Options
 		want    string
 	}{
+		{name: "capacity on seed run", options: Options{InitialISO: "seed.iso", InheritSourceCapacity: 1048576}, want: "requires cross-run inheritance"},
+		{name: "invalid capacity", options: Options{InitialISO: "seed.iso", InheritanceRequested: true, GitConfigured: true, InheritSourceCapacity: 1}, want: "source content capacity must be"},
 		{
 			name: "resume",
 			options: Options{

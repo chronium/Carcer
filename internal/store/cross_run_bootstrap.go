@@ -174,7 +174,7 @@ func InitializeCrossRunBootstrap(
 	gitRepository string,
 	gitBaseRef string,
 ) (*CrossRunBootstrap, error) {
-	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, nil)
+	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, nil, 0)
 }
 
 func InitializeCrossRunBootstrapWithHarnessIdentity(
@@ -192,7 +192,20 @@ func InitializeCrossRunBootstrapWithHarnessIdentity(
 	if err := provenance.ValidateHarnessIdentity(*harnessIdentity); err != nil {
 		return nil, &CrossRunBootstrapError{Reason: "destination harness identity is invalid", Err: err}
 	}
-	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, harnessIdentity)
+	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, harnessIdentity, 0)
+}
+
+// InitializeCrossRunBootstrapWithCapacity explicitly provisions the destination
+// as part of atomic bootstrap publication. Zero retains the legacy 64 KiB budget;
+// the source run's setting is never inherited implicitly.
+func InitializeCrossRunBootstrapWithCapacity(
+	destinationRun, initialISO, sourceRun string,
+	sourceGeneration uint64,
+	gitRepository, gitBaseRef string,
+	harnessIdentity *provenance.HarnessIdentity,
+	destinationBudget sourcecapacity.Budget,
+) (*CrossRunBootstrap, error) {
+	return initializeCrossRunBootstrap(destinationRun, initialISO, sourceRun, sourceGeneration, gitRepository, gitBaseRef, harnessIdentity, destinationBudget)
 }
 
 func initializeCrossRunBootstrap(
@@ -203,7 +216,16 @@ func initializeCrossRunBootstrap(
 	gitRepository string,
 	gitBaseRef string,
 	harnessIdentity *provenance.HarnessIdentity,
+	destinationBudget sourcecapacity.Budget,
 ) (*CrossRunBootstrap, error) {
+	if err := destinationBudget.Validate(); err != nil {
+		return nil, &CrossRunBootstrapError{Reason: "invalid destination source capacity", Err: err}
+	}
+	if harnessIdentity != nil {
+		if err := provenance.ValidateHarnessIdentity(*harnessIdentity); err != nil {
+			return nil, &CrossRunBootstrapError{Reason: "destination harness identity is invalid", Err: err}
+		}
+	}
 	destination, err := resolveCrossRunPath(destinationRun)
 	if err != nil {
 		return nil, &CrossRunBootstrapError{Reason: "could not resolve cross-run destination", Err: err}
@@ -254,14 +276,14 @@ func initializeCrossRunBootstrap(
 	if archived.Outcome != "completed" || archived.Handoff == nil {
 		return nil, &CrossRunBootstrapError{Reason: "inherited generation did not complete cooperatively"}
 	}
-	// A fresh destination always starts at the legacy budget, independently of
-	// the source run. Reject before creating any destination/staging state.
+	// Validate against the explicit destination budget before creating any
+	// destination/staging state. Absence retains the legacy budget.
 	inheritedSnapshot, err := sourcecapacity.ReadFile(filepath.Join(archived.ArchivePath, "source.snapshot"), archived.SourceCapacity.SnapshotLimit())
 	if err != nil {
 		return nil, wrapCrossRunSourceError(err)
 	}
-	if _, err := guest.ParseSourceSnapshot(inheritedSnapshot); err != nil {
-		return nil, &CrossRunBootstrapError{Reason: "inherited source exceeds destination source content capacity (65536 bytes)", Err: err}
+	if _, err := guest.ParseSourceSnapshotWithBudget(inheritedSnapshot, destinationBudget); err != nil {
+		return nil, &CrossRunBootstrapError{Reason: fmt.Sprintf("inherited source exceeds destination source content capacity (%d bytes)", destinationBudget.Bytes()), Err: err}
 	}
 	successorISO := filepath.Join(archived.ArchivePath, "successor", "codexos.iso")
 	if equal, compareErr := crossRunFilesEqual(image, successorISO); compareErr != nil {
@@ -361,6 +383,11 @@ func initializeCrossRunBootstrap(
 	if harnessIdentity != nil {
 		if err := provenance.NewHarnessIdentityStore(candidate).RecordRunCreation(*harnessIdentity); err != nil {
 			return nil, &CrossRunBootstrapError{Reason: "could not persist destination harness identity", Err: err}
+		}
+	}
+	if destinationBudget != 0 {
+		if err := sourcecapacity.Save(candidate, destinationBudget); err != nil {
+			return nil, &CrossRunBootstrapError{Reason: "could not persist destination source capacity", Err: err}
 		}
 	}
 	if err := writeCrossRunDurable(filepath.Join(candidate, CrossRunBootstrapHandoff), handoffBytes); err != nil {

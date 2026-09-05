@@ -44,6 +44,37 @@ func TestSourceCapacityInheritanceRejectsBeforePublishingDestination(t *testing.
 	if _, err := os.Lstat(filepath.Dir(destination)); !os.IsNotExist(err) {
 		t.Fatalf("failed inheritance published state: %v", err)
 	}
+
+	repository := filepath.Join(root, "repository")
+	createCrossRunGitRepository(t, repository, "source/generation-0000")
+	expandedDestination := filepath.Join(root, "expanded-destination")
+	if _, err := InitializeCrossRunBootstrapWithCapacity(expandedDestination, filepath.Join(archive, "successor/codexos.iso"), source, 0, repository, "source/generation-0000", nil, sourcecapacity.Expanded); err != nil {
+		t.Fatal(err)
+	}
+	budget, err := sourcecapacity.Load(expandedDestination)
+	if err != nil || budget.Bytes() != sourcecapacity.Expanded {
+		t.Fatalf("expanded destination persistence: %v %v", budget, err)
+	}
+	if _, err := LoadCrossRunBootstrap(expandedDestination); err != nil {
+		t.Fatalf("expanded bootstrap reopen: %v", err)
+	}
+	sourceBytes, err := os.ReadFile(filepath.Join(archive, "source.snapshot"))
+	if err != nil || string(sourceBytes) != string(snapshot) {
+		t.Fatal("inheritance changed source snapshot")
+	}
+	for _, budget := range []sourcecapacity.Budget{1, sourcecapacity.Expanded} {
+		failedDestination := filepath.Join(root, "failed-destination")
+		if _, err := InitializeCrossRunBootstrapWithCapacity(failedDestination, filepath.Join(archive, "successor/codexos.iso"), source, 0, repository, "wrong-base", nil, budget); err == nil {
+			t.Fatal("invalid bootstrap succeeded")
+		}
+		if _, err := os.Lstat(failedDestination); !os.IsNotExist(err) {
+			t.Fatal("failed bootstrap published capacity or other destination state")
+		}
+		staging, err := filepath.Glob(filepath.Join(root, ".cross-run-bootstrap-*"))
+		if err != nil || len(staging) != 0 {
+			t.Fatal("failed bootstrap left staging state")
+		}
+	}
 	// Provisioning a source run does not expand a fresh destination, even when
 	// the selected snapshot fits and inheritance succeeds.
 	small, err := guest.EncodeSourceSnapshot([]guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("source\n")}})
@@ -56,12 +87,10 @@ func TestSourceCapacityInheritanceRejectsBeforePublishingDestination(t *testing.
 	if err := os.WriteFile(filepath.Join(archive, "source/seed/kernel.c"), []byte("source\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	repository := filepath.Join(root, "repository")
-	createCrossRunGitRepository(t, repository, "source/generation-0000")
 	if _, err := InitializeCrossRunBootstrap(destination, filepath.Join(archive, "successor/codexos.iso"), source, 0, repository, "source/generation-0000"); err != nil {
 		t.Fatal(err)
 	}
-	budget, err := sourcecapacity.Load(destination)
+	budget, err = sourcecapacity.Load(destination)
 	if err != nil || budget.Bytes() != sourcecapacity.Default {
 		t.Fatalf("fresh destination expanded: %v %v", budget, err)
 	}

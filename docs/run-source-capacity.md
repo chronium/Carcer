@@ -1,7 +1,7 @@
 # Go per-run source capacity (request #4)
 
 The Go harness can provision **1,048,576 bytes (1 MiB) of aggregate source file
-content** for one run. Fresh experiments and legacy runs without a setting keep
+content** for one run. Fresh seed experiments and legacy runs without a setting keep
 65,536 bytes (64 KiB). There is no global default change, compiler provisioning,
 or guest/seed modification. Guest-side buffers, snapshot serialization, and tool
 adaptations remain the implementor's work. Request #3, PRISON/2, and UI renaming
@@ -27,6 +27,10 @@ still fits existing invocation and transport limits. A guest tool must preserve
 its EOF semantics; a host budget does not increase guest buffers automatically.
 
 ## Setting and lifecycle
+
+Existing runs change capacity only at the inactive generation gate. A new
+cross-run bootstrap can explicitly select its destination capacity before atomic
+publication, as described below.
 
 At the plain console or shared console command path:
 
@@ -78,11 +82,34 @@ the setting if it will not fit. An older larger archive can still be inspected
 or reconciled under its own limit. Selecting it for rollback into a smaller run
 fails before boot or transition publication. Cross-run inheritance validates the
 source archive under its recorded limit, then checks the selected snapshot against
-the destination's budget **before creating destination or staging state**. Existing
-cross-run initialization creates a fresh destination, so that destination always
-starts at 64 KiB. It never inherits provisioning; an oversized snapshot is rejected
-with the destination's 65,536-byte limit. Inherit a fitting snapshot, reach a valid
-gate, then provision that destination explicitly if needed.
+the destination's budget **before creating destination or staging state**. Cross-run initialization
+creates a fresh destination with a 64 KiB default, independently of the source
+run. An explicit `--inherit-source-capacity 1048576` selects 1 MiB for that new
+destination. Without the flag, an oversized snapshot is rejected with the
+65,536-byte destination limit.
+
+The flag accepts `65536` or `1048576` content bytes and requires cross-run
+inheritance (`--initial-iso`, both `--inherit-from-*` flags, and Git provenance).
+It is rejected for seed-only startup and `--resume-at-gate`; existing runs use the
+gate command. Validation precedes destination/staging creation. The selected
+setting is synced inside the unpublished bootstrap directory and is published
+atomically together with handoff, feature ledger, and provenance. Failure does
+not publish a destination setting or partial run. Restart then loads the same
+per-run setting; the flag is not needed or accepted on gate reopening.
+
+For example, add the following flag to a new experiment's existing inheritance
+launch command to support Experiment 4's expanded source:
+
+```text
+--inherit-source-capacity 1048576
+```
+
+The source remains the latest validated completed archive, the initial ISO must
+match that archive's successor, and the Git base must match its recorded tag.
+Unlike reopening an existing gate, an inheritance launch with `--initial-iso`
+boots generation zero of the new run. Execute it only when explicitly choosing
+to start that experiment. No source run or archive is modified by provisioning
+the destination.
 
 Unprovisioned default archives retain the legacy layout and interoperability.
 The extra setting/archive file is a Go-only extension; the unchanged Python
@@ -154,8 +181,8 @@ QEMU/serial peers, and bounded serialized Go tests. It does not operate a live
 experiment or prove guest-side adaptation. See the verification record below for
 commands and outcomes.
 
-Verified on 2026-09-05. The full/race suites and vet ran at implementation commit
-`3a3ff98`; subsequent changes are documentation only. All checks passed:
+Verified on 2026-09-05. The initial full/race suites and vet ran at implementation commit
+`3a3ff98`. The explicit bootstrap-capacity follow-up is verified separately below. All checks passed:
 
 | Check | Result |
 | --- | --- |
