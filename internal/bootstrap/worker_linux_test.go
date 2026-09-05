@@ -17,6 +17,20 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--bootstrap-client-cwd-fixture" {
+		var request wireRequest
+		if e := readWire(os.Stdin, &request, maxWireInput); e != nil {
+			os.Exit(2)
+		}
+		cwd, e := os.Getwd()
+		if e != nil {
+			os.Exit(3)
+		}
+		if e = writeWire(os.Stdout, wireResponse{Result: Result{Status: 0, Reason: "available", Cleaned: true, Diagnostics: cwd}}); e != nil {
+			os.Exit(4)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "__") {
 		if e := Helper(os.Args[1:], os.Stdout); e != nil {
 			fmt.Fprintln(os.Stderr, e)

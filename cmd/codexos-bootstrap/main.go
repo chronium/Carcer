@@ -28,6 +28,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "requires the dedicated rootless codexos-bootstrap account")
 		os.Exit(1)
 	}
+	// sudo and systemd-run --scope preserve the caller's cwd. It may be a
+	// harness checkout that this dedicated account must not be able to enter.
+	if e = os.Chdir(u.HomeDir); e != nil {
+		fmt.Fprintln(os.Stderr, "cannot enter bootstrap account home:", e)
+		os.Exit(1)
+	}
 	env := []string{"HOME=" + u.HomeDir, "PATH=/usr/bin:/bin", "XDG_RUNTIME_DIR=/run/user/" + strconv.Itoa(os.Geteuid()), "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + strconv.Itoa(os.Geteuid()) + "/bus", "GOMAXPROCS=2", "GOMEMLIMIT=192MiB"}
 	if len(os.Args) == 1 {
 		executable, e := os.Executable()
