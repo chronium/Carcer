@@ -2488,7 +2488,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "bootstrap-import" && mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -2635,6 +2635,10 @@ func runGenerationFakeAppServer() {
 		if ((mode == "success" || mode == "interview" || mode == "interview-hold" || mode == "interview-interrupt") && index == 1) || (mode == "interrupt" && index == 1) || (mode == "interrupt-failed" && index == 1) || (mode == "planning-interrupt" && index == 2) {
 			tool = "write"
 			arguments = map[string]any{"path": "seed/kernel.c", "offset": 0, "data": "x"}
+		}
+		if mode == "bootstrap-import" && index == 1 {
+			tool = "import_bootstrap_artifact"
+			arguments = map[string]any{"id": "opaque", "length": 0, "path": "ram/new"}
 		}
 		callID := fmt.Sprintf("generation-call-%d", index)
 		send(map[string]any{"id": callID, "method": "item/tool/call", "params": map[string]any{

@@ -58,7 +58,7 @@ assert created.id == 8
 	if !bytes.Equal(goRecord, pythonRecord) {
 		t.Fatalf("record encoding differs:\nGo: %s\nPython: %s", goRecord, pythonRecord)
 	}
-	if _, err := store.Approve(2); err != nil {
+	if _, err := store.Approve(2, ""); err != nil {
 		t.Fatal(err)
 	}
 	created, err := store.Create(11, "Go new 次", "Read by Python")

@@ -339,7 +339,7 @@ func testRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T, budget so
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err = featureStore.Approve(approved.ID)
+	approved, err = featureStore.Approve(approved.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

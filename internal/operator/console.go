@@ -30,8 +30,8 @@ type consoleRuntime interface {
 	InspectGeneration(uint64) (experiment.ArchivedGeneration, error)
 	FeatureRequests() ([]store.FeatureRequest, error)
 	FeatureRequest(uint64) (store.FeatureRequest, error)
-	ApproveFeatureRequest(uint64) (store.FeatureRequest, error)
-	DenyFeatureRequest(uint64) (store.FeatureRequest, error)
+	ApproveFeatureRequest(uint64, string) (store.FeatureRequest, error)
+	DenyFeatureRequest(uint64, string) (store.FeatureRequest, error)
 	PresentationSnapshot() experiment.RunPresentationSnapshot
 }
 
@@ -293,17 +293,17 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 		}
 		return false, c.printFeature(requestID)
 	case "feature-approve":
-		requestID, ok := c.unsignedArgument(words, "feature-approve")
+		requestID, note, ok := c.featureDecisionArguments(commandLine, words)
 		if !ok {
 			return false, nil
 		}
-		return false, c.approveFeature(requestID)
+		return false, c.approveFeature(requestID, note)
 	case "feature-deny":
-		requestID, ok := c.unsignedArgument(words, "feature-deny")
+		requestID, note, ok := c.featureDecisionArguments(commandLine, words)
 		if !ok {
 			return false, nil
 		}
-		return false, c.denyFeature(requestID)
+		return false, c.denyFeature(requestID, note)
 	case "agent":
 		if !c.requireArity(words, 1, "agent") {
 			return false, nil
@@ -770,8 +770,8 @@ func (c *PlainConsole) printHelp() {
 		"inspect N   show archived generation N",
 		"features    list external feature requests",
 		"feature N   show external feature request N",
-		"feature-approve N  approve a pending request at the gate",
-		"feature-deny N     deny a pending request at the gate",
+		"feature-approve N [NOTE]  approve a pending request at the gate",
+		"feature-deny N [NOTE]     deny a pending request at the gate",
 		"agent       start or continue the generation's Codex session",
 		"interview   enter a retained post-generation exit interview",
 		"ask TEXT    ask one retrospective exit-interview question",
@@ -881,7 +881,7 @@ func (c *PlainConsole) printInspection(item experiment.ArchivedGeneration) {
 	c.printLine("Archive: " + item.ArchivePath)
 	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", item.SourceCapacity.Bytes(), item.SourceCapacity.SnapshotLimit()))
 	if item.Bootstrap != nil {
-		c.printLine(fmt.Sprintf("Bootstrap artifacts: %d authorized jobs; per-job memory=%d bytes; retained run budget=%d bytes", len(item.Bootstrap.Jobs), item.Bootstrap.Limits.Memory, item.Bootstrap.Limits.RunBytes))
+		c.printLine(fmt.Sprintf("Bootstrap artifacts: %d retained job references; per-job memory=%d bytes; retained run budget=%d bytes", len(item.Bootstrap.Jobs), item.Bootstrap.Limits.Memory, item.Bootstrap.Limits.RunBytes))
 	}
 	c.printLine("Hardware:")
 	c.printLine("  Profile: " + item.Hardware.Profile)
@@ -933,6 +933,9 @@ func (c *PlainConsole) printFeatures() error {
 	c.printLine("ID   GEN   STATUS     TITLE")
 	for _, request := range requests {
 		c.printLine(fmt.Sprintf("%-4d %-5d %-10s %s", request.ID, request.Generation, request.Status, EscapeTerminalText(request.Title, false)))
+		if request.DecisionNote != "" {
+			c.printLine("     Operator decision note: " + EscapeTerminalText(request.DecisionNote, false))
+		}
 	}
 	return nil
 }
@@ -949,27 +952,54 @@ func (c *PlainConsole) printFeature(requestID uint64) error {
 	c.printLine("")
 	c.printLine("Description:")
 	c.printIndented(EscapeTerminalText(request.Description, true))
+	if request.DecisionNote != "" {
+		c.printLine("Operator decision note:")
+		c.printIndented(EscapeTerminalText(request.DecisionNote, true))
+	}
 	return nil
 }
 
-func (c *PlainConsole) approveFeature(requestID uint64) error {
+// The note is the trimmed remainder of the command; inner whitespace and quotes
+// are literal text, matching other free-text operator commands.
+func (c *PlainConsole) featureDecisionArguments(line string, words []string) (uint64, string, bool) {
+	if len(words) < 2 {
+		c.printLine("Usage: " + words[0] + " N [NOTE]")
+		return 0, "", false
+	}
+	id, ok := c.unsignedArgument(words[:2], words[0])
+	if !ok {
+		return 0, "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), words[0]))
+	note := strings.TrimSpace(strings.TrimPrefix(rest, words[1]))
+	if err := store.ValidateFeatureDecisionNote(note); err != nil {
+		c.printLine(err.Error())
+		return 0, "", false
+	}
+	if note != "" {
+		c.printLine("Operator decision note: " + EscapeTerminalText(note, false))
+	}
+	return id, note, true
+}
+
+func (c *PlainConsole) approveFeature(requestID uint64, note string) error {
 	if !c.confirm(fmt.Sprintf("Mark feature request #%d approved?\nOnly do this after the trusted external capability has been provisioned. [y/N] ", requestID)) {
 		c.printLine("Feature approval cancelled.")
 		return nil
 	}
-	if _, err := c.runtime.ApproveFeatureRequest(requestID); err != nil {
+	if _, err := c.runtime.ApproveFeatureRequest(requestID, note); err != nil {
 		return err
 	}
 	c.printLine(fmt.Sprintf("Feature request #%d approved.", requestID))
 	return nil
 }
 
-func (c *PlainConsole) denyFeature(requestID uint64) error {
+func (c *PlainConsole) denyFeature(requestID uint64, note string) error {
 	if !c.confirm(fmt.Sprintf("Deny feature request #%d? [y/N] ", requestID)) {
 		c.printLine("Feature denial cancelled.")
 		return nil
 	}
-	if _, err := c.runtime.DenyFeatureRequest(requestID); err != nil {
+	if _, err := c.runtime.DenyFeatureRequest(requestID, note); err != nil {
 		return err
 	}
 	c.printLine(fmt.Sprintf("Feature request #%d denied.", requestID))

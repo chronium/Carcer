@@ -285,15 +285,15 @@ func (r *CodexOSRun) FeatureRequest(requestID uint64) (store.FeatureRequest, err
 	return r.live.featureStore.Request(requestID)
 }
 
-func (r *CodexOSRun) ApproveFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
-	return r.decideFeatureRequest(requestID, true)
+func (r *CodexOSRun) ApproveFeatureRequest(requestID uint64, note string) (store.FeatureRequest, error) {
+	return r.decideFeatureRequest(requestID, true, note)
 }
 
-func (r *CodexOSRun) DenyFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
-	return r.decideFeatureRequest(requestID, false)
+func (r *CodexOSRun) DenyFeatureRequest(requestID uint64, note string) (store.FeatureRequest, error) {
+	return r.decideFeatureRequest(requestID, false, note)
 }
 
-func (r *CodexOSRun) decideFeatureRequest(requestID uint64, approve bool) (store.FeatureRequest, error) {
+func (r *CodexOSRun) decideFeatureRequest(requestID uint64, approve bool, note string) (store.FeatureRequest, error) {
 	if r == nil || r.live == nil || r.live.featureStore == nil {
 		return store.FeatureRequest{}, &GenerationRuntimeError{Reason: "feature-request store is unavailable"}
 	}
@@ -310,10 +310,10 @@ func (r *CodexOSRun) decideFeatureRequest(requestID uint64, approve bool) (store
 	var err error
 	event := "feature_denied"
 	if approve {
-		request, err = r.live.featureStore.Approve(requestID)
+		request, err = r.live.featureStore.Approve(requestID, note)
 		event = "feature_approved"
 	} else {
-		request, err = r.live.featureStore.Deny(requestID)
+		request, err = r.live.featureStore.Deny(requestID, note)
 	}
 	if err != nil {
 		return store.FeatureRequest{}, err

@@ -669,6 +669,14 @@ func TestLiveRunReopensFrozenGateBeforeBootingSuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	request, err := run.live.featureStore.Create(0, "Need capability", "Guest description")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const note = "Already provisioned under existing limits. λ"
+	if _, err := run.ApproveFeatureRequest(request.ID, note); err != nil {
+		t.Fatal(err)
+	}
 	if err := run.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -688,11 +696,19 @@ func TestLiveRunReopensFrozenGateBeforeBootingSuccessor(t *testing.T) {
 	if transition, ok := reopened.CurrentTransition(); ok || transition != "" {
 		t.Fatalf("reopened gate exposed stale transition %q, %v", transition, ok)
 	}
+	decision, err := reopened.FeatureRequest(request.ID)
+	if err != nil || decision.DecisionNote != note {
+		t.Fatalf("reopened decision: %+v, %v", decision, err)
+	}
 	if err := reopened.ContinueGeneration(); err != nil {
 		t.Fatalf("continue reopened gate: %v", err)
 	}
 	if number, ok := reopened.GenerationNumber(); !ok || number != 1 {
 		t.Fatalf("reopened successor generation = %d, %v", number, ok)
+	}
+	decision, err = reopened.FeatureRequest(request.ID)
+	if err != nil || decision.DecisionNote != note || decision.Description != "Guest description" {
+		t.Fatalf("successor decision: %+v, %v", decision, err)
 	}
 }
 
@@ -789,13 +805,13 @@ func TestLiveRunDecidesFeatureRequestsOnlyAtGate(t *testing.T) {
 	if snapshot := run.PresentationSnapshot(); snapshot.PendingFeatureRequests != 1 {
 		t.Fatalf("pending feature presentation after create = %#v", snapshot)
 	}
-	if _, err := run.ApproveFeatureRequest(request.ID); err == nil || !strings.Contains(err.Error(), "only while awaiting") {
+	if _, err := run.ApproveFeatureRequest(request.ID, "Does not bypass the gate"); err == nil || !strings.Contains(err.Error(), "only while awaiting") {
 		t.Fatalf("running feature decision error = %v", err)
 	}
 	if err := run.AbortGeneration("operator stopped the generation"); err != nil {
 		t.Fatal(err)
 	}
-	approved, err := run.ApproveFeatureRequest(request.ID)
+	approved, err := run.ApproveFeatureRequest(request.ID, "")
 	if err != nil {
 		t.Fatalf("approve at gate: %v", err)
 	}

@@ -88,11 +88,12 @@ type crossRunFeatureLedgerJSON struct {
 }
 
 type crossRunFeatureRequestJSON struct {
-	Description string `json:"description"`
-	Generation  uint64 `json:"generation"`
-	ID          uint64 `json:"id"`
-	Status      string `json:"status"`
-	Title       string `json:"title"`
+	DecisionNote string `json:"decision_note,omitempty"`
+	Description  string `json:"description"`
+	Generation   uint64 `json:"generation"`
+	ID           uint64 `json:"id"`
+	Status       string `json:"status"`
+	Title        string `json:"title"`
 }
 
 type crossRunManifestJSON struct {
@@ -1303,7 +1304,8 @@ func decodeCrossRunFeatureLedger(contents []byte) ([]FeatureRequest, error) {
 	requests := make([]FeatureRequest, len(records))
 	for index, record := range records {
 		recordFields, objectErr := decodeCrossRunRawObject(record)
-		if objectErr != nil || len(recordFields) != 5 {
+		_, hasNote := recordFields["decision_note"]
+		if objectErr != nil || (len(recordFields) != 5 && !(hasNote && len(recordFields) == 6)) {
 			return nil, &CrossRunBootstrapError{Reason: "cross-run bootstrap feature ledger record is invalid"}
 		}
 		for _, key := range []string{"description", "generation", "id", "status", "title"} {
@@ -1354,11 +1356,12 @@ func crossRunFeatureLedgerBytes(requests []FeatureRequest) ([]byte, error) {
 	records := make([]crossRunFeatureRequestJSON, len(requests))
 	for index, request := range requests {
 		records[index] = crossRunFeatureRequestJSON{
-			Description: request.Description,
-			Generation:  request.Generation,
-			ID:          request.ID,
-			Status:      request.Status,
-			Title:       request.Title,
+			DecisionNote: request.DecisionNote,
+			Description:  request.Description,
+			Generation:   request.Generation,
+			ID:           request.ID,
+			Status:       request.Status,
+			Title:        request.Title,
 		}
 	}
 	var output bytes.Buffer
@@ -1726,10 +1729,12 @@ func validateCrossRunInheritedRequests(run string, inherited []FeatureRequest) e
 			return &CrossRunBootstrapError{Reason: fmt.Sprintf("inherited feature request #%d is missing", original.ID)}
 		}
 		statusMatches := observed.Status == original.Status
+		noteMatches := observed.DecisionNote == original.DecisionNote
 		if !statusMatches && generationArchived && original.Status == FeaturePending && (observed.Status == FeatureApproved || observed.Status == FeatureDenied) {
 			statusMatches = true
+			noteMatches = true // This pending request was decided at a destination gate.
 		}
-		if observed.Generation != original.Generation || observed.Title != original.Title || observed.Description != original.Description || !statusMatches {
+		if observed.Generation != original.Generation || observed.Title != original.Title || observed.Description != original.Description || !statusMatches || !noteMatches {
 			return &CrossRunBootstrapError{Reason: fmt.Sprintf("inherited feature request #%d was altered", original.ID)}
 		}
 	}
