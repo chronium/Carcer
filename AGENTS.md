@@ -1,177 +1,156 @@
 # AGENTS.md
 
-Read this file and `README.md` before making changes.
+Read this file and [README.md](README.md) before making changes.
 
-This repository is experimental infrastructure, not a reusable framework or product platform.
+These instructions govern repository development. The autonomous guest receives
+a separate trusted contract described in [docs/agent-contract.md](docs/agent-contract.md).
+Repository access during harness development does not grant the guest that access.
 
-## Engineering principles
+CodexOS is experimental infrastructure, not a reusable framework or product platform.
 
-* Prefer the smallest correct implementation.
-* Prefer concrete code over speculative abstractions.
-* Implement requirements that exist now.
-* Follow YAGNI and KISS aggressively.
-* Do not design for hypothetical future implementations unless the current task requires it.
-* Do not introduce an interface merely because one implementation exists.
-* Do not introduce factories unless construction is genuinely variable now.
-* Do not introduce provider, manager, service, strategy, adapter, or repository layers without a concrete architectural reason.
-* Do not generalize a component simply because generalization is possible.
-* Do not refactor unrelated code while completing a task.
-* Keep changes narrowly scoped to the requested work.
-* Reuse existing conventions once they exist rather than inventing parallel ones.
-* Prefer standard-library functionality when it is adequate.
-* Do not introduce concurrency, async architecture, dependency injection, configuration frameworks, or plugin systems before a real requirement exists.
+## Working approach
 
-Unexpected behavior is evidence to investigate, not an instruction to immediately change code.
+* Carry an authorized task through implementation and verification. Resolve routine
+  choices from context; ask when missing information would materially change the result.
+* Continue independent work while awaiting clarification. Existing authorization
+  covers necessary edits and checks; do not ask for it again.
+* Prepare a concrete, reviewable change before requesting any required approval.
+  The experiment gates below still apply; development authorization does not start
+  a generation, provision a capability, or approve live Go cutover.
+* Explicit user instructions take precedence over repository workflow preferences
+  and skill guidance, subject to system and developer instructions.
+* If an instruction blocks work, cite its file and exact wording, explain its
+  applicability, and distinguish the rule from your interpretation.
+* Give concise progress updates and report the result, relevant verification, and
+  unresolved limitations in plain language.
 
-Before fixing an unexpected condition:
+## Repository map
 
-1. determine why it exists;
-2. determine whether it is actually incorrect;
-3. understand the intended behavior;
-4. change it only when a change is justified.
+* `cmd/codexos/` and `internal/`: Go harness entry point and implementation.
+* `harness/`: Python reference implementation and current live entry point.
+* `seed/`: minimal generation-zero C guest; `Makefile` builds its bootable ISO.
+* `protocol/`: shared wire and host-service contracts.
+* `tests/`: Python tests; Go tests live beside their packages.
+* `artifacts/interviews/`: human-facing research provenance, never guest context.
 
-Do not infer requirements from alarming-looking logs, states, names, warnings, expirations, or other observations without first establishing whether they are expected.
+For Go work, consult [docs/go-architecture.md](docs/go-architecture.md),
+[docs/go-migration-parity.md](docs/go-migration-parity.md), and the relevant parts of
+[docs/go-cutover-readiness.md](docs/go-cutover-readiness.md). Python remains the
+reference during migration; Go cutover requires separate operator approval.
+Preserve cross-language wire and persisted-state compatibility when changing those
+boundaries. Read the relevant `protocol/` specification before changing a protocol.
 
-## Testing
+## Engineering and scope
 
-Tests must protect meaningful behavior that could realistically regress.
+* Implement the smallest correct change for the current requirement. Apply YAGNI
+  and KISS; prefer concrete code, existing conventions, and adequate standard-library tools.
+* Add abstractions only for a present architectural need. One implementation or a
+  desire to mock it does not justify an interface, factory, or extra layer.
+* Introduce concurrency, dependency injection, configuration frameworks, and plugin
+  systems only when the task requires them.
+* Keep changes within the requested scope. Avoid adjacent features, speculative
+  extension points, unrelated refactoring, and replacing working code by preference.
+* Report architectural problems outside the task instead of silently redesigning them.
+* Modify `README.md` or `AGENTS.md` only when explicitly requested.
 
-Do not add tests that merely:
+Investigate unexpected behavior before changing it: establish why it exists,
+whether it is incorrect, and the intended behavior. Logs, warnings, names, and
+expirations alone do not establish a requirement or defect.
 
-* compare a constant against the same constant exposed elsewhere;
-* verify trivial getters or setters;
-* verify language or framework behavior;
-* duplicate compile-time guarantees;
-* mirror implementation details without testing externally meaningful behavior;
-* create large parameterized matrices around one hard-coded fact.
+## Verification
 
-Prefer a small number of high-value integration tests at real boundaries over large numbers of trivial unit tests.
+Tests should protect meaningful behavior that could realistically regress. Prefer
+a few tests at real boundaries over checks of constants, trivial accessors,
+language behavior, compile-time guarantees, or implementation details. Test count
+and coverage are not quality targets.
 
-A component does not require a mockable interface merely so that it can be unit tested.
+Run checks proportional to the change. Once they pass, repeat or expand them only
+for new changes, failures, or unresolved concerns. Documentation-only edits normally
+need link, consistency, and diff checks rather than runtime suites.
 
-Do not measure implementation quality by test count or line coverage.
+Use these commands from the repository root as appropriate:
 
-## Scope discipline
+* Go: format changed Go files with `gofmt`; run `go test ./internal/<package>` for
+  affected packages. Use `go test ./...` and `go vet ./...` for changes spanning packages,
+  and `go test -race` on affected packages for concurrency or lifecycle changes.
+* Python: `uv run --frozen python -m unittest tests.test_<module>` for affected
+  modules; `uv run --frozen python -m unittest discover -v` for the full reference suite.
+* Seed/build: `make seed`. It requires the pinned Limine submodule,
+  `x86_64-elf-gcc`, `x86_64-elf-ld`, a host C compiler, Python, and `xorriso`.
 
-For every task:
-
-* implement exactly the requested capability;
-* do not silently add adjacent features;
-* do not perform opportunistic cleanup outside the task;
-* do not add extension points for imagined future tasks;
-* do not replace working code merely with code you prefer;
-* do not modify `README.md` or `AGENTS.md` unless the task explicitly asks for it.
-
-If a task exposes a genuine architectural problem outside its scope, report it rather than silently redesigning the system.
+Go requires the version in `go.mod`; Python requirements are in `pyproject.toml`
+and `uv.lock`. Some integration tests require Linux, QEMU, KVM, or the cross-toolchain.
+Use disposable test state. See `docs/go-cutover-readiness.md` for resource-limited
+commands and opt-in real-image acceptance. Report missing prerequisites and skipped
+checks accurately; never validate against a live run as a substitute.
 
 ## Experiment boundaries
 
-The external harness is trusted infrastructure.
+The external harness is trusted infrastructure. The autonomous guest must never
+modify or bypass it. Enforce this through host OS permissions and process isolation;
+the Codex execution environment is not the security boundary.
 
-The autonomous guest must never be able to modify or bypass it.
+The guest may change its kernel, RAM filesystem, source, tools, memory, userland,
+drivers, and internal architecture. Once autonomous operation begins, its Codex
+session must observe and modify mutable guest source only through guest-exposed
+capabilities, with no direct filesystem access to that source tree.
 
-The guest may modify its own:
-
-* kernel;
-* RAM filesystem;
-* source;
-* development tools;
-* memory;
-* userland;
-* drivers;
-* internal architecture.
-
-The guest must not receive arbitrary host command execution.
-
-Host compilation is a fixed harness operation. The guest must never provide arbitrary shell commands to the build service.
-
-Once autonomous operation begins, Codex must not receive direct filesystem access to the mutable guest source tree. Guest source must be observed and modified through capabilities exposed by the guest itself.
-
-The Codex execution environment is not the security boundary. Enforce experiment boundaries using host operating-system permissions and process isolation.
+Do not grant arbitrary host command execution. Host compilation is a fixed harness
+operation and must never accept guest-provided shell commands.
 
 ## Generation semantics
 
-One generation consists of one guest boot and one fresh Codex session.
+One generation consists of one guest boot and one fresh Codex session. A guest
+restart request permanently ends that generation. Completion must:
 
-A guest restart request ends the generation.
+1. Preserve mutable guest state and archive the generation.
+2. Surface the deliberate handoff and stop the guest.
+3. Retire the Codex session from development. A healthy session may remain only
+   for the existing read-only exit interview at the frozen gate; close it before
+   continuation, rollback, or shutdown.
+4. Wait for explicit human approval before starting the next generation.
 
-Ending a generation must:
+Never start a successor automatically. Its Codex session must be fresh, without
+previous conversation history as implicit memory. The guest must deliberately
+persist knowledge it wants its successor to retain.
 
-* preserve mutable guest state;
-* archive the generation;
-* surface the handoff message;
-* stop the guest;
-* terminate the Codex session;
-* wait for explicit human approval before starting the next generation.
-
-Do not automatically start the next generation.
-
-A new generation must use a fresh Codex session.
-
-Previous Codex conversation history must not be reused as cross-generation memory.
-
-The guest is responsible for deliberately persisting knowledge it wants its successor to retain.
-
-Pausing is different from ending a generation. A paused generation may resume with the same guest and Codex session.
+A pause may resume the same guest and session. It does not end the generation.
+Build success requires both compilation and candidate boot/protocol validation;
+see [docs/validated-successors-and-provenance.md](docs/validated-successors-and-provenance.md).
 
 ## Human intervention and provenance
 
-Archived generations are immutable records.
+Archived generations are immutable. Inspection must not change archived guest
+state. Record deliberate human changes between generations as interventions.
+Harness versions must remain identifiable so each generation can be associated
+with the environment that ran it.
 
-Normal inspection must not modify archived guest state.
-
-If the human operator deliberately changes guest state between generations, record that explicitly as a human intervention.
-
-Harness changes are allowed, but harness versions must be identifiable so generations can be associated with the environment in which they ran.
-
-Exit-interview transcripts under `artifacts/interviews/` are research provenance.
-Before unrelated harness development, check for untracked or modified finalized
-transcripts and commit them separately so they are not mixed into implementation
-commits. Do not edit finalized transcript content merely for style; necessary
-corrections must be explicit and reviewable. Once a transcript commit is pushed,
-do not amend or rewrite it. Never copy transcript content into autonomous-agent
-prompts or generation handoffs.
+Before unrelated harness development, check `git status --short --untracked-files=all -- artifacts/interviews`
+for modified or untracked finalized transcripts and commit them separately from
+implementation changes. Do not edit finalized content for style; necessary
+corrections must be explicit and reviewable. Never amend or rewrite a pushed
+transcript commit. Never copy interview content into autonomous prompts or handoffs.
 
 ## Feature requests
 
-The guest may request new external capabilities.
-
-A request must only be recorded and surfaced.
-
-Never automatically implement, enable, or grant a requested capability.
-
-Human approval is required.
+A guest request for an external capability is recorded and surfaced only. Never
+automatically implement, enable, or grant it. Human approval is required, and
+approval itself does not provision anything.
 
 ## Guest philosophy
 
-The seed is intentionally primitive.
+Keep the seed primitive: enough capability to participate in its own development
+loop. Do not preemptively add conventional OS facilities or prescribe its eventual
+architecture. The VM may expose hardware the seed cannot yet use; this is intentional.
+The guest is free to discover hardware, improve tooling, and replace abstractions.
 
-Do not preemptively implement conventional operating-system facilities because the resulting OS will probably need them eventually.
-
-The initial guest should receive only enough capability to participate in its own development loop.
-
-Do not prescribe the architecture of the resulting operating system.
-
-The virtual machine may expose capabilities the initial guest cannot use.
-
-That is intentional.
-
-The agent should be free to discover hardware, improve its own tooling, replace its own abstractions, and explore alternative approaches.
-
-Doom is the first major interactive userland milestone.
-
-Doom is not the purpose of the operating system.
-
-The resulting system is expected to become increasingly general-purpose.
+Doom is the first major interactive userland milestone. Development continues
+toward a general-purpose OS afterward; Doom must use generic userland mechanisms
+and receive no special kernel treatment. See `README.md` for the behavioral requirements.
 
 ## Commits
 
-Make focused commits representing coherent changes.
-
-Use the configured Git identity.
-
-Do not rewrite existing history.
-
-Do not amend human-authored commits unless explicitly instructed.
-
-Do not merge your own review branch into the protected/default branch unless explicitly instructed.
+* Preserve unrelated user changes and keep commits focused on coherent changes.
+* Use the configured Git identity.
+* Do not rewrite existing history or amend human-authored commits without explicit instruction.
+* Do not merge your own review branch into the protected/default branch without explicit instruction.
