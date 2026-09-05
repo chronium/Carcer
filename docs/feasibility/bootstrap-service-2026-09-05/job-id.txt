@@ -1,0 +1,27 @@
+=== RUN   TestRootlessHostServiceTCCAndFailures
+    acceptance_linux_test.go:82: status=0 reason=completed cleaned=true elapsed=2.441s controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=2677 prefix="Binary directory    /work/installed/bin\nTinyCC directory    /work/installed/lib/tcc\nLibrary directory   /work/installed/lib\nInclude directory   /work/installed/include\nManual directory    /work/installed/share/man\nInfo directory      /work/installed/share/info\nDoc directory       /work/installed/share/doc\nSource path         /work/tinycc\nBuild OS            Linux x86_64\nC compiler          gcc (14.3)\nTarget OS           Linux\nCPU                 x86_64\nTriplet             x86_64-linux-gnu\nConfig            "
+    acceptance_linux_test.go:121: status=0 reason=completed cleaned=true elapsed=537ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=24 prefix="retrieved-compiler-runs\n"
+    acceptance_linux_test.go:172: status=0 reason=completed cleaned=true elapsed=520ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=36 prefix="tcc version 0.9.28rc (x86_64 Linux)\n"
+=== RUN   TestRootlessHostServiceTCCAndFailures/symlink
+    acceptance_linux_test.go:189: status=1 reason=unsafe_output cleaned=true elapsed=508ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=64 prefix="output \"result\": too many levels of symbolic links\nexit status 1"
+=== RUN   TestRootlessHostServiceTCCAndFailures/hardlink
+    acceptance_linux_test.go:189: status=1 reason=unsafe_output cleaned=true elapsed=512ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=82 prefix="output \"result\": output must be a bounded regular file with one link\nexit status 1"
+=== RUN   TestRootlessHostServiceTCCAndFailures/fifo
+    acceptance_linux_test.go:189: status=1 reason=unsafe_output cleaned=true elapsed=580ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:0 sock_throttled:0] diagnostic_bytes=82 prefix="output \"result\": output must be a bounded regular file with one link\nexit status 1"
+=== RUN   TestRootlessHostServiceTCCAndFailures/noisy
+    acceptance_linux_test.go:189: status=1 reason=diagnostic_limit cleaned=true elapsed=482ms controls=map[] events=map[] diagnostic_bytes=65536 prefix="diagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagnostic\ndiagno"
+=== RUN   TestRootlessHostServiceTCCAndFailures/oom
+    acceptance_linux_test.go:189: status=1 reason=oom cleaned=true elapsed=676ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:1 pids_max:0 sock_throttled:0] diagnostic_bytes=15 prefix="signal: killed\n"
+=== RUN   TestRootlessHostServiceTCCAndFailures/pids
+    acceptance_linux_test.go:189: status=1 reason=pids_limit cleaned=true elapsed=491ms controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[high:0 low:0 max:0 oom:0 oom_group_kill:0 oom_kill:0 pids_max:1 sock_throttled:0] diagnostic_bytes=34 prefix="forked=59 limited=1\nexit status 3\n"
+=== RUN   TestRootlessHostServiceTCCAndFailures/cancellation
+    acceptance_linux_test.go:199: status=1 reason=cancelled cleaned=true elapsed=1.169s controls=map[cpu.max:100000 100000 memory.max:536870912 memory.swap.max:0 pids.max:64] events=map[] diagnostic_bytes=0 prefix=""
+--- PASS: TestRootlessHostServiceTCCAndFailures (8.06s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/symlink (0.51s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/hardlink (0.51s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/fifo (0.58s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/noisy (0.48s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/oom (0.68s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/pids (0.49s)
+    --- PASS: TestRootlessHostServiceTCCAndFailures/cancellation (1.17s)
+PASS

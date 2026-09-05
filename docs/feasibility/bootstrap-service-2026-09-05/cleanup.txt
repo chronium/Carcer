@@ -1,0 +1,13 @@
+{
+  "utc": "2026-09-05T08:29:54.935151+00:00",
+  "containers": [],
+  "acceptance_units": "",
+  "job_runtime_processes": [],
+  "pinned_image_absent": true,
+  "removed_task_paths": [
+    "/tmp/codexos-bootstrap-acceptance-inputs",
+    "/tmp/codexos-bootstrap-worker",
+    "/tmp/codexos-bootstrap-acceptance.test"
+  ],
+  "note": "No system prune. Only the image acquired for this task was removed. Dedicated account/live experiments were not provisioned."
+}

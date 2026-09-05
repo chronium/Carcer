@@ -236,3 +236,18 @@ inheritance explicitly select the current run or historical archive budget.
 Defaults remain 64 KiB; no process-global budget or general resource registry is
 introduced. See [run source capacity](run-source-capacity.md) for semantics,
 framing limits, compatibility, and post-merge provisioning of request #4.
+
+## Optional Linux bootstrap service
+
+`internal/bootstrap` owns strict job requests, bounded captured-input transfer,
+rootless worker lifecycle, safe frozen output collection and immutable opaque
+artifact storage. `cmd/codexos-bootstrap` is the fixed dedicated-account worker;
+it is installed separately and receives no harness/run storage access.
+`internal/experiment` owns inactive-gate provisioning, invocation scope and
+cancellation, generation reference freezing, and selected-parent authorization.
+`internal/store` includes selected artifact copying in atomic cross-run bootstrap.
+The existing guest dispatcher and agent delivery/review lifecycle remain in place.
+The two dynamic guest helpers are exposed only when the guest advertises them.
+See [operator setup](bootstrap-service-operations.md) and the
+[Go host-service contract](bootstrap-host-services.md). This service is disabled
+by default and does not fulfill or change the status of feature request #3.

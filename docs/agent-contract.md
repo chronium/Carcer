@@ -261,3 +261,20 @@ codexos> agent
 The first two actions after reopening remain explicit and distinct: `continue`
 boots the archived selected successor, and `agent` starts its fresh Codex
 session. An aborted gate instead requires an explicit rollback selection.
+
+## Optional Go Linux bootstrap facilities
+
+When explicitly provisioned at an inactive gate, the Go harness can expose
+`bootstrap_job` and `read_bootstrap_artifact` through the existing host-service
+protocol. The implementor context reports actual configuration independently of
+feature approval. Job commands execute only inside the rootless Linux sandbox;
+opaque artifacts have separate bounded persistent storage and selected-parent
+lineage authorization. The [service contract](bootstrap-host-services.md)
+specifies captured inputs, output paths, exact reads, limits and cancellation.
+
+Guest invocation/capture and binary-safe import helpers remain guest-owned.
+Recognized guest helpers are forwarded only if advertised in that session's
+frozen tool set; reviewers and exit interviews gain no job capability. Supplying
+TCC/Linux bootstrap tooling does not itself supply compiler adaptations, SDK/runtime,
+executable packaging or a guest-runnable compilation pipeline. These remain the
+implementor's work, with no required native port or self-hosting milestone.
