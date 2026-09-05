@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "heap.h"
 #include "memory.h"
 #define HEAP_MAGIC 0x434f444558484541ull

@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "source_snapshot.h"
 #include "files.h"
 #include "protocol.h"

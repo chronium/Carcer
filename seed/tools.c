@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "tools.h"
 #include "build.h"
 #include "files.h"

@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "video.h"
 typedef unsigned char u8;typedef unsigned short u16;typedef unsigned u32;typedef unsigned long u64;
 struct vf{void*address;u64 width,height,pitch;u16 bpp;u8 model,rs,ro,gs,go,bs,bo,unused[7];u64 edid_size;void*edid;u64 mode_count;void*modes;};struct vr{u64 revision,count;struct vf**frames;};struct vq{u64 id[4],revision;struct vr*response;};__attribute__((used,section(".limine_requests")))static volatile struct vq q={{0xc7b1dd30df4c8b88ull,0x0a82e883a194f07bull,0x9d5827dcd881dd75ull,0xa3148604f6fab11bull},0,0};static struct vf*f;

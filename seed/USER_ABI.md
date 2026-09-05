@@ -12,3 +12,9 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable and sleeping tasks as active. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
 Display info uses RDI=output and RSI=capacity. It fails for capacity<32 or an invalid destination; otherwise it writes and returns 32 bytes: LE32 size=32,width,height,pitch,format=1,zero[3]. Format 1 is XRGB8888. Present uses RDI source, RSI stride, RDX x, RCX y, R8 width, R9 height; rectangles are nonempty, in bounds, and prevalidated. The framebuffer is kernel-owned.
+
+CPU baseline: x87/MMX and SSE/SSE2. FXSAVE64/FXRSTOR64 preserve numerical registers, FCW/FSW, MXCSR and all 16 XMM registers across preemption, syscalls and sleep. New tasks have FCW=0x037f, empty x87 tags, MXCSR=0x1f80 and zero payloads. FP exceptions terminate the offending task.
+
+CR0 enables native floating-point exceptions and clears EM/TS; CR4 enables OSFXSR/OSXMMEXCPT. OSXSAVE, FSGSBASE, PKE, CET, PKS and UINTR are disabled. AVX and other XSAVE-managed extensions are outside this ABI; hardware CPUID feature bits alone do not establish OS support. No TLS base ABI exists.
+
+Kernel C uses general-regs-only; CPU setup precedes other initialization. Each entry saves its own FP image, loads a clean environment before C, and restores the selected context after C. Nested kernel/user continuations retain separate images. Every restore first sanitizes x87 metadata via fnclex/emms/fildl of a fixed kernel constant. On affected AMD CPUs, nonexception FIP/FDP/FOP may reflect this sanitation site instead of original pointers. This prevents prior-context metadata leakage; affected-AMD hardware has not been separately validated.

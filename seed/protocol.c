@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "protocol.h"
 #include "serial.h"
 #include "tools.h"

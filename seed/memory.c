@@ -1,3 +1,4 @@
+#pragma GCC target("general-regs-only")
 #include "memory.h"
 typedef unsigned char u8;typedef unsigned short u16;typedef unsigned u32;typedef unsigned long u64;
 #define USABLE 0u
