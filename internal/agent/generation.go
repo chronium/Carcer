@@ -2368,6 +2368,34 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 			return guest.ToolResult{}, errors.New("bootstrap request exceeds 16 KiB")
 		}
 		return s.runtime.InvokeTool(ctx, "bootstrap_job", [][]byte{spec})
+	case "import_bootstrap_artifact":
+		if err := checkGenerationFields(arguments, map[string]struct{}{"id": {}, "length": {}, "path": {}}, nil); err != nil {
+			return guest.ToolResult{}, err
+		}
+		id, err := generationUTF8(arguments["id"], "id")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		if len(id) == 0 || len(id) > 255 || bytes.IndexByte(id, 0) >= 0 {
+			return guest.ToolResult{}, errors.New("id must contain 1 through 255 UTF-8 bytes without NUL")
+		}
+		length, err := generationUnsignedDecimal(arguments["length"], "length")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		n, _ := strconv.ParseUint(string(length), 10, 64)
+		if n > 32*1024*1024 || string(length) != strconv.FormatUint(n, 10) {
+			return guest.ToolResult{}, errors.New("length must be a canonical unsigned integer up to 32 MiB")
+		}
+		path, err := generationUTF8(arguments["path"], "path")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		// Generation 9 RAM-file paths are length-delimited UTF-8, not host paths.
+		if len(path) == 0 || len(path) > 255 {
+			return guest.ToolResult{}, errors.New("path must contain 1 through 255 UTF-8 bytes")
+		}
+		return s.runtime.InvokeTool(ctx, tool, [][]byte{id, length, path})
 	case "read_provided_asset", "read_bootstrap_artifact":
 		if err := checkGenerationFields(arguments, map[string]struct{}{"id": {}, "offset": {}, "length": {}}, nil); err != nil {
 			return guest.ToolResult{}, err
@@ -2814,23 +2842,24 @@ func advertisedGuestToolsInOrder(advertised []string) (map[string]struct{}, []st
 
 func guestToolRegistry() map[string]map[string]any {
 	return map[string]map[string]any{
-		"bootstrap_job":           dynamicFunction("bootstrap_job", "Ask the advertised guest helper to capture its source and invoke an explicitly provisioned, isolated Linux bootstrap job. The request is a JSON string; guest commands execute only in its container.", map[string]any{"request": map[string]any{"type": "string", "maxLength": 16384}}, []string{"request"}),
-		"read_bootstrap_artifact": dynamicFunction("read_bootstrap_artifact", "Ask the advertised guest helper to retrieve an exact range of an authorized immutable bootstrap artifact.", map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 1048576}}, []string{"id", "offset", "length"}),
-		"list":                    dynamicFunction("list", "List paths in the persistent mutable CodexOS guest source, optionally by prefix.", map[string]any{"prefix": map[string]any{"type": "string"}}, nil),
-		"read":                    dynamicFunction("read", "Read exact bytes from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "offset", "length"}),
-		"write":                   dynamicFunction("write", "Overwrite or append exact bytes in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "encoding": map[string]any{"type": "string", "enum": []string{"utf8", "base64"}, "default": "utf8"}, "data": map[string]any{"type": "string"}}, []string{"path", "offset", "data"}),
-		"truncate":                dynamicFunction("truncate", "Resize a file in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "size": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "size"}),
-		"remove":                  dynamicFunction("remove", "Remove a file from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}}, []string{"path"}),
-		"build":                   dynamicFunction("build", buildToolDescription, map[string]any{}, nil),
-		"finish_generation":       dynamicFunction("finish_generation", finishGenerationToolDescription, map[string]any{"handoff": map[string]any{"type": "string"}}, []string{"handoff"}),
-		"request_feature":         dynamicFunction("request_feature", requestFeatureToolDescription, map[string]any{"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, []string{"title", "description"}),
-		"list_provided_assets":    dynamicFunction("list_provided_assets", listProvidedAssetsToolDescription, map[string]any{}, nil),
-		"read_provided_asset":     dynamicFunction("read_provided_asset", readProvidedAssetToolDescription, map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"id", "offset", "length"}),
+		"import_bootstrap_artifact": dynamicFunction("import_bootstrap_artifact", "Ask the advertised guest helper to import the first length bytes of an authorized bootstrap artifact into a new mutable RAM file. The guest stages and commits the import without overwriting an existing path; this does not execute or unpack the artifact.", map[string]any{"id": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 33554432}, "path": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}}, []string{"id", "length", "path"}),
+		"bootstrap_job":             dynamicFunction("bootstrap_job", "Ask the advertised guest helper to capture its source and invoke an explicitly provisioned, isolated Linux bootstrap job. The request is a JSON string; guest commands execute only in its container.", map[string]any{"request": map[string]any{"type": "string", "maxLength": 16384}}, []string{"request"}),
+		"read_bootstrap_artifact":   dynamicFunction("read_bootstrap_artifact", "Ask the advertised guest helper to retrieve an exact range of an authorized immutable bootstrap artifact.", map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 1048576}}, []string{"id", "offset", "length"}),
+		"list":                      dynamicFunction("list", "List paths in the persistent mutable CodexOS guest source, optionally by prefix.", map[string]any{"prefix": map[string]any{"type": "string"}}, nil),
+		"read":                      dynamicFunction("read", "Read exact bytes from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "offset", "length"}),
+		"write":                     dynamicFunction("write", "Overwrite or append exact bytes in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "encoding": map[string]any{"type": "string", "enum": []string{"utf8", "base64"}, "default": "utf8"}, "data": map[string]any{"type": "string"}}, []string{"path", "offset", "data"}),
+		"truncate":                  dynamicFunction("truncate", "Resize a file in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "size": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "size"}),
+		"remove":                    dynamicFunction("remove", "Remove a file from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}}, []string{"path"}),
+		"build":                     dynamicFunction("build", buildToolDescription, map[string]any{}, nil),
+		"finish_generation":         dynamicFunction("finish_generation", finishGenerationToolDescription, map[string]any{"handoff": map[string]any{"type": "string"}}, []string{"handoff"}),
+		"request_feature":           dynamicFunction("request_feature", requestFeatureToolDescription, map[string]any{"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, []string{"title", "description"}),
+		"list_provided_assets":      dynamicFunction("list_provided_assets", listProvidedAssetsToolDescription, map[string]any{}, nil),
+		"read_provided_asset":       dynamicFunction("read_provided_asset", readProvidedAssetToolDescription, map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"id", "offset", "length"}),
 	}
 }
 
 func dynamicToolNamespace(selected map[string]struct{}) map[string]any {
-	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset", "bootstrap_job", "read_bootstrap_artifact"})
+	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset", "bootstrap_job", "read_bootstrap_artifact", "import_bootstrap_artifact"})
 	return dynamicToolNamespaceInOrder(selected, order)
 }
 
@@ -3208,4 +3237,4 @@ func featureRequestJSONSeparators(encoded []byte) []byte {
 	return bytes.ReplaceAll(bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028")), []byte(`\u2029`), []byte("\u2029"))
 }
 
-const bootstrapHostContract = `The optional bootstrap_job host service accepts two arguments: strict JSON (version=1, argv, assets [{id,sha256}], artifacts [id], outputs [relative path]) and the current framed source snapshot. Linux argv runs at /work; captured source is at /inputs/source/seed/, immutable assets at /inputs/assets/<id>, and authorized artifacts at /inputs/artifacts/<id>. Declare regular output files beneath /work/out. Limits include 32 argv entries/8 KiB total, 8 inputs/64 MiB, 32 outputs/16 MiB each/32 MiB total, 64 KiB diagnostics, and 180 seconds. read_bootstrap_artifact uses (id, offset, length) canonical decimal ranges up to 1 MiB. Opaque retained artifacts have a separate 128 MiB run quota and follow the selected generation lineage. They may contain source or binaries. Supplied facilities do not provide a guest compiler port, SDK/runtime, executable packaging, or a complete guest-runnable compilation pipeline. Guest helpers for invocation/capture and binary-safe import remain guest-owned; advertised helpers named bootstrap_job (one JSON request argument) and read_bootstrap_artifact (id, offset, length) can be exposed through the existing tool bridge. Guest tool discovery is fixed for each fresh session. No executable format or native self-hosting milestone is required by this service.`
+const bootstrapHostContract = `The optional bootstrap_job host service accepts two arguments: strict JSON (version=1, argv, assets [{id,sha256}], artifacts [id], outputs [relative path]) and the current framed source snapshot. Linux argv runs at /work; captured source is at /inputs/source/seed/, immutable assets at /inputs/assets/<id>, and authorized artifacts at /inputs/artifacts/<id>. Declare regular output files beneath /work/out. Limits include 32 argv entries/8 KiB total, 8 inputs/64 MiB, 32 outputs/16 MiB each/32 MiB total, 64 KiB diagnostics, and 180 seconds. read_bootstrap_artifact uses (id, offset, length) canonical decimal ranges up to 1 MiB. Opaque retained artifacts have a separate 128 MiB run quota and follow the selected generation lineage. They may contain source or binaries. Supplied facilities do not provide a guest compiler port, SDK/runtime, executable packaging, or a complete guest-runnable compilation pipeline. Guest helpers for invocation/capture and binary-safe import remain guest-owned; advertised helpers named bootstrap_job (one JSON request argument) read_bootstrap_artifact (id, offset, length), and import_bootstrap_artifact (id, length, path) can be exposed through the existing tool bridge. The import helper is implementation-only: an opaque UTF-8 ID of 1..255 bytes without NUL, an integer length of 0..33554432 bytes, and a length-delimited UTF-8 RAM-file path of 1..255 bytes. It imports the requested prefix into a new mutable file, with staging and no overwrite performed by the guest. Non-source RAM files do not persist automatically. Guest tool discovery is fixed for each fresh session. No executable format or native self-hosting milestone is required by this service.`

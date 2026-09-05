@@ -206,7 +206,7 @@ When the operator separately chooses to proceed, the existing `continue` and
 special restart, automatic generation, or guest-source adaptation is performed.
 Guest helpers must still expose invocation/source capture and binary-safe import.
 The Go tool bridge recognizes advertised `bootstrap_job` and
-`read_bootstrap_artifact` helpers; it never invents missing guest tools.
+`read_bootstrap_artifact` and implementation-only `import_bootstrap_artifact` helpers; it never invents missing guest tools.
 
 ## Limits, retention and recovery
 

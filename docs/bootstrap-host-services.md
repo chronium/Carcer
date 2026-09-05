@@ -103,3 +103,22 @@ facilities, not a native guest compiler, SDK, executable format, or self-hosting
 requirement. Existing trusted `build` and `finish_generation` still require their
 own exact-source compilation and candidate boot proof; a bootstrap artifact is
 never an implicitly validated successor.
+
+## Advertised guest import helper
+
+The Go tool bridge recognizes `import_bootstrap_artifact` only when the current
+session's guest advertises it. It is a mutating, implementation-only tool; planning,
+review and interview sessions cannot invoke it. This is a guest helper, not an
+additional host service. The harness forwards exactly `(id, length, path)`:
+
+* `id`: opaque UTF-8, 1–255 bytes, no NUL; it need not be a hexadecimal digest.
+* `length`: JSON integer 0–33554432, encoded as canonical unsigned decimal on wire.
+* `path`: 1–255 bytes of UTF-8 under Generation 9's length-delimited RAM-file rules;
+  it is not normalized or interpreted as a host filesystem path.
+
+Generation 9 imports the prefix `[0,length)` in bounded reads, stages it privately,
+and requires the destination to be absent both before reading and at commit.
+A failed import leaves no partial destination. Zero length still requires artifact
+authorization. The helper does not infer full artifact length, unpack or execute it.
+The destination is mutable guest RAM state; ordinary source persistence rules apply.
+Guest status/output and bridge delivery confirmation retain their usual meanings.
