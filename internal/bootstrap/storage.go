@@ -181,6 +181,12 @@ func (s *Storage) recover() error {
 		if ent.Name() == ".lock" {
 			continue
 		}
+		if strings.HasPrefix(ent.Name(), ".init-") && validID(strings.TrimPrefix(ent.Name(), ".init-")) && ent.IsDir() {
+			if e = os.RemoveAll(filepath.Join(s.Config.Storage, ent.Name())); e != nil {
+				return e
+			}
+			continue
+		}
 		if !validID(ent.Name()) || !ent.IsDir() {
 			return errors.New("unexpected bootstrap storage entry")
 		}
@@ -201,6 +207,22 @@ func (s *Storage) recover() error {
 		}
 		if owner.Version != 1 || c.Storage != s.Config.Storage || c.RunID != ent.Name() {
 			return errors.New("bootstrap store ownership mismatch")
+		}
+		for _, metadata := range []string{dir, filepath.Join(dir, "failures")} {
+			files, err := os.ReadDir(metadata)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			for _, file := range files {
+				if strings.HasPrefix(file.Name(), ".write-") && file.Type().IsRegular() {
+					if e = os.Remove(filepath.Join(metadata, file.Name())); e != nil {
+						return e
+					}
+				}
+			}
 		}
 		jobs := filepath.Join(dir, "jobs")
 		es, e := os.ReadDir(jobs)
@@ -270,13 +292,29 @@ func initializeStorage(s *Storage, run string) error {
 	if len(mustJSON(diskOwner{1, run}))+1 > 4096 {
 		return errors.New("bootstrap owner path exceeds metadata bound")
 	}
-	if e := os.Mkdir(s.Directory, 0700); e != nil {
+	// Never expose a final store directory without complete ownership metadata.
+	// A crash before rename leaves only a recognizable unpublished initializer.
+	stage := filepath.Join(s.Config.Storage, ".init-"+s.Config.RunID)
+	if e := os.Mkdir(stage, 0700); e != nil {
 		return e
 	}
-	if e := atomicJSON(filepath.Join(s.Directory, "owner.json"), diskOwner{1, run}); e != nil {
+	defer os.RemoveAll(stage)
+	if e := atomicJSON(filepath.Join(stage, "owner.json"), diskOwner{1, run}); e != nil {
 		return e
 	}
-	return os.Mkdir(filepath.Join(s.Directory, "jobs"), 0700)
+	if e := os.Mkdir(filepath.Join(stage, "jobs"), 0700); e != nil {
+		return e
+	}
+	if e := syncDir(stage); e != nil {
+		return e
+	}
+	if _, e := os.Lstat(s.Directory); !errors.Is(e, os.ErrNotExist) {
+		return errors.New("bootstrap store ID collision")
+	}
+	if e := os.Rename(stage, s.Directory); e != nil {
+		return e
+	}
+	return syncDir(s.Config.Storage)
 }
 
 // Provision is called only by the validated inactive gate. It does not change
@@ -309,7 +347,8 @@ func Provision(run, root, asset string) error {
 		return e
 	}
 	if e = atomicJSON(filepath.Join(run, ConfigFilename), cfg); e != nil {
-		_ = os.RemoveAll(s.Directory)
+		// A directory-sync error may follow a successful config rename. Leave
+		// the complete store intact; recovery checks the actual config commit.
 		return e
 	}
 	return syncDir(root)

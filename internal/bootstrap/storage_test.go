@@ -163,6 +163,43 @@ func TestInterruptedPublicationAndQuota(t *testing.T) {
 		t.Fatal("orphan published by recovery")
 	}
 }
+
+func TestRecoveryRemovesInterruptedStoreInitialization(t *testing.T) {
+	_, s, refs := fixtureStore(t)
+	m := publishFixture(t, s, &refs, "committed compiler")
+	c := s.Config
+	init := filepath.Join(c.Storage, ".init-"+randomID())
+	if e := os.Mkdir(init, 0700); e != nil {
+		t.Fatal(e)
+	}
+	// Simulate interruption before even owner.json was durably published.
+	if e := os.WriteFile(filepath.Join(init, ".write-partial"), []byte("{"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	uncommitted := Config{1, false, c.Storage, randomID(), "tcc"}
+	orphan := &Storage{Config: uncommitted, Directory: filepath.Join(c.Storage, uncommitted.RunID)}
+	if e := initializeStorage(orphan, filepath.Join(t.TempDir(), "unpublished-run")); e != nil {
+		t.Fatal(e)
+	}
+	partialIndex := filepath.Join(s.Directory, ".write-partial")
+	if e := os.WriteFile(partialIndex, []byte("{"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	reopened, e := LockStorage(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer reopened.Close()
+	for _, p := range []string{init, orphan.Directory, partialIndex} {
+		if _, e = os.Lstat(p); !os.IsNotExist(e) {
+			t.Fatalf("unpublished storage survived: %s: %v", p, e)
+		}
+	}
+	if b, e := reopened.Read(refs, m.Result.Artifacts[0].ID, 0, 18); e != nil || string(b) != "committed compiler" {
+		t.Fatalf("committed storage changed: %q %v", b, e)
+	}
+}
 func TestCrossRunCopiesSelectedReferencesAtomically(t *testing.T) {
 	run, s, refs := fixtureStore(t)
 	m := publishFixture(t, s, &refs, "source and binary bytes are both opaque")
