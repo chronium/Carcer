@@ -28,6 +28,9 @@ func (c *Client) call(ctx context.Context, r wireRequest) (wireResponse, error) 
 		argv = c.Command
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	// The dedicated account cannot traverse the harness checkout. The worker
+	// selects its own private cwd after the account transition.
+	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 2 * time.Second
 	var diag boundedBuffer

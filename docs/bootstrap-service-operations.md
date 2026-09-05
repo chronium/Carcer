@@ -96,7 +96,9 @@ sudo install -o root -g root -m 0440 "$bootstrap_setup/sudoers" \
 The empty-argument restriction in sudoers matters: the harness may invoke only
 this fixed worker with **no command-line arguments**. Its bounded stdin/stdout
 protocol carries captured bytes, never a host command. The entry point verifies
-its account, clears its environment, and enters the dedicated aggregate slice.
+its account, changes to that account's home directory, clears its environment,
+and enters the dedicated aggregate slice. The harness launches sudo from `/`;
+the caller's checkout is never used as the worker's working directory.
 Container commands are interpreted only inside the sandbox. Installing this
 binary does not give guests a generic sudo, shell or Podman API.
 

@@ -3,7 +3,9 @@ package bootstrap
 import (
 	"context"
 	"encoding/binary"
+	"os"
 	"testing"
+	"time"
 
 	"codexos/internal/guest"
 )
@@ -36,4 +38,25 @@ func TestJobScopeRejectsBackgroundReviewAndSuspendedAdmission(t *testing.T) {
 	reject()
 	svc.Deactivate()
 	reject()
+}
+
+func TestClientDoesNotInheritHarnessWorkingDirectory(t *testing.T) {
+	// A private checkout must not become the dedicated worker's cwd. Remove it
+	// after entering to also catch reliance on the caller's cwd remaining valid.
+	caller := t.TempDir()
+	executable, e := os.Executable()
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Chdir(caller)
+	if e = os.Remove(caller); e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := Client{Command: []string{executable, "--bootstrap-client-cwd-fixture"}}
+	result, e := c.call(ctx, wireRequest{Kind: "probe"})
+	if e != nil || result.Result.Status != 0 || result.Result.Diagnostics != "/" {
+		t.Fatalf("worker inherited caller cwd: %+v %v", result.Result, e)
+	}
 }
