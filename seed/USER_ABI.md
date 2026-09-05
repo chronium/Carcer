@@ -24,3 +24,10 @@ CPU baseline: x87/MMX and SSE/SSE2. FXSAVE64/FXRSTOR64 preserve numerical regist
 CR0 enables native floating-point exceptions and clears EM/TS; CR4 enables OSFXSR/OSXMMEXCPT. OSXSAVE, FSGSBASE, PKE, CET, PKS and UINTR are disabled. AVX and other XSAVE-managed extensions are outside this ABI; hardware CPUID feature bits alone do not establish OS support. No TLS base ABI exists.
 
 Kernel C uses general-regs-only; CPU setup precedes other initialization. Each entry saves its own FP image, loads a clean environment before C, and restores the selected context after C. Nested kernel/user continuations retain separate images. Every restore first sanitizes x87 metadata via fnclex/emms/fildl of a fixed kernel constant. On affected AMD CPUs, nonexception FIP/FDP/FOP may reflect this sanitation site instead of original pointers. This prevents prior-context metadata leakage; affected-AMD hardware has not been separately validated.
+
+Freestanding C/assembly development: see sdk/README.md and sdk/cx.h. The guest-owned
+SDK uses the approved host bootstrap executor to build static CXE2 files and
+provides startup, all current syscall wrappers and a small runtime. This adds no
+new kernel syscall or user launch convention; argc/argv, TLS and full libc remain
+absent. Exact separately compiled fixtures under seed/user/ run in boot regression
+through the same loader as ordinary spawn/run.

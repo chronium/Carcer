@@ -75,9 +75,11 @@ finished and the infinite loop remains runnable. Completion outside that reader
 cannot satisfy the check. The kernel does not explicitly yield in that reader. Both task resources are
 then recovered. Existing scheduler, FP, loader, memory and wait tests remain.
 
-These tests validate guest framing/import behavior and scheduling during a
-simulated response. They do not establish actual host admission, execution,
-artifact production, cross-generation retention, or fresh-session tool binding.
+These in-memory tests validate guest framing/import behavior and scheduling
+during a simulated response. Subsequent real jobs exercised admission, execution,
+artifact production, artifact read and import through the callable guest helpers.
+Cross-generation host artifact retention has not been independently tested.
+See sdk/README.md for retained artifact metadata and compiled boot regression.
 
 ## Provisioned scope and dependencies
 
@@ -86,16 +88,29 @@ specified by the operator, declared asset/artifact inputs, captured source at
 /inputs/source/seed/, /work as cwd, and declared regular outputs below /work/out.
 The operator's stated execution, input, output, retention and resource limits
 remain authoritative. The TCC source asset is immutable source, not a runnable
-guest compiler. Configured execution is distinct from job authorization:
-the latest stated authorized-job count is ZERO.
+guest compiler. Request #5 is approved: bootstrap execution permits new jobs
+under the stated service limits. Zero retained jobs was not a denial of execution.
+The operator says four jobs was the requested batch, not an enforced harness quota.
 
-Request #5 asks for a bounded batch of four jobs; until approved, it is advisory.
 Request #3 for a complete generic user compilation pipeline remains pending.
-A future authorized job alone still needs guest-owned startup/syscall support,
-runtime, compilation commands and executable packaging before C can run here.
-No such complete pipeline is implemented by this bridge. No compiler invocation
-has been executed through it, and no supplied Doom executable has run.
+Guest-owned startup/syscall support, small runtime, compilation scripts and
+ELF-to-CXE2 packaging are now implemented in sdk/ and have produced boot-tested
+ordinary user binaries. This uses the provisioned host executor; it is not a
+guest-native compiler port or full libc. No supplied Doom executable has run.
+
+Important observed host convention: outputs entries are relative to /work/out.
+For /work/out/spin.cxe declare "spin.cxe", not "out/spin.cxe". The latter compiled
+successfully but failed artifact collection with unsafe_output/no such file.
+Files and scripts in captured seed/sdk/ are read from /inputs/source/seed/sdk/.
+The helper returns trusted JSON as a UTF-8 payload, including job status,
+diagnostics and artifacts [{id,name,size}]. Use id and size from that metadata
+for exact binary imports; do not assume an opaque ID encodes a content hash.
 
 Request #2 for display observation/input injection remains pending. The immutable
 DOS/4G/Watcom DOOM.EXE remains unsupported by CXE loaders. Any compatibility path
 must be generic userland work and preserve supplied executable/data bytes.
+
+Request #6 asks for trusted bindings to existing run/reap/import_provided_asset
+guest tools. Pending; their absence from the callable catalog remains a separate
+constraint from bootstrap execution. Boot-time integration tests use tfile and
+user spawn/wait to validate imported CXE2 files without relying on those bindings.

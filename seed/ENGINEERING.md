@@ -85,32 +85,56 @@ an interrupt lock; the reader opens the scheduling interval and samples task
 states before returning, preventing completion outside the wait from passing.
 Independent source review found no blockers in production framing, concurrency
 or import cleanup; its live-test timing observation was fixed as above.
-No real bootstrap job has run.
-The latest operator-authorized job count is zero. New tool binding is unverified
-until a fresh session. Request #5 asks for four jobs but is only advisory while
-pending. This bridge is not a complete userland compilation pipeline.
+Real bootstrap jobs have now run through the guest bridge. Request #5 is approved;
+the previous zero counted retained jobs, not execution permission. Artifact reads
+and binary-safe imports have been exercised. See sdk/README.md for the guest-owned
+freestanding C/assembly-to-CXE2 build path and ordinary compiled user regressions.
+The host provides bounded Linux execution; the SDK/runtime/packaging are guest
+source. Request #3 remains pending and is not fulfilled by this provisioning.
 
 ## Provisioning and remaining work
 
-Approved: immutable provided-asset list/read services (request 1), and expanded
-source capacity (request 4). Hardware is experiment-v1 q35/KVM host CPU, 4 vCPUs,
+Approved: immutable provided-asset list/read services (request 1), expanded
+source capacity (request 4), and bootstrap execution (request 5). Hardware is experiment-v1 q35/KVM host CPU, 4 vCPUs,
 8 GiB RAM, headless std-vga, no NIC or writable block device. Scheduling uses one
 CPU. Guest RAM files, sealed imports, display output, CXE1/CXE2 loading, preemption,
 sleep, spawn, reap and blocking wait are implemented.
 
-Pending, unavailable as dependencies: display observation/input injection
-(request 2), and a complete generic C/assembly/runtime-to-CXE2 build pipeline
-(request 3). Embedded boot fixtures use the kernel build; they do not provide
-a general user-program compiler service.
+Pending, unavailable as trusted dependencies: display observation/input injection
+(request 2), a complete compiler pipeline provisioned by the operator (request 3),
+and bindings for the already implemented run/reap/import_provided_asset tools
+(request 6). These tools are advertised by the guest but absent from this session's
+callable tool catalog. No arbitrary live launch through them has been demonstrated.
+The guest-owned SDK now builds ordinary freestanding C/assembly programs using
+the approved bootstrap executor; boot regressions launch imported binary files
+through tfile, the same generic loader used by spawn and protocol run.
+This does not provide a guest-native compiler, full libc or arbitrary executable
+compatibility.
 
 Doom has not run. The immutable supplied DOOM.EXE is MZ-bound DOS/4G/Watcom and
 unsupported by the current loaders. DoomGeneric is source-only. A compiler
 service alone would not provide supplied-executable compatibility. Neither
 asset identity nor a future milestone supplies a missing trusted capability.
 
-Still absent: input/audio ABI, general userland compiler/runtime, launch
+Still absent: input/audio ABI, guest-native compiler/full userland runtime, launch
 arguments/environment, ownership/security model, stable generation-tagged task
 handles, wait timeouts, user cancellation, mmap/shared memory/threads, persistent
 storage and general kernel preemptibility. Most kernel work disables interrupts;
 immutable file copies are the existing preemptible exception. Task0 is always
 runnable. Continue general-purpose development independently of pending requests.
+
+## Compiled userland regression
+sdk_tests.h is boot-only code included in tasks.c and run after inherited tests.
+It loads seed/user/spin.cxe through tfile, observes two distinct increments of
+the fixture's private volatile counter, and only then loads report.cxe. The
+spin C loop never invokes syscalls. The counter address comes from the first
+writable CXE2 segment (.probe is placed first by the SDK linker for this fixture).
+The report allocates and checks 8193 bytes, writes/reads a RAM file, verifies a
+sealed file rejects writes, spawns child.cxe through syscall 5, blocks in wait,
+sleeps, checks display metadata and exits 42. Child checks multi-page volatile
+BSS zero-fill, SSE2 arithmetic and memory/string routines, then exits 37.
+The boot observer requires report success, spin still runnable with additional
+counter progress, correct output bytes and recovery of page/file counts.
+No loader, scheduler, syscall or FP entry behavior was changed for this work.
+The compiled fixtures are ordinary mutable files under seed/ so their exact
+binary bytes persist with the source. They are not supplied Doom assets.
