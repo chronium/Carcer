@@ -226,3 +226,25 @@ Opt-in real-image/toolchain acceptance and remote Codex/live-guest trials were
 not run. Synthetic peers establish harness behavior, not a working expanded
 guest implementation. No live Experiment 4 state was opened, provisioned, or
 started during development; post-merge operator provisioning is still required.
+
+### Explicit bootstrap-capacity verification
+
+The bootstrap-capacity extension was verified at `39c3848` using the same
+bounded, serialized environment and full/race/vet commands above. The focused
+command was:
+
+```sh
+timeout --signal=TERM --kill-after=10s 360s go test -p=1 -parallel=1 ./internal/store ./internal/operator -count=1 -timeout=300s
+```
+
+Both focused packages passed; the complete Go and race suites each passed all
+13 packages, and vet reported no diagnostics. The process audit used a fresh
+baseline of 83 PID/start-time identities and found no new surviving relevant or
+marked processes. No live experiment was opened or changed.
+
+Regressions cover successful 1 MiB inheritance with serialized framing,
+unchanged default rejection, persisted destination capacity, CLI mode/value
+validation, failed-bootstrap cleanup without published destination state, and a
+disposable runner boot through abort archival and gate reopening under both
+budgets. Existing approved/pending feature decisions and Git provenance remain
+intact. Real-image/toolchain and remote Codex/live-guest trials remain unrun.
