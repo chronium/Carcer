@@ -2488,7 +2488,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "bootstrap-import" && mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "guest-mutation" && mode != "bootstrap-import" && mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -2639,6 +2639,19 @@ func runGenerationFakeAppServer() {
 		if mode == "bootstrap-import" && index == 1 {
 			tool = "import_bootstrap_artifact"
 			arguments = map[string]any{"id": "opaque", "length": 0, "path": "ram/new"}
+		}
+		if mode == "guest-mutation" && index == 1 {
+			tool = os.Getenv("CODEXOS_TEST_GUEST_MUTATION_TOOL")
+			switch tool {
+			case "run":
+				arguments = map[string]any{"path": "ram/test"}
+			case "reap":
+				arguments = map[string]any{"task_id": 1}
+			case "import_provided_asset":
+				arguments = map[string]any{"id": "fixture", "path": "ram/test"}
+			default:
+				os.Exit(29)
+			}
 		}
 		callID := fmt.Sprintf("generation-call-%d", index)
 		send(map[string]any{"id": callID, "method": "item/tool/call", "params": map[string]any{

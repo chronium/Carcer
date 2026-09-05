@@ -191,3 +191,20 @@ func TestGuestTaskToolsPreserveResults(t *testing.T) {
 		})
 	}
 }
+
+func TestGuestTaskToolsAppServerDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool string
+		status     uint32
+		output     string
+	}{
+		{"launch", "run", 0, "31"},
+		{"running", "reap", 0, "running"},
+		{"fault_exit", "reap", 0, "18446744073709551615"},
+		{"consumed_task_failure", "reap", 1, ""},
+		{"import", "import_provided_asset", 0, ""},
+		{"import_failure", "import_provided_asset", 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertGuestMutationAppServerDelivery(t, tc.tool, tc.status, tc.output) })
+	}
+}

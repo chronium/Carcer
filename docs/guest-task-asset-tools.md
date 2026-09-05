@@ -63,3 +63,25 @@ RAM/source-persistence rules still apply.
 
 These bindings do not approve request #6, provision assets or execution services,
 change request statuses, or start a generation.
+
+## Disposable real-guest exercise
+
+The opt-in Go test copies a selected ISO to temporary storage and boots one
+`test-v1` QEMU VM (one vCPU, 128 MiB, no network or writable block devices). It
+uses the production serial dispatcher, tool client, bridge forwarding and frozen
+provided-asset service with temporary binary fixtures. It opens no experiment run
+and no Codex session. Guest RAM paths used by the exercise are outside `seed/`.
+The original ISO is checked unchanged, and QEMU is stopped and reaped on exit.
+
+```sh
+CODEXOS_GUEST_TASK_TOOL_ISO=/path/to/archived/codexos.iso \
+GOMAXPROCS=2 GOMEMLIMIT=768MiB \
+go test -v -p=1 -parallel=1 ./internal/agent \
+  -run '^TestGuestTaskToolsRealGuest$' -count=1 -timeout=120s
+```
+
+This executes real guest imports, immutable-file rejection, loading, sleeping,
+reaping, faults and full-width exit statuses. It is separate from the simulated
+app-server tests that verify result delivery and phase policies. It does not
+validate a workload such as Doom, arbitrary executable formats, or the full
+experiment hardware profile.
