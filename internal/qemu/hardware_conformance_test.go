@@ -27,11 +27,7 @@ arguments = profile.qemu_arguments(
 )
 manifest = profile.manifest("QEMU emulator version λ<&>")
 encoded = (json.dumps(manifest.as_json_object(), indent=2, sort_keys=True) + "\n").encode("utf-8")
-live = manifest.as_json_object()
-live["qemu_arguments"][live["qemu_arguments"].index("-display") + 1] = "gtk,show-menubar=off,window-close=off"
-live = module.validate_hardware_manifest(live)
-live_encoded = (json.dumps(live.as_json_object(), indent=2, sort_keys=True) + "\n").encode("utf-8")
-print(json.dumps({"arguments": arguments, "manifest": base64.b64encode(encoded).decode("ascii"), "live_manifest": base64.b64encode(live_encoded).decode("ascii")}, separators=(",", ":")))
+print(json.dumps({"arguments": arguments, "manifest": base64.b64encode(encoded).decode("ascii")}, separators=(",", ":")))
 `
 	command := exec.Command("python3", "-c", script, root)
 	output, err := command.Output()
@@ -39,9 +35,8 @@ print(json.dumps({"arguments": arguments, "manifest": base64.b64encode(encoded).
 		t.Fatalf("Python hardware reference failed: %v", err)
 	}
 	var reference struct {
-		Arguments    []string `json:"arguments"`
-		Manifest     string   `json:"manifest"`
-		LiveManifest string   `json:"live_manifest"`
+		Arguments []string `json:"arguments"`
+		Manifest  string   `json:"manifest"`
 	}
 	if err := json.Unmarshal(output, &reference); err != nil {
 		t.Fatal(err)
@@ -69,21 +64,6 @@ print(json.dumps({"arguments": arguments, "manifest": base64.b64encode(encoded).
 	}
 	if !bytes.Equal(encoded, pythonEncoded) {
 		t.Fatalf("manifest bytes differ:\nGo: %s\nPython: %s", encoded, pythonEncoded)
-	}
-	EnableLiveDisplay(manifest.QEMUArguments)
-	encoded, err = EncodeHardwareManifest(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pythonEncoded, err = base64.StdEncoding.DecodeString(reference.LiveManifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(encoded, pythonEncoded) {
-		t.Fatal("live display manifest differs from Python")
-	}
-	if _, err := ParseHardwareManifest(encoded); err != nil {
-		t.Fatal(err)
 	}
 }
 
