@@ -16,6 +16,10 @@ const (
 	dispatcherWriteChunkBytes = 16 * 1024
 	dispatcherWriteStall      = 5 * time.Second
 	dispatcherWriteProgress   = 64 * 1024
+	// Bound an incoming frame while a tool exchange is waiting, allowing the
+	// 16 MiB maximum about 19 KiB/s even if idle progress continues throughout.
+	// Host-service execution and outgoing responses retain their own deadlines.
+	dispatcherReceiveLimit    = 15 * time.Minute
 	dispatcherMaxQueuedWrites = 8
 	dispatcherMaxQueuedBytes  = 32*1024*1024 + 8*frameHeaderSize
 	maxHostDiagnosticBytes    = 4 * 1024
@@ -92,23 +96,30 @@ type SerialProtocolDispatcher struct {
 	closing    bool
 	failure    error
 
-	pendingResponse bool
-	response        *Frame
-	hostActive      int
-	hostWindow      uint64
-	startupBuffer   []byte
-	frameBuffer     []byte
-	diagnostic      []byte
-	writes          []*queuedSerialWrite
-	queuedBytes     int
-	events          []serialEvent
-	callbackActive  int
-	flushingEvents  bool
+	pendingResponse     bool
+	pendingRequestID    uint32
+	pendingResponseType uint16
+	response            *Frame
+	receiveStarted      time.Time
+	receiveUpdated      time.Time
+	receiveBytes        int
+	receiveNextProgress int
+	hostActive          int
+	hostWindow          uint64
+	startupBuffer       []byte
+	frameBuffer         []byte
+	diagnostic          []byte
+	writes              []*queuedSerialWrite
+	queuedBytes         int
+	events              []serialEvent
+	callbackActive      int
+	flushingEvents      bool
 
 	pollInterval time.Duration
 	closeTimeout time.Duration
 	writeStall   time.Duration
 	writeChunk   int
+	receiveLimit time.Duration
 }
 
 func NewSerialProtocolDispatcher(serial DuplexSerial, options DispatcherOptions) *SerialProtocolDispatcher {
@@ -116,6 +127,7 @@ func NewSerialProtocolDispatcher(serial DuplexSerial, options DispatcherOptions)
 		serial: serial, options: options, notify: make(chan struct{}), done: make(chan struct{}),
 		pollInterval: dispatcherPollInterval, closeTimeout: dispatcherCloseTimeout,
 		writeStall: dispatcherWriteStall, writeChunk: dispatcherWriteChunkBytes,
+		receiveLimit: dispatcherReceiveLimit,
 	}
 }
 
@@ -178,6 +190,9 @@ func (d *SerialProtocolDispatcher) WaitUntilReady(ctx context.Context, timeout t
 	}
 }
 
+// Exchange uses timeout as the receive idle budget after the request is sent.
+// Incoming frame progress renews that budget, subject to receiveLimit per frame.
+// Nested host-service execution and writes suspend the receive idle budget.
 func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, timeout time.Duration) (Frame, error) {
 	if ctx == nil {
 		return Frame{}, &DispatcherError{Reason: "serial exchange context is nil"}
@@ -202,6 +217,8 @@ func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, 
 		return Frame{}, &SerialError{Reason: "serial protocol dispatcher is closed"}
 	}
 	d.pendingResponse = true
+	d.pendingRequestID = request.RequestID
+	d.pendingResponseType = request.MessageType | 0x8000
 	d.response = nil
 	hostWindow := d.hostWindow
 	d.mutex.Unlock()
@@ -229,6 +246,11 @@ func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, 
 	deadline := time.Now().Add(timeout)
 	for {
 		d.mutex.Lock()
+		if err := ctx.Err(); err != nil {
+			d.mutex.Unlock()
+			d.abortExchange(err)
+			return Frame{}, err
+		}
 		if d.failure != nil {
 			err := d.failure
 			d.mutex.Unlock()
@@ -244,6 +266,33 @@ func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, 
 			hostWindow = d.hostWindow
 			deadline = time.Now().Add(timeout)
 		}
+		if progressDeadline := d.receiveUpdated.Add(timeout); !d.receiveUpdated.IsZero() && progressDeadline.After(deadline) {
+			deadline = progressDeadline
+		}
+		waitDeadline := deadline
+		transferExpired := false
+		if !d.receiveStarted.IsZero() {
+			transferDeadline := d.receiveStarted.Add(d.receiveLimit)
+			if transferDeadline.Before(waitDeadline) {
+				waitDeadline = transferDeadline
+				transferExpired = true
+			}
+		}
+		remaining := time.Until(waitDeadline)
+		if !active && remaining <= 0 {
+			reason := "timed out waiting for tool response"
+			if transferExpired {
+				reason = "serial receive transfer deadline exceeded"
+			}
+			err := &DispatcherError{Reason: reason}
+			// Decide under the receive lock; a timer wakeup alone cannot prove
+			// timeout when a reader has just advanced or completed the frame.
+			d.failure = err
+			d.recordLocked("serial_protocol_receive_aborted", map[string]any{"request_id": request.RequestID, "bytes_received": d.receiveBytes, "reason": reason})
+			d.mutex.Unlock()
+			d.abortExchange(err)
+			return Frame{}, err
+		}
 		notify := d.notify
 		d.mutex.Unlock()
 		if active {
@@ -255,12 +304,6 @@ func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, 
 			}
 			continue
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			err := &DispatcherError{Reason: "timed out waiting for tool response"}
-			d.abortExchange(err)
-			return Frame{}, err
-		}
 		timer := time.NewTimer(remaining)
 		select {
 		case <-notify:
@@ -270,9 +313,7 @@ func (d *SerialProtocolDispatcher) Exchange(ctx context.Context, request Frame, 
 			d.abortExchange(ctx.Err())
 			return Frame{}, ctx.Err()
 		case <-timer.C:
-			err := &DispatcherError{Reason: "timed out waiting for tool response"}
-			d.abortExchange(err)
-			return Frame{}, err
+			// Recheck progress, completion, and host-service activity under lock.
 		}
 	}
 }
@@ -463,6 +504,15 @@ func (d *SerialProtocolDispatcher) consumeStartup(ctx context.Context) error {
 func (d *SerialProtocolDispatcher) consumeFrames(ctx context.Context) error {
 	for {
 		d.mutex.Lock()
+		if d.failure != nil {
+			err := d.failure
+			d.mutex.Unlock()
+			return err
+		}
+		if err := d.trackReceiveLocked(); err != nil {
+			d.mutex.Unlock()
+			return err
+		}
 		frame, complete, err := ExtractFrame(&d.frameBuffer)
 		if err != nil {
 			d.mutex.Unlock()
@@ -470,8 +520,13 @@ func (d *SerialProtocolDispatcher) consumeFrames(ctx context.Context) error {
 		}
 		if !complete {
 			d.mutex.Unlock()
+			d.flushEvents()
 			return nil
 		}
+		d.receiveStarted = time.Time{}
+		d.receiveUpdated = time.Time{}
+		d.receiveBytes = 0
+		d.receiveNextProgress = 0
 		if frame.MessageType == HostServiceRequest {
 			exchange := d.pendingResponse
 			handler, scope := d.options.BackgroundHostServices, "background"
@@ -496,6 +551,58 @@ func (d *SerialProtocolDispatcher) consumeFrames(ctx context.Context) error {
 		d.mutex.Unlock()
 		d.flushEvents()
 	}
+}
+
+// Count only new bytes in a valid frame prefix. A complete header must identify
+// the outstanding response or a guest-originated host request before it can
+// extend the idle deadline. Payload bytes are never scanned for frame magic.
+func (d *SerialProtocolDispatcher) trackReceiveLocked() error {
+	data := d.frameBuffer
+	total := frameHeaderSize
+	var messageType uint16
+	var requestID uint32
+	if len(data) >= frameHeaderSize {
+		var length uint32
+		var err error
+		messageType, requestID, length, err = decodeHeader(data[:frameHeaderSize])
+		if err != nil {
+			return err
+		}
+		total += int(length)
+		if messageType == HostServiceRequest {
+			if requestID == 0 {
+				return &FramingError{Reason: "host-service request ID is zero"}
+			}
+		} else {
+			if !d.pendingResponse || d.response != nil {
+				return &FramingError{Reason: "received an unexpected guest tool-protocol response"}
+			}
+			if requestID != d.pendingRequestID {
+				return &ToolProtocolError{Reason: fmt.Sprintf("response request ID %d does not match %d", requestID, d.pendingRequestID)}
+			}
+			if messageType != d.pendingResponseType {
+				return &ToolProtocolError{Reason: fmt.Sprintf("response message type 0x%04x does not match 0x%04x", messageType, d.pendingResponseType)}
+			}
+		}
+	} else if !bytes.HasPrefix(frameMagic[:], data[:min(len(data), len(frameMagic))]) {
+		return &FramingError{Reason: "invalid frame magic"}
+	}
+	count := min(len(data), total)
+	if count <= d.receiveBytes {
+		return nil
+	}
+	now := time.Now()
+	if d.receiveStarted.IsZero() {
+		d.receiveStarted = now
+	}
+	d.receiveUpdated = now
+	d.receiveBytes = count
+	if len(data) >= frameHeaderSize && count >= d.receiveNextProgress {
+		d.recordLocked("serial_protocol_receive_progress", map[string]any{"request_id": requestID, "message_type": messageType, "bytes_received": count, "total_bytes": total})
+		d.receiveNextProgress = (count/dispatcherWriteProgress + 1) * dispatcherWriteProgress
+	}
+	d.signalLocked()
+	return nil
 }
 
 func (d *SerialProtocolDispatcher) dispatchHostService(ctx context.Context, frame Frame, handler HostServiceHandler, scope string) (err error) {

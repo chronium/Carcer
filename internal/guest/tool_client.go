@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+// The dispatcher renews this idle budget on incoming frame progress and applies
+// a separate absolute receive limit. It is not a whole-response time limit.
 const toolResponseTimeout = 5 * time.Second
 
 type ToolClient struct {
