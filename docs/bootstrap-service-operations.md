@@ -197,16 +197,17 @@ An unavailable worker or incorrect pin fails without enabling the run.
 An enabled service permits new jobs under existing limits without a separate batch
 grant, even with zero retained job references. The count describes previous jobs;
 it is neither an execution permission nor job credits. Disabled services reject
-new execution regardless of retained references. The
-`bootstrap` command reports execution availability, pins, limits and retained job reference count;
+new execution regardless of retained references. The `bootstrap` command reports
+execution availability, pins, limits and retained job reference count;
 `inspect GENERATION` reports archived artifact references and limits.
 
 When the operator separately chooses to proceed, the existing `continue` and
 `agent` commands retain their normal explicit approval/session semantics. No
 special restart, automatic generation, or guest-source adaptation is performed.
 Guest helpers must still expose invocation/source capture and binary-safe import.
-The Go tool bridge recognizes advertised `bootstrap_job` and
-`read_bootstrap_artifact` and implementation-only `import_bootstrap_artifact` helpers; it never invents missing guest tools.
+The Go tool bridge recognizes advertised `bootstrap_job`, `read_bootstrap_artifact`
+and implementation-only `import_bootstrap_artifact` helpers; it never invents
+missing guest tools.
 
 ## Limits, retention and recovery
 
