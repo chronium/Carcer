@@ -1,6 +1,7 @@
 # AGENTS.md
 
-Read this file and [README.md](README.md) before making changes.
+Choose the context needed for the task. [README.md](README.md) describes the
+experiment's purpose and behavioral requirements; consult it when those are relevant.
 
 These instructions govern repository development. The autonomous guest receives
 a separate trusted contract described in [docs/agent-contract.md](docs/agent-contract.md).
@@ -10,7 +11,7 @@ CodexOS is experimental infrastructure, not a reusable framework or product plat
 
 ## Working approach
 
-* Carry an authorized task through implementation and verification. Resolve routine
+* Carry an authorized task to completion. Resolve routine
   choices from context; ask when missing information would materially change the result.
 * Continue independent work while awaiting clarification. Existing authorization
   covers necessary edits and checks; do not ask for it again.
@@ -21,8 +22,8 @@ CodexOS is experimental infrastructure, not a reusable framework or product plat
   and skill guidance, subject to system and developer instructions.
 * If an instruction blocks work, cite its file and exact wording, explain its
   applicability, and distinguish the rule from your interpretation.
-* Give concise progress updates and report the result, relevant verification, and
-  unresolved limitations in plain language.
+* Give concise progress updates and report the result and unresolved limitations
+  in plain language.
 
 ## Repository map
 
@@ -33,10 +34,13 @@ CodexOS is experimental infrastructure, not a reusable framework or product plat
 * `tests/`: Python tests; Go tests live beside their packages.
 * `artifacts/interviews/`: human-facing research provenance, never guest context.
 
-For Go work, consult [docs/go-architecture.md](docs/go-architecture.md),
-[docs/go-migration-parity.md](docs/go-migration-parity.md), and the relevant parts of
-[docs/go-cutover-readiness.md](docs/go-cutover-readiness.md). Python remains the
-reference during migration; Go cutover requires separate operator approval.
+Contextual references:
+
+* Package ownership and lifecycle design: [docs/go-architecture.md](docs/go-architecture.md).
+* Python/Go compatibility: [docs/go-migration-parity.md](docs/go-migration-parity.md).
+* Live cutover and acceptance evidence: [docs/go-cutover-readiness.md](docs/go-cutover-readiness.md).
+
+Python remains the reference during migration; Go cutover requires separate operator approval.
 Preserve cross-language wire and persisted-state compatibility when changing those
 boundaries. Read the relevant `protocol/` specification before changing a protocol.
 
@@ -57,22 +61,19 @@ Investigate unexpected behavior before changing it: establish why it exists,
 whether it is incorrect, and the intended behavior. Logs, warnings, names, and
 expirations alone do not establish a requirement or defect.
 
-## Verification
+## Test design and command reference
 
 Tests should protect meaningful behavior that could realistically regress. Prefer
 a few tests at real boundaries over checks of constants, trivial accessors,
 language behavior, compile-time guarantees, or implementation details. Test count
 and coverage are not quality targets.
 
-Run checks proportional to the change. Once they pass, repeat or expand them only
-for new changes, failures, or unresolved concerns. Documentation-only edits normally
-need link, consistency, and diff checks rather than runtime suites.
+These commands are references, not a checklist for every edit. Paths are relative
+to the repository root.
 
-Use these commands from the repository root as appropriate:
-
-* Go: format changed Go files with `gofmt`; run `go test ./internal/<package>` for
-  affected packages. Use `go test ./...` and `go vet ./...` for changes spanning packages,
-  and `go test -race` on affected packages for concurrency or lifecycle changes.
+* Go formatting: `gofmt`.
+* Go package tests: `go test ./internal/<package>`; race detection: `go test -race ./internal/<package>`.
+* Full Go suite: `go test ./...`; static analysis: `go vet ./...`.
 * Python: `uv run --frozen python -m unittest tests.test_<module>` for affected
   modules; `uv run --frozen python -m unittest discover -v` for the full reference suite.
 * Seed/build: `make seed`. It requires the pinned Limine submodule,
