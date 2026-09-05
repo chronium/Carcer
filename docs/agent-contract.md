@@ -222,7 +222,10 @@ append mode and records `run_reopened_at_gate` without emitting a second
 Run-level feature requests and their immutable decisions are read from their
 existing store, so approved requests still enter the next implementor contract.
 Pending and denied records are not preloaded into that prompt; the implementor
-may inspect all current states on demand with `list_requests`.
+may inspect all current states on demand with `list_requests`. Optional Go operator
+decision notes are labeled separately from guest descriptions in both views; they
+clarify the decision and do not provision capabilities or alter enforcement. See
+[decision note semantics and compatibility](operator-feature-decisions.md).
 Configured run-scoped Git provenance is reconciled normally and existing
 annotated tags are recognized rather than rewritten. Historical
 `hardware.json` files remain untouched; a later explicit boot uses the currently
@@ -274,6 +277,8 @@ lineage authorization. The [service contract](bootstrap-host-services.md)
 specifies captured inputs, output paths, exact reads, limits and cancellation.
 
 Guest invocation/capture and binary-safe import helpers remain guest-owned.
+The Go bridge also recognizes the implementation-only guest helper
+`import_bootstrap_artifact(id, length, path)`, which creates a new mutable RAM file.
 Recognized guest helpers are forwarded only if advertised in that session's
 frozen tool set; reviewers and exit interviews gain no job capability. Supplying
 TCC/Linux bootstrap tooling does not itself supply compiler adaptations, SDK/runtime,

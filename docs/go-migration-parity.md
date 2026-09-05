@@ -71,3 +71,12 @@ The Go-only `--inherit-source-capacity 1048576` flag can explicitly provision a
 larger destination during cross-run bootstrap. Validation occurs before state
 creation and the setting is published atomically with bootstrap provenance.
 Seed-only startup and gate reopening reject that flag.
+
+## Go operator decision-note extension
+
+Optional [feature-request decision notes](operator-feature-decisions.md) extend
+Go request records and inherited ledgers with `decision_note`. Records without
+notes retain canonical Python-compatible bytes. The unchanged Python reference
+and older Go readers reject note-bearing records; those runs require a Go harness
+with decision-note support. This extension does not change the guest feature-request
+wire contract, provisioning, service enforcement or the live cutover gate.

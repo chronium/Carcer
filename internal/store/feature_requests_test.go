@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,14 +45,14 @@ func TestFeatureRequestsPersistSparseUnicodeAndDecisions(t *testing.T) {
 	}
 	want := append(append([]FeatureRequest(nil), inherited...), created)
 	assertFeatureRequests(t, requests, want)
-	approved, err := reconstructed.Approve(2)
+	approved, err := reconstructed.Approve(2, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if approved.Status != FeatureApproved {
 		t.Fatalf("approved status = %q", approved.Status)
 	}
-	if _, err := reconstructed.Deny(7); err == nil || !strings.Contains(err.Error(), "already denied") {
+	if _, err := reconstructed.Deny(7, ""); err == nil || !strings.Contains(err.Error(), "already denied") {
 		t.Fatalf("deny decided request error = %v", err)
 	}
 
@@ -187,7 +188,7 @@ func TestFeatureRequestReadersRefreshWithoutMutation(t *testing.T) {
 	if _, err := reader.Request(first.ID); err != nil {
 		t.Fatal(err)
 	}
-	approved, err := writer.Approve(first.ID)
+	approved, err := writer.Approve(first.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +239,7 @@ func TestFeatureRequestWriteFailurePreservesCurrentRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(directory, 0o700)
-	if _, err := store.Approve(request.ID); err == nil || !strings.Contains(err.Error(), "could not persist") {
+	if _, err := store.Approve(request.ID, ""); err == nil || !strings.Contains(err.Error(), "could not persist") {
 		t.Fatalf("Approve() error = %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -288,5 +289,71 @@ func assertFeatureRequests(t *testing.T, got, want []FeatureRequest) {
 		if got[index] != want[index] {
 			t.Fatalf("request %d = %#v, want %#v", index, got[index], want[index])
 		}
+	}
+}
+
+func TestFeatureDecisionNoteValidationAndPersistence(t *testing.T) {
+	for _, approve := range []bool{true, false} {
+		run := t.TempDir()
+		s, err := NewFeatureRequestStore(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.Create(3, "Guest title", "Guest description")
+		if err != nil {
+			t.Fatal(err)
+		}
+		decide := s.Approve
+		wantStatus := FeatureApproved
+		if !approve {
+			decide = s.Deny
+			wantStatus = FeatureDenied
+		}
+		for _, note := range []string{strings.Repeat("é", 2049), "bad\xff"} {
+			if _, err := decide(r.ID, note); err == nil {
+				t.Fatal("invalid note accepted")
+			}
+			got, err := s.Request(r.ID)
+			if err != nil || got != r {
+				t.Fatalf("failed validation changed record: %+v, %v", got, err)
+			}
+		}
+		note := strings.Repeat("é", 2048)
+		decided, err := decide(r.ID, note)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := NewFeatureRequestStore(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := reopened.Request(r.ID)
+		if err != nil || got != decided || got.DecisionNote != note || got.Status != wantStatus || got.Description != r.Description {
+			t.Fatalf("reloaded decision: %+v, %v", got, err)
+		}
+		if _, err := decide(r.ID, "replacement"); err == nil {
+			t.Fatal("finalized decision note replaced")
+		}
+		contents, err := os.ReadFile(filepath.Join(run, "feature-requests", "request-000001.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{`null`, `3`, `"\ud800"`, `"` + strings.Repeat("a", 4097) + `"`} {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(contents, &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields["decision_note"] = json.RawMessage(bad)
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeFeatureRequest(encoded); err == nil {
+				t.Fatalf("invalid persisted note accepted: %s", bad)
+			}
+		}
+	}
+	if _, err := DecodeFeatureRequest([]byte(`{"id":1,"generation":0,"title":"t","description":"d","status":"pending","decision_note":"premature"}`)); err == nil {
+		t.Fatal("pending note accepted")
 	}
 }

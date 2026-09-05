@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	MaxFeatureTitleBytes       = 256
-	MaxFeatureDescriptionBytes = 16 * 1024
+	MaxFeatureDecisionNoteBytes = 4 * 1024
+	MaxFeatureTitleBytes        = 256
+	MaxFeatureDescriptionBytes  = 16 * 1024
 
 	FeaturePending  = "pending"
 	FeatureApproved = "approved"
@@ -29,11 +30,12 @@ var (
 )
 
 type FeatureRequest struct {
-	ID          uint64
-	Generation  uint64
-	Title       string
-	Description string
-	Status      string
+	ID           uint64
+	Generation   uint64
+	Title        string
+	Description  string
+	Status       string
+	DecisionNote string
 }
 
 type FeatureRequestError struct {
@@ -168,15 +170,15 @@ func (s *FeatureRequestStore) Import(requests []FeatureRequest) error {
 	return nil
 }
 
-func (s *FeatureRequestStore) Approve(requestID uint64) (FeatureRequest, error) {
-	return s.setStatus(requestID, FeatureApproved)
+func (s *FeatureRequestStore) Approve(requestID uint64, note string) (FeatureRequest, error) {
+	return s.setStatus(requestID, FeatureApproved, note)
 }
 
-func (s *FeatureRequestStore) Deny(requestID uint64) (FeatureRequest, error) {
-	return s.setStatus(requestID, FeatureDenied)
+func (s *FeatureRequestStore) Deny(requestID uint64, note string) (FeatureRequest, error) {
+	return s.setStatus(requestID, FeatureDenied, note)
 }
 
-func (s *FeatureRequestStore) setStatus(requestID uint64, status string) (FeatureRequest, error) {
+func (s *FeatureRequestStore) setStatus(requestID uint64, status, note string) (FeatureRequest, error) {
 	if err := s.refresh(); err != nil {
 		return FeatureRequest{}, err
 	}
@@ -191,6 +193,7 @@ func (s *FeatureRequestStore) setStatus(requestID uint64, status string) (Featur
 		return FeatureRequest{}, &FeatureRequestError{Reason: fmt.Sprintf("feature request #%d is already %s", requestID, current.Status)}
 	}
 	current.Status = status
+	current.DecisionNote = note
 	if err := s.write(current, true); err != nil {
 		return FeatureRequest{}, err
 	}
@@ -278,6 +281,9 @@ func DecodeFeatureRequest(contents []byte) (FeatureRequest, error) {
 		return FeatureRequest{}, &FeatureRequestError{Reason: "feature-request record is not valid JSON", Err: err, malformedRecord: true}
 	}
 	wanted := []string{"id", "generation", "title", "description", "status"}
+	if _, exists := fields["decision_note"]; exists {
+		wanted = append(wanted, "decision_note")
+	}
 	if len(fields) != len(wanted) {
 		return FeatureRequest{}, &FeatureRequestError{Reason: "feature-request record has invalid fields"}
 	}
@@ -316,7 +322,18 @@ func DecodeFeatureRequest(contents []byte) (FeatureRequest, error) {
 	if err != nil || !validFeatureStatus(status) {
 		return FeatureRequest{}, &FeatureRequestError{Reason: "feature-request status is invalid"}
 	}
-	return FeatureRequest{ID: requestID, Generation: generation, Title: title, Description: description, Status: status}, nil
+	note := ""
+	if raw, exists := fields["decision_note"]; exists {
+		note, err = decodeJSONString(raw)
+		if err != nil {
+			return FeatureRequest{}, &FeatureRequestError{Reason: "feature-request decision note must be a valid UTF-8 string", Err: err}
+		}
+	}
+	request := FeatureRequest{ID: requestID, Generation: generation, Title: title, Description: description, Status: status, DecisionNote: note}
+	if err := validateRequest(request); err != nil {
+		return FeatureRequest{}, err
+	}
+	return request, nil
 }
 
 func (s *FeatureRequestStore) write(request FeatureRequest, replace bool) error {
@@ -376,22 +393,41 @@ func (s *FeatureRequestStore) write(request FeatureRequest, replace bool) error 
 	if err := os.Rename(temporaryName, destination); err != nil {
 		return persistFeatureError(request.ID, err)
 	}
+	directory, err := os.Open(s.directory)
+	if err != nil {
+		return persistFeatureError(request.ID, err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return persistFeatureError(request.ID, err)
+	}
+	// Also persist the feature-requests directory entry if this run just created it.
+	parent, err := os.Open(filepath.Dir(s.directory))
+	if err != nil {
+		return persistFeatureError(request.ID, err)
+	}
+	defer parent.Close()
+	if err := parent.Sync(); err != nil {
+		return persistFeatureError(request.ID, err)
+	}
 	return nil
 }
 
 func encodeFeatureRequest(request FeatureRequest) ([]byte, error) {
 	value := struct {
-		Description string `json:"description"`
-		Generation  uint64 `json:"generation"`
-		ID          uint64 `json:"id"`
-		Status      string `json:"status"`
-		Title       string `json:"title"`
+		DecisionNote string `json:"decision_note,omitempty"`
+		Description  string `json:"description"`
+		Generation   uint64 `json:"generation"`
+		ID           uint64 `json:"id"`
+		Status       string `json:"status"`
+		Title        string `json:"title"`
 	}{
-		Description: request.Description,
-		Generation:  request.Generation,
-		ID:          request.ID,
-		Status:      request.Status,
-		Title:       request.Title,
+		DecisionNote: request.DecisionNote,
+		Description:  request.Description,
+		Generation:   request.Generation,
+		ID:           request.ID,
+		Status:       request.Status,
+		Title:        request.Title,
 	}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
@@ -460,6 +496,12 @@ func validateRequest(request FeatureRequest) error {
 	}
 	if err := validateFeatureText(request.Title, request.Description); err != nil {
 		return err
+	}
+	if err := ValidateFeatureDecisionNote(request.DecisionNote); err != nil {
+		return err
+	}
+	if request.Status == FeaturePending && request.DecisionNote != "" {
+		return &FeatureRequestError{Reason: "pending feature request cannot have a decision note"}
 	}
 	if !validFeatureStatus(request.Status) {
 		return &FeatureRequestError{Reason: "imported feature-request status is invalid"}
@@ -577,4 +619,15 @@ func persistFeatureError(requestID uint64, err error) error {
 		return err
 	}
 	return &FeatureRequestError{Reason: fmt.Sprintf("could not persist feature request #%d", requestID), Err: err}
+}
+
+// ValidateFeatureDecisionNote checks operator text before confirmation or persistence.
+func ValidateFeatureDecisionNote(note string) error {
+	if !utf8.ValidString(note) {
+		return &FeatureRequestError{Reason: "feature-request decision note is not valid UTF-8"}
+	}
+	if len(note) > MaxFeatureDecisionNoteBytes {
+		return &FeatureRequestError{Reason: "feature-request decision note exceeds 4 KiB"}
+	}
+	return nil
 }

@@ -127,15 +127,15 @@ func (r *consoleTestRuntime) FeatureRequest(requestID uint64) (store.FeatureRequ
 	return store.FeatureRequest{}, errors.New("feature request does not exist")
 }
 
-func (r *consoleTestRuntime) ApproveFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
-	return r.decideFeature(requestID, store.FeatureApproved)
+func (r *consoleTestRuntime) ApproveFeatureRequest(requestID uint64, note string) (store.FeatureRequest, error) {
+	return r.decideFeature(requestID, store.FeatureApproved, note)
 }
 
-func (r *consoleTestRuntime) DenyFeatureRequest(requestID uint64) (store.FeatureRequest, error) {
-	return r.decideFeature(requestID, store.FeatureDenied)
+func (r *consoleTestRuntime) DenyFeatureRequest(requestID uint64, note string) (store.FeatureRequest, error) {
+	return r.decideFeature(requestID, store.FeatureDenied, note)
 }
 
-func (r *consoleTestRuntime) decideFeature(requestID uint64, status string) (store.FeatureRequest, error) {
+func (r *consoleTestRuntime) decideFeature(requestID uint64, status, note string) (store.FeatureRequest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.state != string(experiment.RuntimeStateAwaitingNextGeneration) {
@@ -144,6 +144,7 @@ func (r *consoleTestRuntime) decideFeature(requestID uint64, status string) (sto
 	for index := range r.features {
 		if r.features[index].ID == requestID {
 			r.features[index].Status = status
+			r.features[index].DecisionNote = note
 			return r.features[index], nil
 		}
 	}
@@ -623,5 +624,45 @@ func TestPlainConsoleShutdownPersistsAndReapsActiveInterview(t *testing.T) {
 	runtime.mu.Unlock()
 	if closeCalls != 1 {
 		t.Fatalf("runtime close calls = %d, want 1", closeCalls)
+	}
+}
+
+func TestFeatureDecisionNotesCommandAndPresentation(t *testing.T) {
+	for _, command := range []string{"feature-approve", "feature-deny"} {
+		t.Run(command, func(t *testing.T) {
+			runtime := newConsoleTestRuntime(t)
+			runtime.state = string(experiment.RuntimeStateAwaitingNextGeneration)
+			runtime.features = []store.FeatureRequest{{ID: 5, Generation: 9, Title: "Guest request", Description: "Guest description", Status: store.FeaturePending}}
+			var output bytes.Buffer
+			console := newTestPlainConsole(t, runtime, strings.NewReader("n\ny\n"), &output, nil)
+			t.Cleanup(func() { _ = console.Shutdown() })
+			for _, bad := range []string{strings.Repeat("é", 2049), "bad\xff"} {
+				executeConsoleLine(t, console, command+" 5 "+bad)
+				if got, _ := runtime.FeatureRequest(5); got.Status != store.FeaturePending || got.DecisionNote != "" {
+					t.Fatalf("invalid note changed request: %+v", got)
+				}
+			}
+			note := "Already provisioned.  λ \"four\" is scope.\x1b[31m"
+			executeConsoleLine(t, console, command+" 5 "+note)
+			if got, _ := runtime.FeatureRequest(5); got.Status != store.FeaturePending || got.DecisionNote != "" {
+				t.Fatalf("cancelled note persisted: %+v", got)
+			}
+			executeConsoleLine(t, console, command+" 5 "+note)
+			got, _ := runtime.FeatureRequest(5)
+			want := store.FeatureApproved
+			if command == "feature-deny" {
+				want = store.FeatureDenied
+			}
+			if got.Status != want || got.DecisionNote != note || got.Description != "Guest description" {
+				t.Fatalf("decision: %+v", got)
+			}
+			output.Reset()
+			executeConsoleLine(t, console, "features")
+			executeConsoleLine(t, console, "feature 5")
+			text := output.String()
+			if strings.Count(text, "Operator decision note:") != 2 || strings.Count(text, EscapeTerminalText(note, false)) != 2 || !strings.Contains(text, "Description:\n") || strings.Contains(text, "\x1b") {
+				t.Fatalf("presentation: %q", text)
+			}
+		})
 	}
 }

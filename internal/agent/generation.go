@@ -49,7 +49,7 @@ const (
 	buildToolDescription              = "Compile and link the exact current persistent mutable CodexOS guest source, then validate that its candidate image boots under the current trusted hardware profile, reaches the canonical READY state, and speaks the canonical development protocol."
 	finishGenerationToolDescription   = "Permanently end the current generation from the exact current source only when it matches the latest successful validated build, and provide a concise handoff for the fresh successor session. In that handoff, distinguish implemented end-to-end capabilities and explicitly provisioned trusted capabilities from unresolved dependencies or assumptions; do not describe a future path as available unless all required steps are implemented or explicitly provisioned."
 	requestFeatureToolDescription     = "Record an advisory request to the human operator for a capability of the trusted external environment rather than human implementation of CodexOS kernel or userland functionality. Requesting or approving it does not itself provision or change anything, and a request may remain pending or be denied. Recording a legitimate request does not require depending on it, waiting for it, or stopping guest-side work; a local workaround does not by itself make that trusted-environment request inappropriate."
-	listRequestsToolDescription       = "List the authoritative run-level external feature requests and their current pending, approved, or denied status. Pending requests are recorded advisory requests, not provisioned or promised, and carry no ETA or approval probability. Under trusted operator semantics, approved requests have already been provisioned and are usable only within the exact provisioned scope; denied requests are unavailable under that request. This read-only tool does not modify requests."
+	listRequestsToolDescription       = "List the authoritative run-level external feature requests and their current pending, approved, or denied status. Pending requests are recorded advisory requests, not provisioned or promised, and carry no ETA or approval probability. Under trusted operator semantics, approved requests have already been provisioned and are usable only within the exact provisioned scope; denied requests are unavailable under that request. Optional operator decision notes are separate from guest descriptions and clarify decisions without changing provisioning or enforcement. This read-only tool does not modify requests."
 	listProvidedAssetsToolDescription = "Ask the running CodexOS guest to list the immutable provided assets it can access through its advertised development tool."
 	readProvidedAssetToolDescription  = "Ask the running CodexOS guest to read an exact byte range from a provided asset through its advertised development tool. This does not give Codex direct access to trusted host asset storage."
 	reviewToolDescription             = "Yield the current turn, then consult a fresh independent reviewer over one stable CodexOS guest-source snapshot. Every call must include the exact proposed plan or change. The reviewer is advisory and cannot modify CodexOS; its exact result returns in one trusted continuation on this thread."
@@ -3098,20 +3098,22 @@ func featureRequestsJSON(requests []store.FeatureRequest) ([]byte, error) {
 	requests = append([]store.FeatureRequest(nil), requests...)
 	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
 	items := make([]struct {
-		Description string `json:"description"`
-		Generation  uint64 `json:"generation"`
-		ID          uint64 `json:"id"`
-		Status      string `json:"status"`
-		Title       string `json:"title"`
+		DecisionNote string `json:"decision_note,omitempty"`
+		Description  string `json:"description"`
+		Generation   uint64 `json:"generation"`
+		ID           uint64 `json:"id"`
+		Status       string `json:"status"`
+		Title        string `json:"title"`
 	}, 0, len(requests))
 	for _, request := range requests {
 		items = append(items, struct {
-			Description string `json:"description"`
-			Generation  uint64 `json:"generation"`
-			ID          uint64 `json:"id"`
-			Status      string `json:"status"`
-			Title       string `json:"title"`
-		}{request.Description, request.Generation, request.ID, request.Status, request.Title})
+			DecisionNote string `json:"decision_note,omitempty"`
+			Description  string `json:"description"`
+			Generation   uint64 `json:"generation"`
+			ID           uint64 `json:"id"`
+			Status       string `json:"status"`
+			Title        string `json:"title"`
+		}{request.DecisionNote, request.Description, request.Generation, request.ID, request.Status, request.Title})
 	}
 	value := struct {
 		Requests any `json:"requests"`
@@ -3165,7 +3167,11 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 	if len(approved) > 0 {
 		parts := make([]string, 0, len(approved))
 		for _, request := range approved {
-			parts = append(parts, fmt.Sprintf("#%d: %s\n%s", request.ID, request.Title, request.Description))
+			text := fmt.Sprintf("#%d: %s\n%s", request.ID, request.Title, request.Description)
+			if request.DecisionNote != "" {
+				text += "\nOperator decision note:\n" + request.DecisionNote
+			}
+			parts = append(parts, text)
 		}
 		approvedText = "Approved external feature requests for this run:\n\n" + strings.Join(parts, "\n\n")
 	}
