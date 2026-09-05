@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,4 +142,66 @@ func TestRootlessWorkerSmoke(t *testing.T) {
 		t.Fatalf("job: %+v %v", v, e)
 	}
 	t.Logf("worker smoke: reason=%s cleaned=%t output=%s", v.Result.Reason, v.Result.Cleaned, v.Outputs[0].Data)
+}
+
+func TestRootlessRecoversInterruptedWorker(t *testing.T) {
+	c := acceptanceClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	req := fixtureRequest()
+	req.Argv = []string{"/bin/sh", "-c", "sleep 300"}
+	req.Outputs = nil
+	done := make(chan error, 1)
+	go func() {
+		_, e := c.call(ctx, wireRequest{Kind: "job", Request: req, Snapshot: fixtureSnapshot(t), TCCAsset: "tcc"})
+		done <- e
+	}()
+	dir := c.command[len(c.command)-2]
+	var active map[string]string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if readJSON(filepath.Join(dir, "active.json"), &active, 4096) == nil {
+			st, e := inspect(ctx, active["container"])
+			if e == nil && st.State.Pid > 0 {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	pid, e := strconv.Atoi(active["worker_pid"])
+	if e != nil || pid <= 1 {
+		t.Fatalf("worker did not publish owned PID: %v", active)
+	}
+	process, e := os.FindProcess(pid)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = process.Kill(); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case e = <-done:
+		if e == nil {
+			t.Fatal("interrupted worker claimed success")
+		}
+	case <-ctx.Done():
+		t.Fatal("interrupted worker did not retire")
+	}
+	response, e := c.call(ctx, wireRequest{Kind: "recover"})
+	if e != nil || response.Result.Status != 0 || !response.Result.Cleaned {
+		t.Fatalf("recovery %+v %v", response, e)
+	}
+	if _, e = os.Stat(filepath.Join(dir, "active.json")); !os.IsNotExist(e) {
+		t.Fatal("recovery retained active marker")
+	}
+	entries, e := os.ReadDir(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "inputs-") {
+			t.Fatal("interrupted input capture retained")
+		}
+	}
+	t.Log("abrupt worker death: owned container, descendants, staged inputs and active marker recovered")
 }

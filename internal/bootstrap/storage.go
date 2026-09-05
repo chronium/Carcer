@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,9 @@ type JobRef struct {
 	SHA256 string `json:"sha256"`
 }
 type References struct {
+	Enabled    bool     `json:"enabled"`
+	TCCAsset   AssetRef `json:"tcc_asset"`
+	Image      string   `json:"image"`
 	Version    int      `json:"version"`
 	RunID      string   `json:"run_id"`
 	Generation uint64   `json:"generation"`
@@ -263,6 +267,9 @@ func (s *Storage) Reserve(runBytes, globalBytes int64) error {
 	return nil
 }
 func initializeStorage(s *Storage, run string) error {
+	if len(mustJSON(diskOwner{1, run}))+1 > 4096 {
+		return errors.New("bootstrap owner path exceeds metadata bound")
+	}
 	if e := os.Mkdir(s.Directory, 0700); e != nil {
 		return e
 	}
@@ -316,7 +323,7 @@ func ReadReferences(directory string) (*References, error) {
 	if e != nil {
 		return nil, e
 	}
-	if r.Version != 1 || !validID(r.RunID) || r.Limits != Baseline() || len(r.Jobs) > 64 {
+	if r.Version != 1 || r.Image != Image || !safeAssetID(r.TCCAsset.ID) || r.TCCAsset.SHA256 != TCCSHA256 || !validID(r.RunID) || r.Limits != Baseline() || len(r.Jobs) > 64 {
 		return nil, errors.New("invalid bootstrap artifact references")
 	}
 	seen := map[string]bool{}
@@ -468,7 +475,10 @@ func (s *Storage) artifact(refs References, id string) ([]byte, error) {
 	}
 	return nil, errors.New("artifact is not authorized for this generation lineage")
 }
-func (s *Storage) Publish(m Manifest, outputs []Input, refs *References) error {
+func (s *Storage) Publish(ctx context.Context, m Manifest, outputs []Input, refs *References) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !validID(m.ID) || !validID(m.RunID) || m.Version != 1 || m.Result.Status != 0 || !m.Result.Cleaned || m.Limits != Baseline() || refs.RunID != s.Config.RunID {
 		return errors.New("invalid or unclean bootstrap publication")
 	}
@@ -553,6 +563,9 @@ func (s *Storage) Publish(m Manifest, outputs []Input, refs *References) error {
 	if _, e = os.Lstat(final); !errors.Is(e, os.ErrNotExist) {
 		return errors.New("bootstrap job ID collision")
 	}
+	if e = ctx.Err(); e != nil {
+		return e
+	}
 	if e = os.Rename(stage, final); e != nil {
 		return e
 	}
@@ -565,6 +578,18 @@ func (s *Storage) Publish(m Manifest, outputs []Input, refs *References) error {
 	}
 	next := *refs
 	next.Jobs = append(append([]JobRef(nil), refs.Jobs...), JobRef{m.ID, Digest(b)})
+	newIndexBytes := len(mustJSON(next)) + 1
+	oldIndexBytes := 0
+	if info, err := os.Stat(filepath.Join(s.Directory, ReferencesFilename)); err == nil {
+		oldIndexBytes = int(info.Size())
+	}
+	delta := int64(max(0, newIndexBytes-oldIndexBytes))
+	if e = s.Reserve(delta, delta); e != nil {
+		return e
+	}
+	if e = ctx.Err(); e != nil {
+		return e
+	}
 	// This synced index is the commit point; an interrupted earlier rename leaves
 	// an unreferenced immutable job, never a partially authorized artifact.
 	if e = atomicJSON(filepath.Join(s.Directory, ReferencesFilename), next); e != nil {
@@ -616,7 +641,8 @@ func Freeze(run, staging string, generation uint64) error {
 		return e
 	}
 	if refs == nil {
-		refs = &References{Version: 1, RunID: c.RunID, Generation: generation, Limits: Baseline()}
+		value := NewReferences(*c, generation)
+		refs = &value
 	}
 	if refs.Generation != generation {
 		return errors.New("bootstrap generation reference mismatch")
@@ -657,7 +683,7 @@ func Inherit(source, archive, candidate, destination string) (func(bool) error, 
 	dest.Enabled = false
 	d := &Storage{Config: dest, Directory: filepath.Join(dest.Storage, dest.RunID)}
 	// Account for destination metadata as well as copied opaque content.
-	var need int64 = 8192
+	var need int64 = int64(4096 + len(mustJSON(*refs)) + 1024)
 	for _, ref := range refs.Jobs {
 		n, e := directoryBytes(filepath.Join(s.Directory, "jobs", ref.ID))
 		if e != nil {
@@ -721,6 +747,7 @@ func Inherit(source, archive, candidate, destination string) (func(bool) error, 
 	}
 	next := *refs
 	next.RunID = dest.RunID
+	next.Enabled = false
 	next.Generation = 0
 	if e = atomicJSON(filepath.Join(d.Directory, ReferencesFilename), next); e == nil {
 		e = atomicJSON(filepath.Join(candidate, ConfigFilename), dest)
@@ -830,6 +857,22 @@ func GarbageCollect(run string) (int, error) {
 			keep[j.ID] = true
 		}
 	}
+	current, e := ReadReferences(s.Directory)
+	if e != nil {
+		return 0, e
+	}
+	if current != nil {
+		filtered := make([]JobRef, 0, len(current.Jobs))
+		for _, j := range current.Jobs {
+			if keep[j.ID] {
+				filtered = append(filtered, j)
+			}
+		}
+		current.Jobs = filtered
+		if e = atomicJSON(filepath.Join(s.Directory, ReferencesFilename), current); e != nil {
+			return 0, e
+		}
+	}
 	jobs, e := os.ReadDir(filepath.Join(s.Directory, "jobs"))
 	if e != nil {
 		return 0, e
@@ -847,4 +890,8 @@ func GarbageCollect(run string) (int, error) {
 		}
 	}
 	return count, syncDir(filepath.Join(s.Directory, "jobs"))
+}
+
+func NewReferences(c Config, generation uint64) References {
+	return References{Version: 1, Enabled: c.Enabled, TCCAsset: AssetRef{c.TCCAsset, TCCSHA256}, Image: Image, RunID: c.RunID, Generation: generation, Limits: Baseline()}
 }

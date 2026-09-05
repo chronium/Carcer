@@ -432,7 +432,7 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 		"--pids-limit=64", "--memory=512m", "--memory-swap=512m", "--cpus=1", "--ulimit=nofile=128:128", "--ulimit=core=0:0", "--ulimit=fsize=67108864:67108864",
 		"--log-driver=none", "--http-proxy=false", "--unsetenv-all", "--env=HOME=/work", "--env=PATH=/usr/local/bin:/usr/bin:/bin", "--env=LANG=C", "--env=GOMAXPROCS=2", "--env=GOMEMLIMIT=64MiB",
 		"--workdir=/work", "--timeout=180", "--stop-timeout=2", "-v", inputs + ":/inputs:ro,Z", Image, "/inputs/helper", "__supervise"}
-	if e = atomicJSON(filepath.Join(o.Directory, "active.json"), map[string]string{"container": name}); e != nil {
+	if e = atomicJSON(filepath.Join(o.Directory, "active.json"), map[string]string{"container": name, "worker_pid": strconv.Itoa(os.Getpid())}); e != nil {
 		response.Result.Diagnostics = e.Error()
 		return
 	}

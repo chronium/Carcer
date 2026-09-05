@@ -138,7 +138,7 @@ func NewService(run string, generation uint64, parent *uint64, assets []Asset, r
 	if e != nil {
 		return nil, e
 	}
-	refs := References{Version: 1, RunID: c.RunID, Generation: generation, Limits: Baseline()}
+	refs := NewReferences(*c, generation)
 	var inherited *References
 	if parent != nil {
 		inherited, e = ReadReferences(filepath.Join(run, fmt.Sprintf("generation-%04d", *parent)))
@@ -366,6 +366,7 @@ func (s *Service) HandleRequest(ctx context.Context, r guest.HostRequest) (guest
 	if callErr != nil {
 		m.Result = Result{Status: 2, Reason: "worker_transport_failure", Diagnostics: callErr.Error()}
 	}
+	m.Result.JobID = m.ID
 	if !m.Result.Cleaned {
 		m.Result.Status = 2
 		m.Result.Reason = "cleanup_unconfirmed"
@@ -381,7 +382,7 @@ func (s *Service) HandleRequest(ctx context.Context, r guest.HostRequest) (guest
 	}
 	if m.Result.Status == 0 {
 		s.mu.Lock()
-		e = storage.Publish(m, result.Outputs, &s.refs)
+		e = storage.Publish(jobCtx, m, result.Outputs, &s.refs)
 		s.mu.Unlock()
 		if e != nil {
 			m.Result.Status = 2

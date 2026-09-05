@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,14 +30,14 @@ func TestCrossRunBootstrapCopiesOpaqueArtifactsBeforePublishing(t *testing.T) {
 	}
 	data := []byte("opaque compiler or SDK source")
 	id := bootstrap.Digest(data)
-	refs := bootstrap.References{Version: 1, RunID: cfg.RunID, Limits: bootstrap.Baseline()}
+	refs := bootstrap.NewReferences(*cfg, 0)
 	snapshot, e := os.ReadFile(filepath.Join(archive, "source.snapshot"))
 	if e != nil {
 		t.Fatal(e)
 	}
 	now := time.Now().UTC()
 	manifest := bootstrap.Manifest{Version: 1, RunID: cfg.RunID, ID: bootstrap.Digest([]byte("fixture job")), Image: bootstrap.Image, ImageID: bootstrap.ImageID, TCCCommit: bootstrap.TCCCommit, Request: bootstrap.Request{Version: 1, Argv: []string{"true"}, Outputs: []string{"tool"}}, SnapshotSHA256: bootstrap.Digest(snapshot), SourceContentBytes: 65536, Limits: bootstrap.Baseline(), Started: now, Finished: now, Result: bootstrap.Result{Status: 0, Cleaned: true, Artifacts: []bootstrap.Artifact{{ID: id, Name: "tool", Size: int64(len(data))}}}}
-	if e = storage.Publish(manifest, []bootstrap.Input{{Path: "tool", Data: data}}, &refs); e != nil {
+	if e = storage.Publish(context.Background(), manifest, []bootstrap.Input{{Path: "tool", Data: data}}, &refs); e != nil {
 		t.Fatal(e)
 	}
 	storage.Close()

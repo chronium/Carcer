@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,13 +64,13 @@ func fixtureStore(t *testing.T) (string, *Storage, References) {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { s.Close() })
-	return run, s, References{Version: 1, RunID: c.RunID, Limits: Baseline()}
+	return run, s, NewReferences(*c, 0)
 }
 func publishFixture(t *testing.T, s *Storage, r *References, data string) Manifest {
 	t.Helper()
 	now := time.Now().UTC()
 	m := Manifest{Version: 1, RunID: s.Config.RunID, ID: randomID(), Generation: r.Generation, Image: Image, ImageID: ImageID, TCCCommit: TCCCommit, Request: fixtureRequest(), SnapshotSHA256: Digest(fixtureSnapshot(t)), SourceContentBytes: 65536, Limits: Baseline(), Started: now, Finished: now, Result: Result{Status: 0, Reason: "completed", Cleaned: true, Artifacts: []Artifact{{ID: Digest([]byte(data)), Name: "tool", Size: int64(len(data))}}}}
-	if e := s.Publish(m, []Input{{"tool", []byte(data)}}, r); e != nil {
+	if e := s.Publish(context.Background(), m, []Input{{"tool", []byte(data)}}, r); e != nil {
 		t.Fatal(e)
 	}
 	return m
@@ -254,7 +255,7 @@ func TestExpandedArtifactInheritanceChecksDestinationQuota(t *testing.T) {
 		req := fixtureRequest()
 		req.Outputs = []string{"a", "b"}
 		m := Manifest{Version: 1, RunID: s.Config.RunID, ID: randomID(), Generation: 0, Image: Image, ImageID: ImageID, TCCCommit: TCCCommit, Request: req, SnapshotSHA256: Digest(fixtureSnapshot(t)), SourceContentBytes: 65536, Limits: Baseline(), Started: now, Finished: now, Result: Result{Status: 0, Cleaned: true, Artifacts: []Artifact{{Digest(a), "a", int64(len(a))}, {Digest(b), "b", int64(len(b))}}}}
-		if e := s.Publish(m, []Input{{"a", a}, {"b", b}}, &refs); e != nil {
+		if e := s.Publish(context.Background(), m, []Input{{"a", a}, {"b", b}}, &refs); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -278,5 +279,50 @@ func TestExpandedArtifactInheritanceChecksDestinationQuota(t *testing.T) {
 	}
 	if _, e := os.Stat(destination); !os.IsNotExist(e) {
 		t.Fatal("partial destination published")
+	}
+}
+
+func TestGateGCAndCancelledPublication(t *testing.T) {
+	run, s, refs := fixtureStore(t)
+	kept := publishFixture(t, s, &refs, "kept compiler")
+	archive := filepath.Join(run, "generation-0000")
+	if e := os.Mkdir(archive, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := Freeze(run, archive, 0); e != nil {
+		t.Fatal(e)
+	}
+	orphan := publishFixture(t, s, &refs, "unreferenced output")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if e := s.Publish(cancelled, Manifest{}, nil, &refs); e != context.Canceled {
+		t.Fatalf("cancelled publication: %v", e)
+	}
+	s.Close()
+	n, e := GarbageCollect(run)
+	if e != nil || n != 1 {
+		t.Fatalf("GC %d %v", n, e)
+	}
+	c, e := LoadConfig(run)
+	if e != nil {
+		t.Fatal(e)
+	}
+	storage, e := LockStorage(*c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer storage.Close()
+	current, e := ReadReferences(storage.Directory)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = storage.Read(*current, kept.Result.Artifacts[0].ID, 0, 1); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = storage.Read(*current, orphan.Result.Artifacts[0].ID, 0, 1); e == nil {
+		t.Fatal("GC retained orphan authorization")
+	}
+	if e = ValidateArchive(run, archive); e != nil {
+		t.Fatal("GC damaged immutable archive", e)
 	}
 }

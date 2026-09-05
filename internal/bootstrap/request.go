@@ -97,6 +97,7 @@ type Artifact struct {
 	Size int64  `json:"size"`
 }
 type Result struct {
+	JobID          string            `json:"job_id,omitempty"`
 	WorkerSHA256   string            `json:"worker_sha256,omitempty"`
 	Controls       map[string]string `json:"controls,omitempty"`
 	ResourceEvents map[string]uint64 `json:"resource_events,omitempty"`

@@ -243,6 +243,13 @@ func Helper(args []string, output io.Writer) error {
 func command(ctx context.Context, limit int, name string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, name, args...)
 	c.WaitDelay = 2 * time.Second
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process != nil {
+			return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 	var b boundedBuffer
 	b.limit = limit
 	b.cancel = func() {

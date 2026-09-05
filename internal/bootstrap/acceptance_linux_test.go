@@ -61,6 +61,9 @@ func hostJob(t *testing.T, svc *Service, ctx context.Context, script string, out
 	if binary.LittleEndian.Uint32(frame.Payload[:4]) != result.Status || frame.RequestID != 37 {
 		t.Fatal("host-service correlation/status changed")
 	}
+	if !validID(result.JobID) {
+		t.Fatal("admitted job has no durable provenance identifier")
+	}
 	sample := result.Diagnostics
 	if len(sample) > 512 {
 		sample = sample[:512]
