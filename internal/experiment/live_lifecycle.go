@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"codexos/internal/build"
+	"codexos/internal/guest"
 	"codexos/internal/qemu"
 )
 
@@ -56,6 +57,7 @@ func (r *CodexOSRun) completeLiveGeneration(generation *liveGeneration, number u
 	archive, err := writeCompletedArchiveFiles(r.runDirectory, completedArchiveFiles{
 		Generation: number, ParentGeneration: parent, Transition: transition, Hardware: hardware,
 		HarnessIdentity: r.HarnessIdentity(),
+		SourceCapacity:  r.SourceCapacity(),
 		BootISO:         generation.bootISO, Handoff: pending.HandoffMessage, SourceSnapshot: pending.SourceSnapshot,
 		KernelELF: pending.KernelELF, SuccessorISO: pending.ISO,
 		KernelIdentity: validated.KernelIdentity, ISOIdentity: validated.ISOIdentity,
@@ -118,6 +120,10 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 	if *r.generationNumber == ^uint64(0) {
 		r.gateMu.Unlock()
 		return &GenerationRuntimeError{Reason: "generation number space is exhausted"}
+	}
+	if _, err := guest.ParseSourceSnapshotWithBudget(r.pendingFinish.SourceSnapshot, r.sourceCapacity); err != nil {
+		r.gateMu.Unlock()
+		return err
 	}
 	parent := *r.generationNumber
 	next := parent + 1
@@ -211,6 +217,10 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 	if archived.Outcome != "completed" || archived.Handoff == nil {
 		r.clearLiveTransition()
 		return &GenerationRuntimeError{Reason: "aborted generation cannot be a rollback parent"}
+	}
+	if err := validateInheritedSource(archived, r.SourceCapacity()); err != nil {
+		r.clearLiveTransition()
+		return err
 	}
 	image := filepath.Join(archived.ArchivePath, successorName, "codexos.iso")
 	if !isRegularWithoutSymlink(image) {
@@ -310,6 +320,7 @@ func (r *CodexOSRun) abortLiveGeneration(reason string) error {
 	_, err := writeAbortedArchiveFiles(r.runDirectory, abortedArchiveFiles{
 		Generation: number, ParentGeneration: parent, Transition: transition, Hardware: hardware,
 		HarnessIdentity: r.HarnessIdentity(),
+		SourceCapacity:  r.SourceCapacity(),
 		BootISO:         generation.bootISO, QEMUStdout: generation.stdoutPath, QEMUStderr: generation.stderrPath,
 		AbortReason:   reason,
 		LatestSuccess: latest,

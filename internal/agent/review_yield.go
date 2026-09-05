@@ -12,6 +12,7 @@ import (
 	"codexos/internal/guest"
 	"codexos/internal/observability"
 	"codexos/internal/provenance"
+	"codexos/internal/sourcecapacity"
 )
 
 const maxReviewProposalBytes = 64 * 1024
@@ -385,6 +386,10 @@ func reviewContinuationPrompt(yield *reviewYield) string {
 }
 
 func captureReviewSource(ctx context.Context, runtime GenerationRuntime) (guest.SourceSnapshot, error) {
+	var budget sourcecapacity.Budget
+	if provider, ok := runtime.(interface{ SourceCapacity() sourcecapacity.Budget }); ok {
+		budget = provider.SourceCapacity()
+	}
 	if snapshotRuntime, ok := any(runtime).(interface {
 		CaptureReviewSource(context.Context) ([]byte, error)
 	}); ok {
@@ -392,9 +397,9 @@ func captureReviewSource(ctx context.Context, runtime GenerationRuntime) (guest.
 		if err != nil {
 			return guest.SourceSnapshot{}, err
 		}
-		return guest.ParseSourceSnapshot(encoded)
+		return guest.ParseSourceSnapshotWithBudget(encoded, budget)
 	}
-	return guest.CaptureCanonicalSourceSnapshot(ctx, runtime.InvokeTool)
+	return guest.CaptureCanonicalSourceSnapshotWithBudget(ctx, runtime.InvokeTool, budget)
 }
 
 type snapshotReviewRuntime struct {

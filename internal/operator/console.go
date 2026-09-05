@@ -15,6 +15,7 @@ import (
 	"codexos/internal/experiment"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 	"codexos/internal/store"
 )
 
@@ -193,6 +194,28 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 			return false, nil
 		}
 		return false, c.printStatus()
+	case "source-capacity":
+		if c.currentTurn() != nil {
+			return false, errors.New("previous generation Codex turn is still active")
+		}
+		value, ok := c.unsignedArgument(words, "source-capacity")
+		if !ok {
+			return false, nil
+		}
+		if value != sourcecapacity.Default && value != sourcecapacity.Expanded {
+			return false, fmt.Errorf("source content capacity must be %d or %d bytes", sourcecapacity.Default, sourcecapacity.Expanded)
+		}
+		runtime, ok := c.runtime.(interface {
+			SetSourceCapacity(sourcecapacity.Budget) error
+		})
+		if !ok {
+			return false, fmt.Errorf("source capacity provisioning is unavailable")
+		}
+		if err := runtime.SetSourceCapacity(sourcecapacity.Budget(value)); err != nil {
+			return false, err
+		}
+		c.recordOperator("source-capacity", "success", map[string]any{"source_content_bytes": value})
+		c.printLine(fmt.Sprintf("Source content capacity provisioned: %d bytes (plus snapshot framing). No generation started.", value))
 	case "history":
 		if !c.requireArity(words, 1, "history") {
 			return false, nil
@@ -499,6 +522,7 @@ func (c *PlainConsole) rollback(parent uint64) error {
 	generation, _ := c.runtime.GenerationNumber()
 	c.printLine(fmt.Sprintf("Generation %d started from generation %d.", generation, parent))
 	c.printLine("State: " + runtimeStateName(c.runtime.State()))
+	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", c.runtime.PresentationSnapshot().SourceCapacity.Bytes(), c.runtime.PresentationSnapshot().SourceCapacity.SnapshotLimit()))
 	if pid, ok := c.runtime.ActivePID(); ok {
 		c.printLine(fmt.Sprintf("QEMU PID: %d", pid))
 	} else {
@@ -689,6 +713,7 @@ func (c *PlainConsole) printHarnessIdentity(identity *provenance.HarnessIdentity
 func (c *PlainConsole) printHelp() {
 	for _, line := range []string{
 		"help        show these commands",
+		"source-capacity BYTES  provision 65536 or 1048576 content bytes at an inactive gate",
 		"status      show current runtime state",
 		"history     show archived generation lineage",
 		"inspect N   show archived generation N",
@@ -719,6 +744,7 @@ func (c *PlainConsole) printStatus() error {
 		c.printLine("Generation: none")
 	}
 	c.printLine("State: " + runtimeStateName(c.runtime.State()))
+	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", c.runtime.PresentationSnapshot().SourceCapacity.Bytes(), c.runtime.PresentationSnapshot().SourceCapacity.SnapshotLimit()))
 	if pid, ok := c.runtime.ActivePID(); ok {
 		c.printLine(fmt.Sprintf("QEMU PID: %d", pid))
 	} else {
@@ -802,6 +828,7 @@ func (c *PlainConsole) printInspection(item experiment.ArchivedGeneration) {
 	c.printLine("Transition: " + item.Transition)
 	c.printLine("Outcome: " + item.Outcome)
 	c.printLine("Archive: " + item.ArchivePath)
+	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", item.SourceCapacity.Bytes(), item.SourceCapacity.SnapshotLimit()))
 	c.printLine("Hardware:")
 	c.printLine("  Profile: " + item.Hardware.Profile)
 	c.printLine("  Machine: " + item.Hardware.Machine)

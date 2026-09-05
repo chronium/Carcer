@@ -81,6 +81,9 @@ type BuildHostService struct {
 // NewBuildHostService creates a build host-service owner. It does not start
 // a compiler or candidate VM.
 func NewBuildHostService(config BuildHostServiceConfig) (*BuildHostService, error) {
+	if err := config.BuildConfig.SourceCapacity.Validate(); err != nil {
+		return nil, err
+	}
 	staging := config.StagingDirectory
 	if staging == "" {
 		staging = "."
@@ -160,7 +163,7 @@ func (s *BuildHostService) HandleRequest(ctx context.Context, request guest.Host
 
 	snapshot := append([]byte(nil), request.Arguments[0]...)
 	if evidence != nil {
-		if files, decodeErr := guest.DecodeSourceSnapshot(snapshot); decodeErr == nil {
+		if files, decodeErr := guest.DecodeSourceSnapshotWithBudget(snapshot, s.buildConfig.SourceCapacity); decodeErr == nil {
 			contentSize := uint64(0)
 			for _, file := range files {
 				contentSize += uint64(len(file.Content))
@@ -467,7 +470,7 @@ func (s *CodexOSHostServices) finishGeneration(request guest.HostRequest) (guest
 	if !utf8.Valid(encodedHandoff) {
 		return finishResponse(request, FinishResponseHarnessFailure, []byte("handoff message is not valid UTF-8"))
 	}
-	if _, err := guest.DecodeSourceSnapshot(sourceSnapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(sourceSnapshot, s.buildService.buildConfig.SourceCapacity); err != nil {
 		return finishResponse(request, FinishResponseHarnessFailure, []byte(err.Error()))
 	}
 

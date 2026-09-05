@@ -28,6 +28,9 @@ func TestSourceCapacityBoundariesAndFraming(t *testing.T) {
 				t.Fatal(err)
 			}
 			files[1].Content = []byte{1}
+			if _, err := ParseSourceSnapshotWithBudget(encodeSnapshotFiles(files), budget); err == nil {
+				t.Fatal("decoder accepted aggregate overflow")
+			}
 			if _, err := EncodeSourceSnapshotWithBudget(files, budget); err == nil {
 				t.Fatal("accepted aggregate overflow")
 			}

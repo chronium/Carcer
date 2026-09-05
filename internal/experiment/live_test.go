@@ -1074,6 +1074,14 @@ func serveLiveHelperSerial(listener net.Listener, done <-chan struct{}) error {
 			}
 			payload := make([]byte, 4+len("tool:")+len(name))
 			copy(payload[4:], "tool:"+name)
+			if os.Getenv(liveQEMUHelperEnvironment) == "capacity" {
+				switch name {
+				case "list":
+					payload = append(make([]byte, 4), []byte("seed/kernel.c\n")...)
+				case "read":
+					payload = make([]byte, 4+1024*1024)
+				}
+			}
 			response = guest.Frame{MessageType: guest.InvokeToolResponse, RequestID: frame.RequestID, Payload: payload}
 		default:
 			return fmt.Errorf("unexpected serial message type %#x", frame.MessageType)

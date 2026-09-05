@@ -416,13 +416,14 @@ func (r *CodexOSRun) CaptureReviewSource(ctx context.Context) ([]byte, error) {
 	}
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()
-	snapshot, err := guest.CaptureCanonicalSourceSnapshot(operationContext, generation.toolClient.InvokeTool)
+	snapshot, err := guest.CaptureCanonicalSourceSnapshotWithBudget(operationContext, generation.toolClient.InvokeTool, r.SourceCapacity())
 	if err != nil {
 		r.recordLive("review_source_snapshot_failed", &number, map[string]any{})
 		return nil, err
 	}
 	r.recordLive("review_source_snapshot_captured", &number, map[string]any{
 		"source_snapshot_sha256": snapshot.SHA256(), "source_snapshot_bytes": snapshot.Size(),
+		"source_content_bytes": r.SourceCapacity().Bytes(),
 	})
 	return snapshot.Bytes(), nil
 }
@@ -551,9 +552,11 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	if err != nil {
 		return nil, qemu.HardwareManifest{}, err
 	}
+	buildConfig := options.BuildConfig
+	buildConfig.SourceCapacity = r.SourceCapacity()
 	generation.hostServices, err = build.NewCodexOSHostServices(build.HostServicesConfig{
 		StagingDirectory: filepath.Join(workspace, "builds"), CandidateValidator: validator,
-		BuildConfig: options.BuildConfig, FeatureRequestStore: r.live.featureStore,
+		BuildConfig: buildConfig, FeatureRequestStore: r.live.featureStore,
 		FeatureRecorded: func() { r.live.pendingFeatures.Add(1) },
 		Generation:      &number, EventLog: options.EventLog, Metrics: options.Metrics,
 		ActivityStream: options.ActivityStream, ProvidedAssets: r.live.provided, Provenance: r.live.provenance,
@@ -797,6 +800,7 @@ func (r *CodexOSRun) recordLiveGenerationStarted(number uint64, parent *uint64, 
 	profile := r.live.options.HardwareProfile
 	r.recordLive("generation_started", &number, map[string]any{
 		"transition": transition, "parent_generation": parent, "qemu_pid": pid,
+		"source_content_bytes": r.SourceCapacity().Bytes(), "source_snapshot_max_bytes": r.SourceCapacity().SnapshotLimit(),
 		"hardware_profile": profile.Profile, "vcpus": profile.VCPUs, "memory_mib": profile.MemoryMiB,
 	})
 	if source, reason, ok := r.OperatorFeedback(); ok {
