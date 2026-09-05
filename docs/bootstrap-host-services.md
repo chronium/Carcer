@@ -92,6 +92,8 @@ Only the current run/generation lineage's committed references authorize reads.
 Continuation and restart use the selected parent; rollback excludes later jobs.
 Cross-run inheritance copies/verifies selected artifacts before atomic destination
 publication and does not automatically enable execution or reads in the new run.
+The explicit initial-destination provisioning option makes inherited reads
+available before the first ready marker; see the operator setup guide.
 The read service has the same explicit background/startup availability scope as
 provided assets; review and interview models retain their existing restricted tools.
 

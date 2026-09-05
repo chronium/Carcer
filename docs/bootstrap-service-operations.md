@@ -277,11 +277,55 @@ publication. Copied blobs do not depend on the source store afterward. Source
 capacity remains explicit through `--inherit-source-capacity` when needed; artifact
 storage is separate. No additional artifact inheritance flag is required.
 
-The destination retains artifacts but starts **unprovisioned**. Inheriting bytes
-is not permission to execute jobs. Provision it at its first validated inactive
-gate with the pinned provided asset and worker setup. A fresh seed-only experiment
-has no bootstrap service or inherited artifacts. Historical references survive
-source continuation and destination rollback independently.
+The destination retains artifacts but starts **unprovisioned**, with both jobs
+and artifact reads disabled. Inheriting bytes is not permission to execute jobs.
+If its successor needs artifacts during boot, explicitly provision before the
+first boot with `--provision-inherited-bootstrap TCC_ASSET_ID`. This is the narrow
+initial-destination exception to the archived-gate rule; a seed-only run cannot
+use it. Existing runs still use `bootstrap provision` at their archived gate.
+
+After installing the dedicated worker, limits, pinned image and provided asset
+as described above, an example initial invocation is:
+
+```bash
+bootstrap_source_run=/srv/codexos/experiment-004
+bootstrap_destination_run=/srv/codexos/experiment-005
+bootstrap_generation=0 # Set to the selected latest completed source generation.
+printf -v bootstrap_generation_name 'generation-%04d' "$bootstrap_generation"
+bootstrap_base_ref="$(basename "$bootstrap_source_run")/$bootstrap_generation_name"
+
+/usr/local/bin/codexos-go \
+  --run-directory "$bootstrap_destination_run" \
+  --initial-iso "$bootstrap_source_run/$bootstrap_generation_name/successor/codexos.iso" \
+  --inherit-from-run "$bootstrap_source_run" \
+  --inherit-from-generation "$bootstrap_generation" \
+  --inherit-source-capacity 1048576 \
+  --provision-inherited-bootstrap tcc-0fb54300 \
+  --provided-assets /shared/assets \
+  --git-repository /home/chronium/src/CodexOS \
+  --git-base-ref "$bootstrap_base_ref" \
+  --tui
+```
+
+The destination must not exist when using inheritance flags. The explicit source
+capacity in this example is independent of opaque artifact storage. The operator
+validates source/archive/Git identities during inheritance, then checks the
+persisted destination provenance, exact initial ISO, absence of archived/partial
+or started generations, inherited artifact identities/quotas, frozen TCC asset
+and worker availability. Only then does it atomically enable the destination.
+`--initial-iso` subsequently starts generation zero; pre-ready artifact reads are
+available during that boot. Starting `agent` remains a separate action. Neither
+operation changes feature request #3's status.
+
+A failed provisioning probe starts no guest and leaves the already published
+inherited destination disabled. After correcting setup, retry that destination
+with the same `--initial-iso`, `--provision-inherited-bootstrap`, provided-assets
+and Git arguments, **omitting** `--inherit-from-run`, `--inherit-from-generation`
+and `--inherit-source-capacity`; those settings are already persisted. Successful
+pre-boot provisioning is idempotent until generation zero starts. Its permission
+survives restart; no new flag is needed to preserve it. Initial provisioning is
+rejected once a generation start record or archive exists. Historical references
+survive source continuation and destination rollback independently.
 
 For reproducible verification and measured limitations, see
 [bootstrap acceptance evidence](bootstrap-service-acceptance.md) and the

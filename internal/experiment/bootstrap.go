@@ -1,10 +1,13 @@
 package experiment
 
 import (
+	"codexos/internal/provenance"
+	"codexos/internal/store"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"codexos/internal/bootstrap"
@@ -136,4 +139,62 @@ func (r *CodexOSRun) GarbageCollectBootstrap() error {
 		r.recordLive("bootstrap_artifacts_reclaimed", r.generationNumber, map[string]any{"jobs": n})
 	}
 	return e
+}
+
+// ProvisionInitialBootstrap is the explicit pre-boot exception to the archived
+// gate rule. It is restricted to a validated, unstarted inherited destination.
+func (r *CodexOSRun) ProvisionInitialBootstrap(ctx context.Context, asset, initialISO string) error {
+	if r == nil || r.live == nil {
+		return errors.New("initial bootstrap provisioning requires a configured live owner")
+	}
+	r.live.operationMu.Lock()
+	defer r.live.operationMu.Unlock()
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if r.state != RuntimeStateStopped || r.generationNumber != nil || r.transitioning || r.retainedFinish != nil || r.live.closed || r.live.started || r.liveGeneration() != nil {
+		return errors.New("initial bootstrap provisioning requires an unstarted inherited destination")
+	}
+	inherited, e := store.LoadCrossRunBootstrap(r.runDirectory)
+	if e != nil {
+		return e
+	}
+	if inherited == nil {
+		return errors.New("initial bootstrap provisioning requires cross-run provenance")
+	}
+	if e = inherited.VerifyInitialISO(initialISO); e != nil {
+		return e
+	}
+	archives, e := LoadArchivedGenerations(r.runDirectory)
+	if e != nil {
+		return e
+	}
+	partial, e := partialGenerationState(r.runDirectory)
+	if e != nil {
+		return e
+	}
+	if len(archives) != 0 || len(partial) != 0 {
+		return errors.New("initial bootstrap destination already has generation state")
+	}
+	if _, e = os.Lstat(provenance.HarnessGenerationRecordPath(r.runDirectory, 0)); !errors.Is(e, os.ErrNotExist) {
+		return errors.New("initial bootstrap destination already has a generation start record")
+	}
+	if e = r.configureLiveAssets(0); e != nil {
+		return e
+	}
+	found := false
+	if r.live.provided != nil {
+		for _, a := range r.live.provided.Metadata() {
+			if a.ID == asset && a.SHA256 == bootstrap.TCCSHA256 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		return errors.New("provided assets do not contain the pinned upstream TCC archive under that ID")
+	}
+	if e = bootstrap.ProvisionInherited(ctx, r.runDirectory, asset, r.live.options.BootstrapClient); e != nil {
+		return e
+	}
+	r.recordLive("bootstrap_service_provisioned", nil, map[string]any{"initial_destination": true, "image": bootstrap.Image, "tcc_commit": bootstrap.TCCCommit, "tcc_sha256": bootstrap.TCCSHA256, "tcc_asset": asset, "limits": bootstrap.Baseline()})
+	return nil
 }

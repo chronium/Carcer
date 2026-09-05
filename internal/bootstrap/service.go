@@ -17,7 +17,7 @@ import (
 	"codexos/internal/sourcecapacity"
 )
 
-// Client always uses the fixed installed worker in production. The unexported
+// Client always uses the fixed installed worker in production.
 // Command is a trusted process input for disposable integration fixtures, never
 // populated by the operator CLI, persisted configuration or guest requests.
 type Client struct{ Command []string }

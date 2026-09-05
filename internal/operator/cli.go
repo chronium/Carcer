@@ -14,21 +14,22 @@ import (
 // provisioning extensions to the reference operator console. Paths remain
 // uninterpreted until the concrete runtime owns their validation.
 type Options struct {
-	RunDirectory             string
-	InitialISO               string
-	InitialISOConfigured     bool
-	ResumeAtGate             bool
-	GitRepository            string
-	GitBaseRef               string
-	GitConfigured            bool
-	InheritFromRun           string
-	InheritFromGeneration    int64
-	InheritanceRequested     bool
-	InheritSourceCapacity    sourcecapacity.Budget
-	ProvidedAssets           string
-	ProvidedAssetsConfigured bool
-	OTLPEndpoint             string
-	UseTUI                   bool
+	ProvisionInheritedBootstrap string
+	RunDirectory                string
+	InitialISO                  string
+	InitialISOConfigured        bool
+	ResumeAtGate                bool
+	GitRepository               string
+	GitBaseRef                  string
+	GitConfigured               bool
+	InheritFromRun              string
+	InheritFromGeneration       int64
+	InheritanceRequested        bool
+	InheritSourceCapacity       sourcecapacity.Budget
+	ProvidedAssets              string
+	ProvidedAssetsConfigured    bool
+	OTLPEndpoint                string
+	UseTUI                      bool
 }
 
 // NewCommand constructs the compatible Cobra command and invokes run only
@@ -85,6 +86,9 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 				}
 				options.InheritSourceCapacity = sourcecapacity.Budget(inheritSourceCapacity)
 			}
+			if flags.Changed("provision-inherited-bootstrap") && (options.ProvisionInheritedBootstrap == "" || !initialSet || !gitRepositorySet) {
+				return errors.New("--provision-inherited-bootstrap requires an asset ID, --initial-iso and Git provenance options")
+			}
 			if plain && tui {
 				return errors.New("--plain and --tui are mutually exclusive")
 			}
@@ -113,6 +117,7 @@ func NewCommand(terminalSupported bool, run func(context.Context, Options) error
 	flags.StringVar(&options.InheritFromRun, "inherit-from-run", "", "bootstrap a fresh run from one validated source run")
 	flags.Int64Var(&options.InheritFromGeneration, "inherit-from-generation", 0, "completed source generation whose selected successor is inherited")
 	flags.IntVar(&inheritSourceCapacity, "inherit-source-capacity", sourcecapacity.Default, "explicit destination content-byte budget for cross-run bootstrap (65536 or 1048576)")
+	flags.StringVar(&options.ProvisionInheritedBootstrap, "provision-inherited-bootstrap", "", "explicitly provision bootstrap for a validated inherited destination before its first boot")
 	flags.StringVar(&options.ProvidedAssets, "provided-assets", "", "freeze and expose assets from this explicit external directory")
 	flags.StringVar(&options.OTLPEndpoint, "otlp-endpoint", "", "OTLP/HTTP metrics endpoint")
 	flags.BoolVar(&plain, "plain", false, "force the line-oriented console even on an interactive terminal")

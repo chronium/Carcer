@@ -203,6 +203,32 @@ func serveSerial(listener net.Listener, done <-chan struct{}, lifecycle, activeL
 		_ = connection.Close()
 		_ = listener.Close()
 	}()
+	if id := os.Getenv("CODEXOS_DISPOSABLE_BOOTSTRAP_ARTIFACT"); id != "" {
+		request, err := encodeHostServiceRequest(91, "read_bootstrap_artifact", [][]byte{[]byte(id), []byte("0"), []byte("12")})
+		if err != nil {
+			return err
+		}
+		if _, err = connection.Write(request); err != nil {
+			return err
+		}
+		response, err := guest.ReadFrame(connection)
+		if err != nil {
+			return err
+		}
+		want := uint32(0)
+		if os.Getenv("CODEXOS_DISPOSABLE_BOOTSTRAP_DISABLED") == "1" {
+			want = 2
+		}
+		if response.RequestID != 91 || len(response.Payload) < 4 || binary.LittleEndian.Uint32(response.Payload) != want {
+			return errors.New("incorrect pre-ready artifact authorization")
+		}
+		if want == 0 && string(response.Payload[4:]) != "boot runtime" {
+			return errors.New("incorrect inherited boot bytes")
+		}
+		if err = os.WriteFile(os.Getenv("CODEXOS_DISPOSABLE_BOOTSTRAP_READ_MARKER"), []byte("read before ready"), 0600); err != nil {
+			return err
+		}
+	}
 	if _, err := io.WriteString(connection, guest.ReadyMarker); err != nil {
 		return err
 	}

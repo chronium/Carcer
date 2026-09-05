@@ -264,7 +264,8 @@ session. An aborted gate instead requires an explicit rollback selection.
 
 ## Optional Go Linux bootstrap facilities
 
-When explicitly provisioned at an inactive gate, the Go harness can expose
+When explicitly provisioned at an inactive gate or for a validated inherited
+destination before its first boot, the Go harness can expose
 `bootstrap_job` and `read_bootstrap_artifact` through the existing host-service
 protocol. The implementor context reports actual configuration independently of
 feature approval. Job commands execute only inside the rootless Linux sandbox;

@@ -243,7 +243,8 @@ framing limits, compatibility, and post-merge provisioning of request #4.
 rootless worker lifecycle, safe frozen output collection and immutable opaque
 artifact storage. `cmd/codexos-bootstrap` is the fixed dedicated-account worker;
 it is installed separately and receives no harness/run storage access.
-`internal/experiment` owns inactive-gate provisioning, invocation scope and
+`internal/experiment` owns inactive-gate and explicit inherited pre-boot
+provisioning, invocation scope and
 cancellation, generation reference freezing, and selected-parent authorization.
 `internal/store` includes selected artifact copying in atomic cross-run bootstrap.
 The existing guest dispatcher and agent delivery/review lifecycle remain in place.

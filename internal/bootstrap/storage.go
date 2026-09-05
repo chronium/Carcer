@@ -354,8 +354,11 @@ func Provision(run, root, asset string) error {
 	return syncDir(root)
 }
 func ReadReferences(directory string) (*References, error) {
+	return readReferencesFile(filepath.Join(directory, ReferencesFilename))
+}
+func readReferencesFile(path string) (*References, error) {
 	var r References
-	e := readJSON(filepath.Join(directory, ReferencesFilename), &r, MaxManifest)
+	e := readJSON(path, &r, MaxManifest)
 	if errors.Is(e, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -933,4 +936,37 @@ func GarbageCollect(run string) (int, error) {
 
 func NewReferences(c Config, generation uint64) References {
 	return References{Version: 1, Enabled: c.Enabled, TCCAsset: AssetRef{c.TCCAsset, TCCSHA256}, Image: Image, RunID: c.RunID, Generation: generation, Limits: Baseline()}
+}
+
+// ProvisionInherited is called only after the runtime validates an unstarted
+// cross-run destination and its frozen TCC asset. It authorizes existing copied
+// bytes, never creates a fresh store or inherits an execution grant.
+func ProvisionInherited(ctx context.Context, run, asset string, client *Client) error {
+	c, e := LoadConfig(run)
+	if e != nil {
+		return e
+	}
+	if c == nil || c.TCCAsset != asset {
+		return errors.New("initial bootstrap provisioning requires matching inherited artifacts")
+	}
+	refs, e := readReferencesFile(filepath.Join(run, "bootstrap-inherited.json"))
+	if e != nil {
+		return e
+	}
+	if refs == nil || refs.Generation != 0 || refs.Enabled || refs.TCCAsset.ID != asset {
+		return errors.New("initial bootstrap inheritance references are missing or invalid")
+	}
+	s, e := LockStorage(*c)
+	if e != nil {
+		return e
+	}
+	defer s.Close()
+	if e = s.Validate(refs); e != nil {
+		return e
+	}
+	if e = client.Probe(ctx); e != nil {
+		return e
+	}
+	c.Enabled = true
+	return atomicJSON(filepath.Join(run, ConfigFilename), c)
 }

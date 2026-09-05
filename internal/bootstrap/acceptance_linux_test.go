@@ -161,9 +161,9 @@ printf reused >/work/out/result
 	if e != nil || cfg.Enabled {
 		t.Fatal("cross-run capability silently enabled")
 	}
-	if e = Provision(destination, cfg.Storage, cfg.TCCAsset); e != nil {
+	if e = ProvisionInherited(ctx, destination, cfg.TCCAsset, c); e != nil {
 		t.Fatal(e)
-	} // disposable gate fixture only
+	} // storage-level fixture; the operator workflow is covered in internal/operator
 	inherited, e := NewService(destination, 0, nil, []Asset{svc.assets["tcc"]}, svc.readAsset)
 	if e != nil {
 		t.Fatal(e)
