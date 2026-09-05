@@ -8,7 +8,8 @@ Run inside a bootstrap job:
     sh /inputs/source/seed/sdk/compile.sh /inputs/source/seed /work/out/example /inputs/source/seed/user/example.c.inc
 
 Additional positional arguments may name any C or preprocessed assembly source
-files (.c, .c.inc, .S, .S.inc). Define int main(void). The script compiles all
+files (.c, .c.inc, .S, .S.inc). Define int main(void) or
+int main(int argc,char **argv). The script compiles all
 sources, startup and runtime, statically links ELF, then validates and packages
 CXE2. It creates example.elf and example.cxe. No workload list is built into
 compile.sh, the packager, loader or scheduler. Multiple compilation jobs have
@@ -30,19 +31,22 @@ For fixture rebuilds, stage at a fresh path before replacing any persisted binar
 Binary tool replies use base64; do not interpret them as UTF-8 text.
 
 Protocol run(path) and syscall spawn(path,length) use the same generic CXE loader.
-The guest advertises run/reap but this session lacks their callable bindings;
-request #6 is pending. The runnable path currently verified is compile, artifact
-import into seed/user/, trusted build, and boot regression using tfile/user spawn.
-A fresh arbitrary live launch via external tools is not claimed.
+Request #6 is approved and its callable run/reap bindings have been exercised:
+the inherited report returned status 42. Candidate boot regression additionally
+exercises syscall 13 argument launch. See ../LAUNCH.md for a file-driven user
+launcher using the existing run(path) binding. Build validates a candidate; it
+does not replace the current running generation's kernel.
 
 ## ABI and runtime
 See ../USER_ABI.md for syscalls and image layout. cx.h supplies wrappers for all
-existing calls 0..12 using byte spans and UINT64_MAX as failure. No errno or file
+existing calls 0..13 using byte spans and UINT64_MAX as failure. No errno or file
 descriptor layer. The compiler convention is ordinary x86-64 System V C calls
 inside the program; the kernel int 0x80 interface is CodexOS-specific.
-Startup clears DF, aligns RSP to 16 before calling main with no arguments,
-and exits with main's return value zero-extended from 32 bits. cx_exit accepts
-a full 64-bit status. There is no argc/argv/environment/TLS ABI.
+Startup clears DF, aligns RSP to 16 and calls main preserving the entry RDI/RSI
+as argc/argv, then exits with main's return value zero-extended from 32 bits.
+cx_exit accepts a full 64-bit status. Legacy launch supplies argc=0, argv=NULL;
+cx_spawn_args supplies a private argument vector. See ../USER_ABI.md for limits.
+Environment and TLS remain absent.
 
 Runtime: memcpy, memmove, memset, memcmp, strlen and cx_alloc.
 cx_alloc is a 16-byte-aligned monotonic allocator backed by page-aligned brk
@@ -72,8 +76,8 @@ pure BSS segments are retained. Input and output are bounded to 16 MiB each.
 It is not an ELF interpreter or an x86 instruction validator.
 
 ## Validation and artifacts
-build.sh rebuilds spin, child and report through the general command and runs
-the packager self-test. Self-tests exercise successful packaging, BSS-only
+build.sh rebuilds spin, child, report, launch, sha256, argchild and argtest
+through the general command and runs the packager and SHA-256 self-tests. Self-tests exercise successful packaging, BSS-only
 segments and 18 malformed/boundary cases. sdk_tests.h exercises the imported
 binary files at boot through the production loader. See ../ENGINEERING.md.
 
@@ -97,8 +101,9 @@ Neither failure was counted as successful executable validation.
 
 Supplied DOOM.EXE and DOOM.WAD have not been changed or run. Their DOS/4G
 compatibility remains separate generic userland work. Display observation and
-input injection remain pending (#2), as does operator request #3. The SDK's
-existence does not change those requests' authoritative status.
+input injection remain pending (#2). Operator request #3 is now approved
+within the documented freestanding scope; request #6 tool bindings are also
+approved. These do not provide DOS/4G compatibility.
 
 Final general-command validation job:
 ce72241b4a3e80ef7870be1cf4c16cdee8202f84c180006a17f4af43aeb3fc0d

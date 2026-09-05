@@ -7,7 +7,7 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments.
 
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
@@ -28,6 +28,35 @@ Kernel C uses general-regs-only; CPU setup precedes other initialization. Each e
 Freestanding C/assembly development: see sdk/README.md and sdk/cx.h. The guest-owned
 SDK uses the approved host bootstrap executor to build static CXE2 files and
 provides startup, all current syscall wrappers and a small runtime. This adds no
-new kernel syscall or user launch convention; argc/argv, TLS and full libc remain
-absent. Exact separately compiled fixtures under seed/user/ run in boot regression
+TLS or full libc support. Syscall 13 adds argument launch as documented below.
+Exact separately compiled fixtures under seed/user/ run in boot regression
 through the same loader as ordinary spawn/run.
+
+## Argument launch (13)
+
+RDI=executable path address, RSI=path byte length, RDX=argument-span vector,
+RCX=argument count. Each span is two little-endian uint64 fields: address, length.
+Return is a reusable task slot ID or UINT64_MAX. No implicit argv[0] is added.
+Count is 0..32. Total string bytes PLUS one terminator per argument is <=4096.
+Empty strings are permitted and their addresses are ignored. Nonempty strings
+must be readable and contain no NUL; bytes need not be UTF-8. Paths retain
+their existing UTF-8/path rules. With count zero the vector address is ignored.
+Invalid vectors, length/range overflow, bad strings, loader/resource errors fail
+without publishing a runnable child or consuming a slot. GPRs except RAX and
+the supported FP state follow the existing syscall preservation rules.
+
+The kernel snapshots all spans/strings under the scheduling CPU's interrupt lock
+before loading. On success it writes independent NUL-terminated strings and a
+NULL-terminated uint64 pointer vector into the child's private RW/NX stack.
+At entry RDI=argc, RSI=argv, RSP is 16-byte aligned and equals argv. Strings and
+vector are at/above initial RSP; the C call stack grows below them. The maximum
+argument payload/vector uses 4368 of the 65536 mapped stack bytes, including
+alignment. Arguments are writable by the child without modifying the parent.
+All image permissions, guards, heap bounds and loader rules remain unchanged.
+
+Legacy syscall 5, protocol run(path), and raw tuser launches retain RDI=RSI=0
+and RSP=0x40000000. An SDK main(int argc,char **argv) sees argc=0, argv=NULL
+on legacy launch. In contrast, argument launch with zero arguments supplies a
+valid vector containing one NULL. Both main(void) and main(int,char **) are
+supported by SDK startup; no environment, TLS or shell syntax is implied.
+See LAUNCH.md for an ordinary userland file-driven launcher and checksum tool.

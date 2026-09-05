@@ -1,3 +1,5 @@
+/* Legacy launch supplies RDI=RSI=0. Argument launch supplies argc/argv.
+ * Preserve them across stack alignment for the ordinary C main call. */
 .section .text.start,"ax",@progbits
 .global _start
 .type _start,@function

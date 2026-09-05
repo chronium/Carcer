@@ -31,6 +31,14 @@ static inline uint64_t cx_write(const char *p,size_t n,uint64_t off,const void *
 static inline uint64_t cx_spawn(const char *p,size_t n) {
     return cx_call(5,(uintptr_t)p,n,0,0,0,0);
 }
+/* Each span excludes its terminator. At most 32 spans, 4096 bytes including
+ * the added NULs. Empty spans are allowed; embedded NULs are rejected.
+ * No implicit argv[0]: the caller supplies every argument. */
+struct cx_arg { const char *data; uint64_t size; };
+static inline uint64_t cx_spawn_args(const char *p,size_t n,
+                                     const struct cx_arg *args,size_t count) {
+    return cx_call(13,(uintptr_t)p,n,(uintptr_t)args,count,0,0);
+}
 static inline uint64_t cx_reap(uint64_t task,uint64_t *status) {
     return cx_call(6,task,(uintptr_t)status,0,0,0,0);
 }

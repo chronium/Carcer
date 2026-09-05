@@ -90,34 +90,38 @@ the previous zero counted retained jobs, not execution permission. Artifact read
 and binary-safe imports have been exercised. See sdk/README.md for the guest-owned
 freestanding C/assembly-to-CXE2 build path and ordinary compiled user regressions.
 The host provides bounded Linux execution; the SDK/runtime/packaging are guest
-source. Request #3 remains pending and is not fulfilled by this provisioning.
+source. Request #3 is now approved, with operator note "fulfilled within the
+documented freestanding scope"; it supplies no broader runtime compatibility.
 
 ## Provisioning and remaining work
 
-Approved: immutable provided-asset list/read services (request 1), expanded
-source capacity (request 4), and bootstrap execution (request 5). Hardware is experiment-v1 q35/KVM host CPU, 4 vCPUs,
-8 GiB RAM, headless std-vga, no NIC or writable block device. Scheduling uses one
-CPU. Guest RAM files, sealed imports, display output, CXE1/CXE2 loading, preemption,
-sleep, spawn, reap and blocking wait are implemented.
+Approved: immutable provided-asset services (1), the generic compilation path
+within its documented freestanding scope (3), expanded source capacity (4),
+bootstrap execution (5), and bindings for run/reap/import_provided_asset (6).
+Request 2, display observation/input injection, remains pending and unavailable.
+Hardware is experiment-v1 q35/KVM host CPU, 4 vCPUs, 8 GiB RAM, headless std-vga,
+no NIC or writable block device. Scheduling uses one CPU. Guest RAM files,
+sealed imports, display output, CXE1/CXE2 loading, preemption, sleep, spawn,
+reap, blocking wait and argument launch are implemented. The guest-owned SDK
+builds ordinary freestanding C/assembly programs with the provisioned bootstrap
+executor. There is no guest-native compiler, full libc or arbitrary executable
+compatibility. Older request #5 decision notes saying #3 pending are historical;
+the authoritative request #3 status is approved.
 
-Pending, unavailable as trusted dependencies: display observation/input injection
-(request 2), a complete compiler pipeline provisioned by the operator (request 3),
-and bindings for the already implemented run/reap/import_provided_asset tools
-(request 6). These tools are advertised by the guest but absent from this session's
-callable tool catalog. No arbitrary live launch through them has been demonstrated.
-The guest-owned SDK now builds ordinary freestanding C/assembly programs using
-the approved bootstrap executor; boot regressions launch imported binary files
-through tfile, the same generic loader used by spawn and protocol run.
-This does not provide a guest-native compiler, full libc or arbitrary executable
-compatibility.
+Live external run of seed/user/report.cxe returned task 1, reap returned 42,
+and the expected binary result prefix was read before deleting the output.
+The hello provided asset was imported at runtime/supplied-hello.c; its exact
+105 bytes were read and an attempted write returned tool status 1. This immutable
+RAM import does not persist to the next generation. New syscall 13 is tested
+in candidate boots; build does not replace the inherited running kernel.
 
 Doom has not run. The immutable supplied DOOM.EXE is MZ-bound DOS/4G/Watcom and
 unsupported by the current loaders. DoomGeneric is source-only. A compiler
 service alone would not provide supplied-executable compatibility. Neither
 asset identity nor a future milestone supplies a missing trusted capability.
 
-Still absent: input/audio ABI, guest-native compiler/full userland runtime, launch
-arguments/environment, ownership/security model, stable generation-tagged task
+Still absent: input/audio ABI, guest-native compiler/full userland runtime,
+environment variables, ownership/security model, stable generation-tagged task
 handles, wait timeouts, user cancellation, mmap/shared memory/threads, persistent
 storage and general kernel preemptibility. Most kernel work disables interrupts;
 immutable file copies are the existing preemptible exception. Task0 is always
@@ -138,3 +142,32 @@ counter progress, correct output bytes and recovery of page/file counts.
 No loader, scheduler, syscall or FP entry behavior was changed for this work.
 The compiled fixtures are ordinary mutable files under seed/ so their exact
 binary bytes persist with the source. They are not supplied Doom assets.
+
+## Argument launch and reusable user utilities
+
+See USER_ABI.md and LAUNCH.md. tasks.c owns syscall 13: getargs snapshots bounded
+user spans; launchargs uses the ordinary loadfile path then installs stack
+arguments before interrupts can expose the child to scheduling. Public tfile now
+holds the interrupt lock over file lookup and load, rather than relying on every
+caller to lock. Existing tuser and no-argument ABI are preserved. No scheduler,
+interrupt entry/return, FP context, format or workload-specific path was added.
+
+args_tests.h is boot-only and exercises compiled argtest/argchild, launch and
+sha256 binaries with the independently progressing non-syscalling spin fixture.
+It covers zero/maximum counts and bytes, unaligned cross-page vectors and strings,
+empty and non-UTF-8 arguments, invalid/overflowing ranges, NUL rejection,
+parent/child string and vector independence, slot reuse, full table rejection,
+every task-page allocation failure, and successful launch after failures.
+Task-page failure injection is task_page_budget, unlimited during normal work.
+Only this boot regression changes it with interrupts disabled and resets it
+before scheduling resumes. It covers image, stack and page-table partial cleanup
+without exhausting actual physical RAM. All page and file counts must recover.
+
+Launcher tests verify exact 0x1234567887654321 and fault UINT64_MAX propagation,
+malformed descriptions, missing inputs, preservation of existing output files,
+and SHA-256 digests of empty input, abc, one million a bytes and 55/56/63/64 a
+bytes. Boundary vectors were independently obtained with the host sha256sum.
+Independent source review found no correctness issues; its three suggested
+coverage additions are implemented above. Trusted candidate compile, boot and
+canonical protocol validation passed with those additions. Final artifact
+metadata/rebuild command and remaining limitations are in LAUNCH.md.

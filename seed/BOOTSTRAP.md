@@ -92,9 +92,9 @@ guest compiler. Request #5 is approved: bootstrap execution permits new jobs
 under the stated service limits. Zero retained jobs was not a denial of execution.
 The operator says four jobs was the requested batch, not an enforced harness quota.
 
-Request #3 for a complete generic user compilation pipeline remains pending.
-Guest-owned startup/syscall support, small runtime, compilation scripts and
-ELF-to-CXE2 packaging are now implemented in sdk/ and have produced boot-tested
+Request #3 is approved with operator note "fulfilled within the documented
+freestanding scope." Guest-owned startup/syscall support, small runtime,
+compilation scripts and ELF-to-CXE2 packaging in sdk/ have produced boot-tested
 ordinary user binaries. This uses the provisioned host executor; it is not a
 guest-native compiler port or full libc. No supplied Doom executable has run.
 
@@ -110,7 +110,15 @@ Request #2 for display observation/input injection remains pending. The immutabl
 DOS/4G/Watcom DOOM.EXE remains unsupported by CXE loaders. Any compatibility path
 must be generic userland work and preserve supplied executable/data bytes.
 
-Request #6 asks for trusted bindings to existing run/reap/import_provided_asset
-guest tools. Pending; their absence from the callable catalog remains a separate
-constraint from bootstrap execution. Boot-time integration tests use tfile and
-user spawn/wait to validate imported CXE2 files without relying on those bindings.
+Request #6 is approved: run/reap/import_provided_asset are callable in this
+session. Live run of the inherited compiled report returned a task slot; reap
+returned 42. A small supplied hello asset was imported and rejected mutation.
+New argument launch is validated by candidate boot tests; the current running
+kernel changes only on generation transition. LAUNCH.md documents a file-driven
+userland launch route that uses the existing run(path) binding.
+
+Operational note from the operator's abandoned-generation report: a progressing
+large read exceeded a harness serial receive deadline and closed that bridge.
+Use small source/read replies (this generation used <=6000 source bytes per
+read and small binary artifacts). Per-service legal maximum lengths do not
+establish that every serial transfer fits the external deadline.
