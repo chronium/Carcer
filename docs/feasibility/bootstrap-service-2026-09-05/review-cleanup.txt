@@ -1,0 +1,8 @@
+{
+  "utc": "2026-09-05T09:15:40.876335+00:00",
+  "containers": [],
+  "acceptance_units": "",
+  "fixture_or_job_processes": [],
+  "removed_input_directory": "/tmp/bootstrap-review-inputs-lIVL6e",
+  "note": "Pinned source acquired only; no image acquisition, live provisioning or real container jobs in this review follow-up."
+}

@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -146,6 +147,9 @@ func runWithIOConfigured(
 		return errors.New("--git-repository and --git-base-ref must be supplied together")
 	}
 	gitConfigured := options.GitConfigured || options.GitRepository != "" || options.GitBaseRef != ""
+	if options.ProvisionInheritedBootstrap != "" && (!initialISOConfigured || !gitConfigured) {
+		return errors.New("--provision-inherited-bootstrap requires --initial-iso and Git provenance options")
+	}
 	inheritanceRequested := options.InheritanceRequested || options.InheritFromRun != "" || options.InheritFromGeneration != 0
 	if inheritanceRequested && options.InheritFromGeneration < 0 {
 		return errors.New("--inherit-from-generation must not be negative")
@@ -244,6 +248,12 @@ func runWithIOConfigured(
 		}
 	}
 
+	if options.ProvisionInheritedBootstrap != "" {
+		if err = runtime.ProvisionInitialBootstrap(ctx, options.ProvisionInheritedBootstrap, options.InitialISO); err != nil {
+			return err
+		}
+		fmt.Fprintln(output, "Inherited bootstrap service explicitly provisioned before initial boot; feature request #3 status is unchanged.")
+	}
 	if options.ResumeAtGate {
 		err = runtime.ReopenAtGate()
 	} else {

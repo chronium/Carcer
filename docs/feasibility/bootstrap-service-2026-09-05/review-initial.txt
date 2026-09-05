@@ -1,0 +1,20 @@
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/disabled
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/enabled
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/bad-refs
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/partial
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/wrong-image
+=== RUN   TestRunnerProvisionsInheritedBootstrapBeforeBoot/worker-failure
+--- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot (0.83s)
+    --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/disabled (0.09s)
+    --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/enabled (0.14s)
+    --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin (0.18s)
+        --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/bad-refs (0.05s)
+        --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/partial (0.04s)
+        --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/wrong-pin/wrong-image (0.03s)
+    --- PASS: TestRunnerProvisionsInheritedBootstrapBeforeBoot/worker-failure (0.24s)
+=== RUN   TestInitialBootstrapCLIRejectsInvalidOpening
+--- PASS: TestInitialBootstrapCLIRejectsInvalidOpening (0.00s)
+PASS
+ok  	codexos/internal/operator	0.865s

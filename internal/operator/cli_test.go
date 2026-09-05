@@ -194,3 +194,17 @@ func TestCommandInheritanceSourceCapacity(t *testing.T) {
 		}
 	}
 }
+
+func TestInitialBootstrapCLIRejectsInvalidOpening(t *testing.T) {
+	for _, args := range [][]string{
+		{"--initial-iso", "seed.iso", "--provision-inherited-bootstrap", "tcc"},
+		{"--resume-at-gate", "--provision-inherited-bootstrap", "tcc", "--git-repository", "repo", "--git-base-ref", "base"},
+		{"--initial-iso", "seed.iso", "--provision-inherited-bootstrap", "", "--git-repository", "repo", "--git-base-ref", "base"},
+	} {
+		command := NewCommand(false, func(context.Context, Options) error { t.Fatal("invalid provisioning reached runner"); return nil })
+		command.SetArgs(append([]string{"--run-directory", "new"}, args...))
+		if e := command.Execute(); e == nil || !strings.Contains(e.Error(), "--provision-inherited-bootstrap requires") {
+			t.Fatalf("%v: %v", args, e)
+		}
+	}
+}

@@ -1,0 +1,6 @@
+ok  	codexos/internal/bootstrap	0.510s
+ok  	codexos/internal/store	0.706s
+ok  	codexos/internal/experiment	0.722s
+ok  	codexos/internal/build	0.953s
+ok  	codexos/internal/agent	0.636s
+ok  	codexos/internal/operator	2.020s

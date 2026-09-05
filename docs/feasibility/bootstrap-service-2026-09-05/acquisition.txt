@@ -1,0 +1,17 @@
+From https://repo.or.cz/tinycc
+ * branch            0fb54300b56512754221d80adda85ddb9815bceb -> FETCH_HEAD
+/tmp/codexos-bootstrap-acceptance-inputs/tcc-source.tar: OK
+Trying to pull docker.io/library/gcc@sha256:a689e29bc3adf4663ef9a141d23081252764d1319c63f591a027bd6fd676f4c1...
+Getting image source signatures
+Copying blob sha256:cb5a73f350df833520583b55ef32e4e2dac35764096a7ac3a323270feddc41c5
+Copying blob sha256:c2e76af9483f2d17a3e370639403df2c53a3da1480d533116a8694cd91f15d5a
+Copying blob sha256:ebed137c7c18cb1906fb8314eabc10611ddf49a281f8c1b5eab987a7137f749f
+Copying blob sha256:37f838b71c6b82c581b7543a313255b8c99c23cc9d96c1ad6f9f5f208c942553
+Copying blob sha256:13389305062dc769148c32e0f488c061f24c7e3020f7b786b55d4c561ae50b91
+Copying blob sha256:873a4c80287477653c01b20948fc34bb1bacf0f826bcc2ddc3bd2fe25b342d45
+Copying blob sha256:9288ebdd9645ff1b67a11b23e245cc1aff6f8f7448f6b23ed250786bd80b85a6
+Copying blob sha256:26bfb03bfcf4cda9ade76e118c1239bccf4546bf626329aebac61b3ce8da0287
+Copying config sha256:f3d916a4884034b89cb6148781f07d8c92d94b6c6dc1b74dcbec3475d16400da
+Writing manifest to image destination
+f3d916a4884034b89cb6148781f07d8c92d94b6c6dc1b74dcbec3475d16400da
+Acquisition complete; no container job or run has been started.

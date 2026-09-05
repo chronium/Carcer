@@ -1,0 +1,15 @@
+ok  	codexos/cmd/codexos	3.088s
+?   	codexos/cmd/codexos-bootstrap	[no test files]
+ok  	codexos/internal/agent	4.190s
+ok  	codexos/internal/bootstrap	3.240s
+ok  	codexos/internal/build	2.905s
+ok  	codexos/internal/codexapp	1.288s
+ok  	codexos/internal/experiment	32.368s
+ok  	codexos/internal/guest	4.189s
+ok  	codexos/internal/observability	1.313s
+ok  	codexos/internal/operator	13.742s
+ok  	codexos/internal/provenance	2.023s
+ok  	codexos/internal/qemu	7.319s
+ok  	codexos/internal/sourcecapacity	1.008s
+ok  	codexos/internal/store	1.846s
+ok  	codexos/internal/tui	2.178s

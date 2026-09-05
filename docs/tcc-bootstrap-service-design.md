@@ -8,9 +8,12 @@ implements nor needs knowledge of CXE2. Native guest compilation and self-hostin
 are optional later milestones. Bootstrap facilities alone do **not** fulfill the
 request for a complete guest-runnable compilation pipeline.
 
-This change contains feasibility scripts and documentation only. No production
-service, seed/guest changes, feature-ledger decision, or live provisioning is
-included. The standalone copy is `/shared/tcc-bootstrap-service-design.md`.
+This is the original agreed design. The Go implementation is described in
+[operator setup and provisioning](bootstrap-service-operations.md), the
+[host-service contract](bootstrap-host-services.md), and
+[acceptance evidence](bootstrap-service-acceptance.md). No live provisioning or
+feature-ledger decision accompanies that implementation. The original standalone
+design copy is `/shared/tcc-bootstrap-service-design.md`.
 
 ## Fit with the existing Go harness
 
@@ -230,17 +233,17 @@ experiment. Downloading inputs is a trusted network-enabled acquisition step;
 all compiler/execution/probe containers use the pinned image with `--pull=never`
 and `--network=none`.
 
-Before implementation, confirm the concrete quotas/retention policy above,
-provisioning ownership of the dedicated account/global slice, and whether
-cross-run artifact copying is required for the first release. Decide the
-container supervisor/control channel (including protection from guest forgery or
-termination) and review the bounded output collector.
+The implementation uses these baseline quotas and includes cross-run copying,
+as authorized for the first release. It uses a different-UID container supervisor,
+a protected completion record, cgroup freezing and an `openat2` collector; opaque
+artifact storage is separate from the mutable source budget. Dedicated-account
+installation/global-slice ownership still require operator setup and verification.
 The full compiler image is convenient evidence, not a claim that a 1.45 GB image
 is the smallest production image. Any smaller replacement needs its own digest
 pin and the same feasibility/control verification. No decision about a guest
 executable format, compiler backend or native self-hosting is required here.
 
-Bounded implementation plan (separate future authorization):
+Original bounded implementation plan (implemented by the linked Go change):
 
 1. Add disabled-by-default gate configuration, pinned input identities, strict
    request validation, reservations and the concrete job owner; test rejection

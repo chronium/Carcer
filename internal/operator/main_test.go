@@ -17,6 +17,9 @@ const (
 )
 
 func TestMain(tests *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "--bootstrap-operator-worker" {
+		os.Exit(bootstrapOperatorWorker(os.Args[2]))
+	}
 	if os.Getenv(operatorHelperEnvironment) == "1" {
 		runOperatorFakeAppServer()
 		os.Exit(0)

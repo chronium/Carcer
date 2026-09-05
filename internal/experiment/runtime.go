@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
@@ -72,6 +73,7 @@ const (
 // Handoff are nil only where the archive format permits them (generation zero
 // has no parent; aborted generations have no handoff).
 type ArchivedGeneration struct {
+	Bootstrap        *bootstrap.References
 	Generation       uint64
 	ParentGeneration *uint64
 	Transition       string
@@ -777,6 +779,13 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		return ArchivedGeneration{}, fmt.Errorf("generation archive is missing: %s", archive)
 	}
 
+	if err := bootstrap.ValidateArchive(run, archive); err != nil {
+		return ArchivedGeneration{}, err
+	}
+	bootstrapRefs, err := bootstrap.ReadReferences(archive)
+	if err != nil {
+		return ArchivedGeneration{}, err
+	}
 	budget, err := sourcecapacity.Load(archive)
 	if err != nil {
 		return ArchivedGeneration{}, err
@@ -832,6 +841,7 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 	}
 
 	result := ArchivedGeneration{
+		Bootstrap:        bootstrapRefs,
 		SourceCapacity:   budget,
 		Generation:       generation,
 		ParentGeneration: cloneUint64Pointer(metadata.parent),
@@ -891,6 +901,9 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		if harnessIdentity != nil {
 			names = append(names, provenance.GenerationHarnessFilename)
 		}
+		if bootstrapRefs != nil {
+			names = append(names, bootstrap.ReferencesFilename)
+		}
 		if err := validateArchiveNames(archive, names); err != nil {
 			return ArchivedGeneration{}, err
 		}
@@ -941,6 +954,9 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 				return ArchivedGeneration{}, err
 			}
 			names = append(names, latestSuccessManifestName, latestSuccessSnapshotName)
+		}
+		if bootstrapRefs != nil {
+			names = append(names, bootstrap.ReferencesFilename)
 		}
 		if err := validateArchiveNames(archive, names); err != nil {
 			return ArchivedGeneration{}, err

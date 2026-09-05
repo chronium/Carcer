@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/qemu"
 	"codexos/internal/sourcecapacity"
@@ -326,6 +327,15 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 		return generationArchive{}, statErr
 	}
 
+	hasBootstrap := pathExists(filepath.Join(archivePath, bootstrap.ReferencesFilename))
+	if hasBootstrap {
+		if !isRegularWithoutSymlink(filepath.Join(archivePath, bootstrap.ReferencesFilename)) {
+			return generationArchive{}, errors.New("bootstrap references must be a regular file")
+		}
+		if err := bootstrap.ValidateArchive(filepath.Dir(archivePath), archivePath); err != nil {
+			return generationArchive{}, err
+		}
+	}
 	boot := filepath.Join(archivePath, "boot")
 	if !isDirectoryWithoutSymlink(boot) {
 		return generationArchive{}, fmt.Errorf("generation archive artifact is missing: %s", boot)
@@ -392,6 +402,9 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 		if hasHarnessIdentity {
 			names = append(names, GenerationHarnessFilename)
 		}
+		if hasBootstrap {
+			names = append(names, bootstrap.ReferencesFilename)
+		}
 		if err := validateArchiveNames(archivePath, names); err != nil {
 			return generationArchive{}, err
 		}
@@ -426,6 +439,9 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 		}
 		if hasHarnessIdentity {
 			names = append(names, GenerationHarnessFilename)
+		}
+		if hasBootstrap {
+			names = append(names, bootstrap.ReferencesFilename)
 		}
 		manifestPath := filepath.Join(archivePath, "latest-success.json")
 		snapshotPath := filepath.Join(archivePath, "latest-success.snapshot")
