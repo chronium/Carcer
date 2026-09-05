@@ -7,9 +7,15 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait.
 
-Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable and sleeping tasks as active. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
+Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
+
+Blocking wait (12) uses RDI=target task ID and RSI=an 8-byte writable status destination. On normal completion it writes the target's 64-bit exit status and returns RAX=1, consuming the result; a fault has status UINT64_MAX. An already completed, unreserved target returns immediately. Otherwise the caller stops being runnable until completion or cancellation. No polling or voluntary yielding by the target is required. All registers except RAX, including the stack pointer and supported FP state, are preserved.
+
+Only one blocking waiter may reserve a target's result. Another blocking wait or nonblocking reap (6), including a development-protocol reap, fails with UINT64_MAX / tool failure while that reservation exists. Nonblocking reap returns 0 for an unreserved waiting task, just as for runnable or sleeping tasks. Wait rejects an invalid/free/kernel target, self-wait, a dependency cycle, or an invalid destination before reserving or consuming anything. Failure leaves the destination unchanged and returns UINT64_MAX.
+
+Kernel-side cancellation of the target wakes its waiter with failure, without writing a status. Cancellation of a blocked waiter releases its reservation. Completion delivery and cancellation finish before a target slot can be reused; a pending wait cannot silently transfer to a replacement task. Task IDs remain reusable slot indices, however: an old ID submitted *after* reuse names the current occupant. There is no ownership model or user cancellation syscall. Waiting on an indefinitely running task can block indefinitely; there is no wait timeout.
 
 Display info uses RDI=output and RSI=capacity. It fails for capacity<32 or an invalid destination; otherwise it writes and returns 32 bytes: LE32 size=32,width,height,pitch,format=1,zero[3]. Format 1 is XRGB8888. Present uses RDI source, RSI stride, RDX x, RCX y, R8 width, R9 height; rectangles are nonempty, in bounds, and prevalidated. The framebuffer is kernel-owned.
 
