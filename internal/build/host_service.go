@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/observability"
 	"codexos/internal/provenance"
@@ -356,6 +357,7 @@ type PendingGenerationFinish struct {
 // HostServicesConfig configures the build, finish, feature-request, and
 // provided-assets services exposed by one guest session.
 type HostServicesConfig struct {
+	Bootstrap           *bootstrap.Service
 	StagingDirectory    string
 	CandidateValidator  *CandidateBootValidator
 	BuildConfig         Config
@@ -372,6 +374,7 @@ type HostServicesConfig struct {
 // CodexOSHostServices dispatches the concrete host services used by the seed
 // guest. Its finish state is session-local and is never inferred from files.
 type CodexOSHostServices struct {
+	bootstrap       *bootstrap.Service
 	buildService    *BuildHostService
 	pendingFinish   *PendingGenerationFinish
 	featureStore    *store.FeatureRequestStore
@@ -399,6 +402,7 @@ func NewCodexOSHostServices(config HostServicesConfig) (*CodexOSHostServices, er
 		return nil, err
 	}
 	return &CodexOSHostServices{
+		bootstrap:       config.Bootstrap,
 		buildService:    buildService,
 		featureStore:    config.FeatureRequestStore,
 		featureRecorded: config.FeatureRecorded,
@@ -436,6 +440,11 @@ func (s *CodexOSHostServices) HandleRequest(ctx context.Context, request guest.H
 		return guest.CreateHostServiceResponse(request.RequestID, BuildResponseHarnessFailure, []byte("host services are nil"))
 	}
 	switch request.ServiceName {
+	case "bootstrap_job", "read_bootstrap_artifact":
+		if request.ServiceName == "bootstrap_job" && s.pendingFinish != nil {
+			return guest.CreateHostServiceResponse(request.RequestID, 2, []byte("bootstrap job rejected after generation finish"))
+		}
+		return s.bootstrap.HandleRequest(ctx, request)
 	case "build":
 		if s.pendingFinish != nil {
 			return guest.CreateHostServiceResponse(request.RequestID, BuildResponseHarnessFailure, []byte("build rejected after generation finish was accepted"))

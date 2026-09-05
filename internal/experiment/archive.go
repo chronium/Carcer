@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
@@ -379,6 +380,9 @@ func publishArchive(runDirectory string, generation uint64, populate func(string
 	}
 	if pathExists(final) {
 		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation archive already exists: " + final}
+	}
+	if err := bootstrap.Freeze(run, staging, generation); err != nil {
+		return ArchivedGeneration{}, err
 	}
 	if err := syncArchiveTree(staging); err != nil {
 		return ArchivedGeneration{}, err

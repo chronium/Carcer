@@ -135,7 +135,7 @@ func (r *CodexOSRun) continueLiveGeneration(ctx context.Context) error {
 		r.clearLiveTransition()
 		return &GenerationRuntimeError{Reason: "selected successor artifact is missing: " + image}
 	}
-	generation, hardware, err := r.bootLiveGeneration(operationContext, next, image)
+	generation, hardware, err := r.bootLiveGeneration(operationContext, next, image, &parent)
 	if err != nil {
 		r.clearLiveTransition()
 		return err
@@ -227,7 +227,7 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 		r.clearLiveTransition()
 		return &GenerationRuntimeError{Reason: "generation archive artifact is missing: " + image}
 	}
-	generation, hardware, err := r.bootLiveGeneration(operationContext, next, image)
+	generation, hardware, err := r.bootLiveGeneration(operationContext, next, image, &forkParent)
 	if err != nil {
 		r.clearLiveTransition()
 		return err
@@ -271,6 +271,7 @@ func (r *CodexOSRun) forkLiveGeneration(ctx context.Context, forkParent uint64) 
 }
 
 func (r *CodexOSRun) abortLiveGeneration(reason string) error {
+	r.suspendBootstrap()
 	if err := ValidateAbortReason(reason); err != nil {
 		return err
 	}

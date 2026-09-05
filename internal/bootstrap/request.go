@@ -36,26 +36,44 @@ const (
 	MaxRead            = 1 << 20
 	MaxRunBytes        = 128 << 20
 	MaxGlobalBytes     = 512 << 20
-	MaxManifest        = 512 << 10
+	MaxManifest        = 1 << 20
 )
 
 // Limits are recorded verbatim in provenance. Version 1 is deliberately fixed.
 type Limits struct {
-	CPU         int `json:"cpu"`
-	Memory      int `json:"memory_bytes"`
-	PIDs        int `json:"pids"`
-	Seconds     int `json:"seconds"`
-	Scratch     int `json:"scratch_bytes"`
-	Tmp         int `json:"tmp_bytes"`
-	Diagnostics int `json:"diagnostic_bytes"`
-	OutputFile  int `json:"output_file_bytes"`
-	OutputTotal int `json:"output_total_bytes"`
-	RunBytes    int `json:"run_bytes"`
-	GlobalBytes int `json:"global_bytes"`
+	CPU              int `json:"cpu"`
+	Memory           int `json:"memory_bytes"`
+	Swap             int `json:"swap_bytes"`
+	PIDs             int `json:"pids"`
+	AggregateCPU     int `json:"aggregate_cpu"`
+	AggregateMemory  int `json:"aggregate_memory_bytes"`
+	AggregatePIDs    int `json:"aggregate_pids"`
+	Seconds          int `json:"seconds"`
+	CaptureSeconds   int `json:"capture_seconds"`
+	StopGraceSeconds int `json:"stop_grace_seconds"`
+	CleanupSeconds   int `json:"cleanup_seconds"`
+	Scratch          int `json:"scratch_bytes"`
+	Tmp              int `json:"tmp_bytes"`
+	Control          int `json:"supervisor_control_bytes"`
+	FileSize         int `json:"file_size_bytes"`
+	OpenFiles        int `json:"open_files"`
+	CoreSize         int `json:"core_size_bytes"`
+	Diagnostics      int `json:"diagnostic_bytes"`
+	Inputs           int `json:"input_bytes"`
+	Read             int `json:"read_bytes"`
+	OutputCount      int `json:"output_count"`
+	OutputFile       int `json:"output_file_bytes"`
+	OutputTotal      int `json:"output_total_bytes"`
+	RunBytes         int `json:"run_bytes"`
+	GlobalBytes      int `json:"global_bytes"`
+	Jobs             int `json:"retained_jobs"`
+	Blobs            int `json:"retained_artifacts"`
+	Failures         int `json:"retained_failures"`
+	FailureBytes     int `json:"failure_bytes"`
 }
 
 func Baseline() Limits {
-	return Limits{1, 512 << 20, 64, 180, 256 << 20, 16 << 20, MaxDiagnostics, MaxOutput, MaxOutputs, MaxRunBytes, MaxGlobalBytes}
+	return Limits{CPU: 1, Memory: 512 << 20, PIDs: 64, AggregateCPU: 1, AggregateMemory: 768 << 20, AggregatePIDs: 96, Seconds: 180, CaptureSeconds: 15, StopGraceSeconds: 2, CleanupSeconds: 5, Scratch: 256 << 20, Tmp: 16 << 20, Control: 1 << 20, FileSize: 64 << 20, OpenFiles: 128, Diagnostics: MaxDiagnostics, Inputs: MaxInputs, Read: MaxRead, OutputCount: 32, OutputFile: MaxOutput, OutputTotal: MaxOutputs, RunBytes: MaxRunBytes, GlobalBytes: MaxGlobalBytes, Jobs: 64, Blobs: 256, Failures: 32, FailureBytes: 2 << 20}
 }
 
 type AssetRef struct {
@@ -79,13 +97,16 @@ type Artifact struct {
 	Size int64  `json:"size"`
 }
 type Result struct {
-	Status      uint32     `json:"status"`
-	Reason      string     `json:"reason"`
-	Diagnostics string     `json:"diagnostics"`
-	ExitCode    int        `json:"exit_code"`
-	OOM         bool       `json:"oom"`
-	Cleaned     bool       `json:"cleaned"`
-	Artifacts   []Artifact `json:"artifacts"`
+	WorkerSHA256   string            `json:"worker_sha256,omitempty"`
+	Controls       map[string]string `json:"controls,omitempty"`
+	ResourceEvents map[string]uint64 `json:"resource_events,omitempty"`
+	Status         uint32            `json:"status"`
+	Reason         string            `json:"reason"`
+	Diagnostics    string            `json:"diagnostics"`
+	ExitCode       int               `json:"exit_code"`
+	OOM            bool              `json:"oom"`
+	Cleaned        bool              `json:"cleaned"`
+	Artifacts      []Artifact        `json:"artifacts"`
 }
 
 func Digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
@@ -226,4 +247,17 @@ func mustJSON(v any) []byte {
 		panic(e)
 	}
 	return b
+}
+
+// Diagnostics are display text; preserve the byte bound after replacing invalid
+// UTF-8. They are never used as a completion or resource-failure oracle.
+func diagnosticText(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) > MaxDiagnostics {
+		s = s[:MaxDiagnostics]
+		for !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
 }

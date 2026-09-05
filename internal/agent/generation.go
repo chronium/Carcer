@@ -2356,7 +2356,19 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 			return guest.ToolResult{}, err
 		}
 		return s.runtime.InvokeTool(ctx, "list_provided_assets", [][]byte{})
-	case "read_provided_asset":
+	case "bootstrap_job":
+		if err := checkGenerationFields(arguments, map[string]struct{}{"request": {}}, nil); err != nil {
+			return guest.ToolResult{}, err
+		}
+		spec, err := generationUTF8(arguments["request"], "request")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		if len(spec) > 16384 {
+			return guest.ToolResult{}, errors.New("bootstrap request exceeds 16 KiB")
+		}
+		return s.runtime.InvokeTool(ctx, "bootstrap_job", [][]byte{spec})
+	case "read_provided_asset", "read_bootstrap_artifact":
 		if err := checkGenerationFields(arguments, map[string]struct{}{"id": {}, "offset": {}, "length": {}}, nil); err != nil {
 			return guest.ToolResult{}, err
 		}
@@ -2372,7 +2384,7 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 		if err != nil {
 			return guest.ToolResult{}, err
 		}
-		return s.runtime.InvokeTool(ctx, "read_provided_asset", [][]byte{id, offset, length})
+		return s.runtime.InvokeTool(ctx, tool, [][]byte{id, offset, length})
 	case "list_requests":
 		if err := checkGenerationFields(arguments, nil, nil); err != nil {
 			return guest.ToolResult{}, err
@@ -2769,6 +2781,7 @@ func mergeMaps(left, right map[string]any) map[string]any {
 var planningTools = map[string]bool{
 	"list": true, "read": true, "build": true, "request_feature": true,
 	"list_provided_assets": true, "read_provided_asset": true, "list_requests": true,
+	"bootstrap_job": true, "read_bootstrap_artifact": true,
 }
 
 func advertisedGuestTools(advertised []string) (map[string]struct{}, error) {
@@ -2801,21 +2814,23 @@ func advertisedGuestToolsInOrder(advertised []string) (map[string]struct{}, []st
 
 func guestToolRegistry() map[string]map[string]any {
 	return map[string]map[string]any{
-		"list":                 dynamicFunction("list", "List paths in the persistent mutable CodexOS guest source, optionally by prefix.", map[string]any{"prefix": map[string]any{"type": "string"}}, nil),
-		"read":                 dynamicFunction("read", "Read exact bytes from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "offset", "length"}),
-		"write":                dynamicFunction("write", "Overwrite or append exact bytes in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "encoding": map[string]any{"type": "string", "enum": []string{"utf8", "base64"}, "default": "utf8"}, "data": map[string]any{"type": "string"}}, []string{"path", "offset", "data"}),
-		"truncate":             dynamicFunction("truncate", "Resize a file in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "size": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "size"}),
-		"remove":               dynamicFunction("remove", "Remove a file from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}}, []string{"path"}),
-		"build":                dynamicFunction("build", buildToolDescription, map[string]any{}, nil),
-		"finish_generation":    dynamicFunction("finish_generation", finishGenerationToolDescription, map[string]any{"handoff": map[string]any{"type": "string"}}, []string{"handoff"}),
-		"request_feature":      dynamicFunction("request_feature", requestFeatureToolDescription, map[string]any{"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, []string{"title", "description"}),
-		"list_provided_assets": dynamicFunction("list_provided_assets", listProvidedAssetsToolDescription, map[string]any{}, nil),
-		"read_provided_asset":  dynamicFunction("read_provided_asset", readProvidedAssetToolDescription, map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"id", "offset", "length"}),
+		"bootstrap_job":           dynamicFunction("bootstrap_job", "Ask the advertised guest helper to capture its source and invoke an explicitly provisioned, isolated Linux bootstrap job. The request is a JSON string; guest commands execute only in its container.", map[string]any{"request": map[string]any{"type": "string", "maxLength": 16384}}, []string{"request"}),
+		"read_bootstrap_artifact": dynamicFunction("read_bootstrap_artifact", "Ask the advertised guest helper to retrieve an exact range of an authorized immutable bootstrap artifact.", map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 1048576}}, []string{"id", "offset", "length"}),
+		"list":                    dynamicFunction("list", "List paths in the persistent mutable CodexOS guest source, optionally by prefix.", map[string]any{"prefix": map[string]any{"type": "string"}}, nil),
+		"read":                    dynamicFunction("read", "Read exact bytes from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "offset", "length"}),
+		"write":                   dynamicFunction("write", "Overwrite or append exact bytes in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "encoding": map[string]any{"type": "string", "enum": []string{"utf8", "base64"}, "default": "utf8"}, "data": map[string]any{"type": "string"}}, []string{"path", "offset", "data"}),
+		"truncate":                dynamicFunction("truncate", "Resize a file in the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}, "size": map[string]any{"type": "integer", "minimum": 0}}, []string{"path", "size"}),
+		"remove":                  dynamicFunction("remove", "Remove a file from the persistent mutable CodexOS guest source.", map[string]any{"path": map[string]any{"type": "string"}}, []string{"path"}),
+		"build":                   dynamicFunction("build", buildToolDescription, map[string]any{}, nil),
+		"finish_generation":       dynamicFunction("finish_generation", finishGenerationToolDescription, map[string]any{"handoff": map[string]any{"type": "string"}}, []string{"handoff"}),
+		"request_feature":         dynamicFunction("request_feature", requestFeatureToolDescription, map[string]any{"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, []string{"title", "description"}),
+		"list_provided_assets":    dynamicFunction("list_provided_assets", listProvidedAssetsToolDescription, map[string]any{}, nil),
+		"read_provided_asset":     dynamicFunction("read_provided_asset", readProvidedAssetToolDescription, map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0}}, []string{"id", "offset", "length"}),
 	}
 }
 
 func dynamicToolNamespace(selected map[string]struct{}) map[string]any {
-	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset"})
+	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset", "bootstrap_job", "read_bootstrap_artifact"})
 	return dynamicToolNamespaceInOrder(selected, order)
 }
 
@@ -3133,7 +3148,16 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 		return "", err
 	}
 	capacityText := fmt.Sprintf("Current trusted source capacity: %d aggregate file-content bytes, plus v1 serialized framing (at most %d snapshot bytes). File count remains 128 and path length remains 255 bytes. This is the harness capacity; guest-side buffers and tools are separate.", budget.Bytes(), budget.SnapshotLimit())
-	return implementorContract + "\n\n" + capacityText + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
+	bootstrapText := "Bootstrap service: not provisioned."
+	if value, ok := runtime.(interface{ BootstrapStatus() (string, error) }); ok {
+		var err error
+		bootstrapText, err = value.BootstrapStatus()
+		if err != nil {
+			return "", err
+		}
+	}
+	bootstrapText += "\n" + bootstrapHostContract
+	return implementorContract + "\n\n" + bootstrapText + "\n\n" + capacityText + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
 }
 
 func currentPromptContextFor(runtime GenerationRuntime) (string, bool, bool, qemu.HardwareProfile, []store.FeatureRequest, error) {
@@ -3183,3 +3207,5 @@ func trustedHardwareContext(profile qemu.HardwareProfile) string {
 func featureRequestJSONSeparators(encoded []byte) []byte {
 	return bytes.ReplaceAll(bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028")), []byte(`\u2029`), []byte("\u2029"))
 }
+
+const bootstrapHostContract = `The optional bootstrap_job host service accepts two arguments: strict JSON (version=1, argv, assets [{id,sha256}], artifacts [id], outputs [relative path]) and the current framed source snapshot. Linux argv runs at /work; captured source is at /inputs/source/seed/, immutable assets at /inputs/assets/<id>, and authorized artifacts at /inputs/artifacts/<id>. Declare regular output files beneath /work/out. Limits include 32 argv entries/8 KiB total, 8 inputs/64 MiB, 32 outputs/16 MiB each/32 MiB total, 64 KiB diagnostics, and 180 seconds. read_bootstrap_artifact uses (id, offset, length) canonical decimal ranges up to 1 MiB. Opaque retained artifacts have a separate 128 MiB run quota and follow the selected generation lineage. They may contain source or binaries. Supplied facilities do not provide a guest compiler port, SDK/runtime, executable packaging, or a complete guest-runnable compilation pipeline. Guest helpers for invocation/capture and binary-safe import remain guest-owned; advertised helpers named bootstrap_job (one JSON request argument) and read_bootstrap_artifact (id, offset, length) can be exposed through the existing tool bridge. Guest tool discovery is fixed for each fresh session. No executable format or native self-hosting milestone is required by this service.`

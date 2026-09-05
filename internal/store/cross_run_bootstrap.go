@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	bootstrapservice "codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
@@ -424,6 +425,11 @@ func initializeCrossRunBootstrap(
 	if err := syncCrossRunDirectory(filepath.Join(candidate, "feature-requests"), true); err != nil {
 		return nil, err
 	}
+	finishArtifacts, err := bootstrapservice.Inherit(source, archived.ArchivePath, candidate, destination)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = finishArtifacts(completed) }()
 	if err := syncCrossRunDirectory(candidate, false); err != nil {
 		return nil, err
 	}
@@ -644,6 +650,13 @@ func isASCIIDigits(value string) bool {
 
 func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchivedGeneration, error) {
 	archive := crossRunArchivedGeneration{Generation: expectedGeneration, ArchivePath: path}
+	if err := bootstrapservice.ValidateArchive(filepath.Dir(path), path); err != nil {
+		return archive, err
+	}
+	bootstrapRefs, err := bootstrapservice.ReadReferences(path)
+	if err != nil {
+		return archive, err
+	}
 	budget, err := sourcecapacity.Load(path)
 	if err != nil {
 		return archive, crossRunArchiveError(expectedGeneration, err)
@@ -740,6 +753,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 		if archive.HarnessIdentity != nil {
 			expected[provenance.GenerationHarnessFilename] = struct{}{}
 		}
+		if bootstrapRefs != nil {
+			expected[bootstrapservice.ReferencesFilename] = struct{}{}
+		}
 		if err := validateCrossRunArchiveContents(path, expected); err != nil {
 			return archive, crossRunArchiveError(expectedGeneration, err)
 		}
@@ -783,6 +799,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 			}
 			expected["latest-success.json"] = struct{}{}
 			expected["latest-success.snapshot"] = struct{}{}
+		}
+		if bootstrapRefs != nil {
+			expected[bootstrapservice.ReferencesFilename] = struct{}{}
 		}
 		if err := validateCrossRunArchiveContents(path, expected); err != nil {
 			return archive, crossRunArchiveError(expectedGeneration, err)

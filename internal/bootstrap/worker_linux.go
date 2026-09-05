@@ -41,6 +41,10 @@ type wireResponse struct {
 }
 
 func writeWire(w io.Writer, v any) error {
+	if response, ok := v.(wireResponse); ok {
+		response.Result.Diagnostics = diagnosticText(response.Result.Diagnostics)
+		v = response
+	}
 	b, e := json.Marshal(v)
 	if e != nil {
 		return e
@@ -108,6 +112,19 @@ type WorkerOptions struct {
 	Slice     string
 }
 type containerState struct {
+	Mounts []struct {
+		Type        string
+		Source      string
+		Destination string
+		RW          bool
+	}
+	HostConfig struct {
+		NetworkMode    string
+		ReadonlyRootfs bool
+		Privileged     bool
+		PidMode        string
+		UTSMode        string
+	}
 	State struct {
 		Status     string
 		Pid        int
@@ -393,11 +410,16 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 		response.Result.Diagnostics = e.Error()
 		return
 	}
+	if e = os.Mkdir(filepath.Join(inputs, "hooks"), 0700); e != nil {
+		response.Result.Diagnostics = e.Error()
+		return
+	}
 	helperCopy := filepath.Join(inputs, "helper")
 	if e = os.WriteFile(helperCopy, helperBytes, 0555); e != nil {
 		response.Result.Diagnostics = e.Error()
 		return
 	}
+	response.Result.WorkerSHA256 = Digest(helperBytes)
 	helperBytes = nil
 	w.Snapshot = nil
 	w.Inputs = nil
@@ -405,7 +427,7 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 	ctx, cancel := context.WithTimeout(parent, 180*time.Second)
 	defer cancel()
 	args := []string{"create", "--name", name, "--label=io.codexos.bootstrap=1", "--pull=never", "--cgroup-parent=" + o.Slice,
-		"--network=none", "--read-only", "--read-only-tmpfs=false", "--ipc=none", "--cap-drop=all", "--cap-add=SETUID,SETGID", "--security-opt=no-new-privileges", "--user=0:0",
+		"--network=none", "--pid=private", "--uts=private", "--cgroupns=private", "--uidmap=0:0:65536", "--gidmap=0:0:65536", "--image-volume=ignore", "--hooks-dir=" + filepath.Join(inputs, "hooks"), "--read-only", "--read-only-tmpfs=false", "--ipc=none", "--cap-drop=all", "--cap-add=SETUID,SETGID", "--security-opt=no-new-privileges", "--user=0:0",
 		"--tmpfs=/work:rw,nosuid,nodev,exec,size=256m,mode=1777", "--tmpfs=/tmp:rw,nosuid,nodev,exec,size=16m,mode=1777", "--tmpfs=/control:rw,nosuid,nodev,noexec,size=1m,mode=0700",
 		"--pids-limit=64", "--memory=512m", "--memory-swap=512m", "--cpus=1", "--ulimit=nofile=128:128", "--ulimit=core=0:0", "--ulimit=fsize=67108864:67108864",
 		"--log-driver=none", "--http-proxy=false", "--unsetenv-all", "--env=HOME=/work", "--env=PATH=/usr/local/bin:/usr/bin:/bin", "--env=LANG=C", "--env=GOMAXPROCS=2", "--env=GOMEMLIMIT=64MiB",
@@ -444,6 +466,20 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 		response.Result.Diagnostics = string(b) + e.Error()
 		return
 	}
+	created, err := inspect(ctx, name)
+	if err != nil {
+		response.Result.Diagnostics = err.Error()
+		return
+	}
+	if !created.HostConfig.ReadonlyRootfs || created.HostConfig.Privileged || created.HostConfig.NetworkMode != "none" || created.HostConfig.PidMode == "host" || created.HostConfig.UTSMode == "host" || len(created.Mounts) != 1 {
+		response.Result.Diagnostics = "container isolation configuration mismatch"
+		return
+	}
+	mount := created.Mounts[0]
+	if mount.Type != "bind" || mount.Source != inputs || mount.Destination != "/inputs" || mount.RW {
+		response.Result.Diagnostics = "unexpected container host mount"
+		return
+	}
 	logs := &boundedBuffer{limit: MaxDiagnostics, cancel: cancel}
 	attach = exec.Command("/usr/bin/podman", "start", "-a", name)
 	attach.WaitDelay = 2 * time.Second
@@ -462,7 +498,7 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 			response.Result.Diagnostics = response.Result.Diagnostics[:MaxDiagnostics]
 		}
 	}()
-	var start string
+	var start, jobCgroup string
 	for ctx.Err() == nil {
 		state, e = inspect(ctx, name)
 		if e != nil {
@@ -488,6 +524,13 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 			return
 		}
 		if start == "" {
+			var controls map[string]string
+			jobCgroup, controls, e = verifyJobControls(state.State.Pid, o.Slice)
+			if e != nil {
+				response.Result.Diagnostics = e.Error()
+				return
+			}
+			response.Result.Controls = controls
 			start, e = processStart(state.State.Pid)
 			if e != nil {
 				response.Result.Diagnostics = e.Error()
@@ -503,9 +546,16 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 				return
 			}
 			response.Result.ExitCode = done.Exit
+			response.Result.ResourceEvents = resourceEvents(jobCgroup)
+			response.Result.OOM = response.Result.ResourceEvents["oom_kill"] > 0
 			if done.Exit != 0 {
 				response.Result.Status = 1
 				response.Result.Reason = "exit"
+				if response.Result.OOM {
+					response.Result.Reason = "oom"
+				} else if response.Result.ResourceEvents["pids_max"] > 0 {
+					response.Result.Reason = "pids_limit"
+				}
 				return
 			}
 			if _, e = podman(ctx, "pause", name); e != nil {
@@ -515,6 +565,11 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 			paused, e := inspect(ctx, name)
 			if e != nil || !paused.State.Paused || paused.State.Pid != state.State.Pid {
 				response.Result.Diagnostics = "container freeze/identity check failed"
+				return
+			}
+			freeze, e := os.ReadFile(filepath.Join("/sys/fs/cgroup", jobCgroup, "cgroup.events"))
+			if e != nil || !strings.Contains(string(freeze), "frozen 1") {
+				response.Result.Diagnostics = "kernel cgroup freeze was not confirmed"
 				return
 			}
 			captureCtx, stop := context.WithTimeout(ctx, 15*time.Second)
@@ -555,4 +610,53 @@ func executeJob(parent context.Context, w wireRequest, o WorkerOptions) (respons
 		response.Result.Reason = "runtime_failure"
 	}
 	return
+}
+
+func verifyJobControls(pid int, slice string) (string, map[string]string, error) {
+	b, e := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if e != nil {
+		return "", nil, e
+	}
+	line := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(line, "0::/") || strings.Contains(line, "\n") {
+		return "", nil, errors.New("invalid job cgroup membership")
+	}
+	group := strings.TrimPrefix(line, "0::")
+	if !strings.Contains(group, "/"+slice+"/") {
+		return "", nil, errors.New("job escaped aggregate slice")
+	}
+	got := map[string]string{}
+	for name, want := range map[string]string{"memory.max": "536870912", "memory.swap.max": "0", "cpu.max": "100000 100000", "pids.max": "64"} {
+		b, e = os.ReadFile(filepath.Join("/sys/fs/cgroup", group, name))
+		if e != nil {
+			return "", nil, e
+		}
+		value := strings.TrimSpace(string(b))
+		if value != want {
+			return "", nil, fmt.Errorf("job %s=%s, expected %s", name, value, want)
+		}
+		got[name] = value
+	}
+	return group, got, nil
+}
+func resourceEvents(group string) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, file := range []string{"memory.events", "pids.events"} {
+		b, e := os.ReadFile(filepath.Join("/sys/fs/cgroup", group, file))
+		if e != nil {
+			continue
+		}
+		fields := strings.Fields(string(b))
+		for i := 0; i+1 < len(fields); i += 2 {
+			key := fields[i]
+			if file == "pids.events" {
+				key = "pids_" + key
+			}
+			n, e := strconv.ParseUint(fields[i+1], 10, 64)
+			if e == nil {
+				out[key] = n
+			}
+		}
+	}
+	return out
 }

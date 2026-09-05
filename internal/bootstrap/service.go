@@ -84,6 +84,9 @@ func (c *Client) call(ctx context.Context, r wireRequest) (wireResponse, error) 
 		waitErr = <-waited
 		result.e = errors.New("bootstrap worker did not retire")
 	}
+	if result.e == nil && waitErr == nil && result.v.Result.Cleaned && result.v.Result.Status == 2 && result.v.Result.Reason == "busy" {
+		writeErr = nil
+	}
 	if result.e != nil || writeErr != nil || waitErr != nil {
 		return result.v, fmt.Errorf("bootstrap worker: %w; %s", errors.Join(result.e, writeErr, waitErr), diag.Bytes())
 	}
@@ -229,7 +232,7 @@ func (s *Service) Healthy() error {
 	return s.poisoned
 }
 func (s *Service) Recover(ctx context.Context) error {
-	if s == nil {
+	if s == nil || !s.config.Enabled {
 		return nil
 	}
 	s.mu.Lock()
@@ -253,6 +256,7 @@ func (s *Service) Recover(ctx context.Context) error {
 }
 func (s *Service) HandleRequest(ctx context.Context, r guest.HostRequest) (guest.Frame, error) {
 	response := func(v Result) (guest.Frame, error) {
+		v.Diagnostics = diagnosticText(v.Diagnostics)
 		return guest.CreateHostServiceResponse(r.RequestID, v.Status, mustJSON(v))
 	}
 	if s == nil || !s.config.Enabled {
@@ -363,6 +367,8 @@ func (s *Service) HandleRequest(ctx context.Context, r guest.HostRequest) (guest
 		m.Result = Result{Status: 2, Reason: "worker_transport_failure", Diagnostics: callErr.Error()}
 	}
 	if !m.Result.Cleaned {
+		m.Result.Status = 2
+		m.Result.Reason = "cleanup_unconfirmed"
 		s.mu.Lock()
 		s.poisoned = errors.New("bootstrap cleanup was not confirmed")
 		s.mu.Unlock()
@@ -399,4 +405,27 @@ func canonicalUint(b []byte) (uint64, error) {
 		return 0, errors.New("noncanonical unsigned decimal")
 	}
 	return v, nil
+}
+
+func RecoverRun(ctx context.Context, run string) error {
+	c, e := LoadConfig(run)
+	if e != nil || c == nil {
+		return e
+	}
+	if !c.Enabled {
+		return nil
+	}
+	s, e := LockStorage(*c)
+	if e != nil {
+		return e
+	}
+	defer s.Close()
+	if e = Probe(ctx); e != nil {
+		return e
+	}
+	e = os.Remove(filepath.Join(s.Directory, "blocked.json"))
+	if errors.Is(e, os.ErrNotExist) {
+		return nil
+	}
+	return e
 }

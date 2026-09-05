@@ -135,7 +135,7 @@ func TestRootlessWorkerSmoke(t *testing.T) {
 		t.Fatalf("preflight: %+v %v", v, e)
 	}
 	req := fixtureRequest()
-	req.Argv = []string{"/bin/sh", "-ec", "test $(id -u) = 65534; if kill -0 1 2>/dev/null; then exit 9; fi; printf opaque > /work/out/tool"}
+	req.Argv = []string{"/bin/sh", "-ec", "test $(id -u) = 65534; test $(awk '/^CapEff:/ {print $2}' /proc/self/status) = 0000000000000000; test $(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status) = 1; test $(awk '/^Seccomp:/ {print $2}' /proc/self/status) = 2; test $(ls /sys/class/net) = lo; test ! -w /control; if kill -0 1 2>/dev/null; then exit 9; fi; printf opaque > /work/out/tool"}
 	v, e = c.call(ctx, wireRequest{Kind: "job", Request: req, Snapshot: fixtureSnapshot(t), TCCAsset: "tcc"})
 	if e != nil || v.Result.Status != 0 || !v.Result.Cleaned || len(v.Outputs) != 1 || string(v.Outputs[0].Data) != "opaque" {
 		t.Fatalf("job: %+v %v", v, e)

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/build"
 	"codexos/internal/guest"
 	"codexos/internal/observability"
@@ -60,6 +61,7 @@ type liveRun struct {
 }
 
 type liveGeneration struct {
+	bootstrap    *bootstrap.Service
 	workspace    string
 	bootISO      string
 	stdoutPath   string
@@ -188,7 +190,7 @@ func (r *CodexOSRun) Start(ctx context.Context, initialISO string) error {
 	}
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()
-	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, resolvedISO)
+	generation, hardware, err := r.bootLiveGeneration(operationContext, 0, resolvedISO, nil)
 	if err != nil {
 		return err
 	}
@@ -384,6 +386,8 @@ func (r *CodexOSRun) InvokeTool(ctx context.Context, name string, arguments [][]
 	r.recordLive("tool_guest_invocation_started", &number, map[string]any{"tool": name})
 	operationContext, cancelOperation := r.liveOperationContext(ctx)
 	defer cancelOperation()
+	generation.bootstrap.Activate(operationContext)
+	defer generation.bootstrap.Deactivate()
 	result, err := generation.toolClient.InvokeTool(operationContext, name, arguments)
 	if err != nil {
 		r.recordLive("tool_guest_invocation_failed", &number, map[string]any{"tool": name})
@@ -429,6 +433,7 @@ func (r *CodexOSRun) CaptureReviewSource(ctx context.Context) ([]byte, error) {
 }
 
 func (r *CodexOSRun) Pause(ctx context.Context) error {
+	r.suspendBootstrap()
 	if r == nil || r.live == nil {
 		return &GenerationRuntimeError{Reason: "CodexOS run has no live runtime configuration"}
 	}
@@ -497,11 +502,12 @@ func (r *CodexOSRun) Resume(ctx context.Context) error {
 	r.state = RuntimeStateRunning
 	r.gateMu.Unlock()
 	r.setObservedLiveState()
+	generation.bootstrap.Resume()
 	r.recordLive("generation_resumed", &number, map[string]any{})
 	return nil
 }
 
-func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, image string) (_ *liveGeneration, _ qemu.HardwareManifest, resultErr error) {
+func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, image string, parent *uint64) (_ *liveGeneration, _ qemu.HardwareManifest, resultErr error) {
 	options := r.live.options
 	if err := options.HardwareProfile.RequireAvailable(); err != nil {
 		return nil, qemu.HardwareManifest{}, &GenerationRuntimeError{Reason: "could not start QEMU", Err: err}
@@ -554,9 +560,28 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	}
 	buildConfig := options.BuildConfig
 	buildConfig.SourceCapacity = r.SourceCapacity()
+	var bootstrapAssets []bootstrap.Asset
+	if r.live.provided != nil {
+		for _, a := range r.live.provided.Metadata() {
+			bootstrapAssets = append(bootstrapAssets, bootstrap.Asset{ID: a.ID, SHA256: a.SHA256, Size: a.Size})
+		}
+	}
+	var assetRead func(string, uint64, uint64) ([]byte, error)
+	if r.live.provided != nil {
+		assetRead = r.live.provided.ReadAsset
+	}
+	generation.bootstrap, err = bootstrap.NewService(r.runDirectory, number, parent, bootstrapAssets, assetRead)
+	if err != nil {
+		return nil, qemu.HardwareManifest{}, err
+	}
+	if generation.bootstrap != nil {
+		if err = generation.bootstrap.Recover(ctx); err != nil {
+			return nil, qemu.HardwareManifest{}, err
+		}
+	}
 	generation.hostServices, err = build.NewCodexOSHostServices(build.HostServicesConfig{
 		StagingDirectory: filepath.Join(workspace, "builds"), CandidateValidator: validator,
-		BuildConfig: buildConfig, FeatureRequestStore: r.live.featureStore,
+		BuildConfig: buildConfig, Bootstrap: generation.bootstrap, FeatureRequestStore: r.live.featureStore,
 		FeatureRecorded: func() { r.live.pendingFeatures.Add(1) },
 		Generation:      &number, EventLog: options.EventLog, Metrics: options.Metrics,
 		ActivityStream: options.ActivityStream, ProvidedAssets: r.live.provided, Provenance: r.live.provenance,
@@ -580,6 +605,15 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 		return nil, qemu.HardwareManifest{}, err
 	}
 	assetHandler := providedAssetsHandler(r.live.provided)
+	if generation.bootstrap != nil {
+		old := assetHandler
+		assetHandler = func(ctx context.Context, request guest.HostRequest) (guest.Frame, error) {
+			if request.ServiceName == "read_bootstrap_artifact" {
+				return generation.bootstrap.HandleRequest(ctx, request)
+			}
+			return old(ctx, request)
+		}
+	}
 	generation.dispatcher = guest.NewSerialProtocolDispatcher(generation.serial, guest.DispatcherOptions{
 		StartupHostServices: assetHandler, BackgroundHostServices: assetHandler,
 		ExchangeHostServices: generation.hostServices.HandleRequest,
@@ -668,6 +702,7 @@ func closeLiveGeneration(generation *liveGeneration, timeout time.Duration) erro
 	if timeout <= 0 {
 		timeout = defaultGenerationStopTimeout
 	}
+	generation.bootstrap.Suspend()
 	errorsSeen := make([]error, 0, 3)
 	if generation.cancel != nil {
 		generation.cancel()
@@ -704,6 +739,9 @@ func closeLiveGeneration(generation *liveGeneration, timeout time.Duration) erro
 			errorsSeen = append(errorsSeen, err)
 		}
 		cancel()
+	}
+	if err := generation.bootstrap.Healthy(); err != nil {
+		errorsSeen = append(errorsSeen, err)
 	}
 	return errors.Join(errorsSeen...)
 }

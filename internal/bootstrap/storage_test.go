@@ -233,3 +233,50 @@ func TestFailedInheritanceLeavesNoDestinationStore(t *testing.T) {
 		t.Fatal("failed inheritance retained a destination store")
 	}
 }
+
+// This boundary uses at most 32 MiB of input at once and is deliberately
+// serialized. A source store close to its quota can be valid while destination
+// metadata/reservations make inheritance too large; nothing may be published.
+func TestExpandedArtifactInheritanceChecksDestinationQuota(t *testing.T) {
+	run, s, refs := fixtureStore(t)
+	for job := 0; job < 4; job++ {
+		size := MaxOutputs
+		if job == 3 {
+			used, e := directoryBytes(s.Directory)
+			if e != nil {
+				t.Fatal(e)
+			}
+			size = MaxRunBytes - int(used) - 6000
+		}
+		a := bytes.Repeat([]byte{byte(job * 2)}, MaxOutput)
+		b := bytes.Repeat([]byte{byte(job*2 + 1)}, size-MaxOutput)
+		now := time.Now().UTC()
+		req := fixtureRequest()
+		req.Outputs = []string{"a", "b"}
+		m := Manifest{Version: 1, RunID: s.Config.RunID, ID: randomID(), Generation: 0, Image: Image, ImageID: ImageID, TCCCommit: TCCCommit, Request: req, SnapshotSHA256: Digest(fixtureSnapshot(t)), SourceContentBytes: 65536, Limits: Baseline(), Started: now, Finished: now, Result: Result{Status: 0, Cleaned: true, Artifacts: []Artifact{{Digest(a), "a", int64(len(a))}, {Digest(b), "b", int64(len(b))}}}}
+		if e := s.Publish(m, []Input{{"a", a}, {"b", b}}, &refs); e != nil {
+			t.Fatal(e)
+		}
+	}
+	archive := t.TempDir()
+	if e := Freeze(run, archive, 0); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	candidate := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "not-published")
+	finish, e := Inherit(run, archive, candidate, destination)
+	if e == nil {
+		finish(false)
+		t.Fatal("inheritance exceeded destination reservation")
+	}
+	if !strings.Contains(e.Error(), "destination/run artifact quota") {
+		t.Fatalf("unclear quota rejection: %v", e)
+	}
+	if c, e := LoadConfig(candidate); e != nil || c != nil {
+		t.Fatalf("partial destination config %+v %v", c, e)
+	}
+	if _, e := os.Stat(destination); !os.IsNotExist(e) {
+		t.Fatal("partial destination published")
+	}
+}

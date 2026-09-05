@@ -194,6 +194,56 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 			return false, nil
 		}
 		return false, c.printStatus()
+	case "bootstrap":
+		runtime, ok := c.runtime.(interface {
+			ProvisionBootstrap(context.Context, string) error
+			BootstrapStatus() (string, error)
+			RecoverBootstrap(context.Context) error
+			GarbageCollectBootstrap() error
+		})
+		if !ok {
+			return false, errors.New("bootstrap service is unavailable")
+		}
+		if len(words) == 1 {
+			text, e := runtime.BootstrapStatus()
+			if e != nil {
+				return false, e
+			}
+			c.printLine(text)
+			return false, nil
+		}
+		switch words[1] {
+		case "provision":
+			if len(words) != 3 {
+				return false, errors.New("usage: bootstrap provision TCC_ASSET_ID")
+			}
+			if c.currentTurn() != nil {
+				return false, errors.New("previous generation Codex turn is still active")
+			}
+			if e := runtime.ProvisionBootstrap(ctx, words[2]); e != nil {
+				return false, e
+			}
+			c.recordOperator("bootstrap-provision", "success", map[string]any{"tcc_asset": words[2]})
+			c.printLine("Linux bootstrap service provisioned. No generation started; feature request #3 status is unchanged.")
+		case "recover":
+			if len(words) != 2 {
+				return false, errors.New("usage: bootstrap recover")
+			}
+			if e := runtime.RecoverBootstrap(ctx); e != nil {
+				return false, e
+			}
+			c.printLine("Bootstrap cleanup verified.")
+		case "gc":
+			if len(words) != 2 {
+				return false, errors.New("usage: bootstrap gc")
+			}
+			if e := runtime.GarbageCollectBootstrap(); e != nil {
+				return false, e
+			}
+			c.printLine("Unreferenced bootstrap jobs reclaimed; archived references retained.")
+		default:
+			return false, errors.New("usage: bootstrap [provision TCC_ASSET_ID|recover|gc]")
+		}
 	case "source-capacity":
 		if c.currentTurn() != nil {
 			return false, errors.New("previous generation Codex turn is still active")
@@ -713,6 +763,7 @@ func (c *PlainConsole) printHarnessIdentity(identity *provenance.HarnessIdentity
 func (c *PlainConsole) printHelp() {
 	for _, line := range []string{
 		"help        show these commands",
+		"bootstrap [provision TCC_ASSET_ID|recover|gc]  inspect/provision the optional Linux job service",
 		"source-capacity BYTES  provision 65536 or 1048576 content bytes at an inactive gate",
 		"status      show current runtime state",
 		"history     show archived generation lineage",
@@ -829,6 +880,9 @@ func (c *PlainConsole) printInspection(item experiment.ArchivedGeneration) {
 	c.printLine("Outcome: " + item.Outcome)
 	c.printLine("Archive: " + item.ArchivePath)
 	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", item.SourceCapacity.Bytes(), item.SourceCapacity.SnapshotLimit()))
+	if item.Bootstrap != nil {
+		c.printLine(fmt.Sprintf("Bootstrap artifacts: %d authorized jobs; per-job memory=%d bytes; retained run budget=%d bytes", len(item.Bootstrap.Jobs), item.Bootstrap.Limits.Memory, item.Bootstrap.Limits.RunBytes))
+	}
 	c.printLine("Hardware:")
 	c.printLine("  Profile: " + item.Hardware.Profile)
 	c.printLine("  Machine: " + item.Hardware.Machine)

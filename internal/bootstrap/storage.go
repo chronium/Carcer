@@ -330,6 +330,9 @@ func ReadReferences(directory string) (*References, error) {
 }
 func (s *Storage) manifest(ref JobRef) (Manifest, error) {
 	var m Manifest
+	if !validID(ref.ID) || !validID(ref.SHA256) {
+		return m, errors.New("invalid bootstrap job reference")
+	}
 	b, e := sourcecapacity.ReadFile(filepath.Join(s.Directory, "jobs", ref.ID, "manifest.json"), MaxManifest)
 	if e != nil {
 		return m, e
@@ -370,7 +373,7 @@ func (s *Storage) Validate(refs *References) error {
 	if refs == nil {
 		return nil
 	}
-	if refs.RunID != s.Config.RunID {
+	if refs.Version != 1 || refs.Limits != Baseline() || len(refs.Jobs) > 64 || refs.RunID != s.Config.RunID {
 		return errors.New("bootstrap references belong to another run")
 	}
 	var count int
@@ -406,6 +409,10 @@ func ValidateArchive(run, archive string) error {
 	if e != nil {
 		return e
 	}
+	var generation uint64
+	if _, e = fmt.Sscanf(filepath.Base(archive), "generation-%d", &generation); e == nil && refs.Generation != generation {
+		return errors.New("bootstrap archive generation mismatch")
+	}
 	if c == nil {
 		return errors.New("archive has bootstrap references but run configuration is missing")
 	}
@@ -413,7 +420,7 @@ func ValidateArchive(run, archive string) error {
 	return s.Validate(refs)
 }
 func (s *Storage) Read(refs References, id string, offset, length uint64) ([]byte, error) {
-	if !validID(id) || length > MaxRead || offset+length < offset {
+	if refs.RunID != s.Config.RunID || !validID(id) || length > MaxRead || offset+length < offset {
 		return nil, errors.New("invalid artifact range")
 	}
 	for _, ref := range refs.Jobs {
@@ -462,6 +469,28 @@ func (s *Storage) artifact(refs References, id string) ([]byte, error) {
 	return nil, errors.New("artifact is not authorized for this generation lineage")
 }
 func (s *Storage) Publish(m Manifest, outputs []Input, refs *References) error {
+	if !validID(m.ID) || !validID(m.RunID) || m.Version != 1 || m.Result.Status != 0 || !m.Result.Cleaned || m.Limits != Baseline() || refs.RunID != s.Config.RunID {
+		return errors.New("invalid or unclean bootstrap publication")
+	}
+	if e := m.Request.Validate(); e != nil {
+		return e
+	}
+	if len(outputs) != len(m.Request.Outputs) || len(outputs) != len(m.Result.Artifacts) {
+		return errors.New("output count mismatch")
+	}
+	total := 0
+	for i, o := range outputs {
+		total += len(o.Data)
+		if o.Path != m.Request.Outputs[i] || len(o.Data) > MaxOutput {
+			return errors.New("output declaration/size mismatch")
+		}
+	}
+	if total > MaxOutputs {
+		return errors.New("output total quota exceeded")
+	}
+	if len(mustJSON(m)) > MaxManifest {
+		return errors.New("job manifest exceeds bound")
+	}
 	if err := s.Admit(len(outputs)); err != nil {
 		return err
 	}
@@ -754,4 +783,68 @@ func (s *Storage) Admit(outputs int) error {
 		return errors.New("bootstrap retained job/artifact quota exhausted")
 	}
 	return nil
+}
+
+// GarbageCollect removes only successes absent from every immutable archive and
+// imported parent. The caller owns a validated inactive gate; no live cursor is
+// interpreted as permission to delete an archived compiler or sysroot.
+func GarbageCollect(run string) (int, error) {
+	c, e := LoadConfig(run)
+	if e != nil || c == nil {
+		return 0, e
+	}
+	s, e := LockStorage(*c)
+	if e != nil {
+		return 0, e
+	}
+	defer s.Close()
+	keep := map[string]bool{}
+	entries, e := os.ReadDir(run)
+	if e != nil {
+		return 0, e
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "generation-") {
+			continue
+		}
+		refs, e := ReadReferences(filepath.Join(run, entry.Name()))
+		if e != nil {
+			return 0, e
+		}
+		if e = s.Validate(refs); e != nil {
+			return 0, e
+		}
+		if refs != nil {
+			for _, j := range refs.Jobs {
+				keep[j.ID] = true
+			}
+		}
+	}
+	var inherited References
+	e = readJSON(filepath.Join(run, "bootstrap-inherited.json"), &inherited, MaxManifest)
+	if e != nil && !errors.Is(e, os.ErrNotExist) {
+		return 0, e
+	}
+	if e == nil {
+		for _, j := range inherited.Jobs {
+			keep[j.ID] = true
+		}
+	}
+	jobs, e := os.ReadDir(filepath.Join(s.Directory, "jobs"))
+	if e != nil {
+		return 0, e
+	}
+	count := 0
+	for _, job := range jobs {
+		if !validID(job.Name()) {
+			return count, errors.New("unexpected job storage entry")
+		}
+		if !keep[job.Name()] {
+			if e = os.RemoveAll(filepath.Join(s.Directory, "jobs", job.Name())); e != nil {
+				return count, e
+			}
+			count++
+		}
+	}
+	return count, syncDir(filepath.Join(s.Directory, "jobs"))
 }
