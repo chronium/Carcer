@@ -1194,5 +1194,5 @@ func reviewerPrompt(objective *string, focus string, request, proposal *string, 
 		"meaningful issues, say exactly that clearly. Your findings are advisory; " +
 		"the implementor decides what to do with them.\n\n" +
 		"Review focus: " + focus + ". Prioritize that focus, while still reporting any " +
-		"blocking issue you discover.\n\n" + snapshotText + "\n\n" + objectiveText + "\n\n" + requestText + "\n\n" + proposalText
+		"blocking issue you discover.\n\n" + snapshotText + "\n\n" + objectiveText + "\n\n" + requestText + "\n\n" + proposalText + "\n\n" + doomMilestoneContract
 }

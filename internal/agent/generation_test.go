@@ -220,7 +220,7 @@ func TestGenerationPlanningPromptAndToolPolicy(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"genuinely general-purpose operating system",
-		"supplied Doom executable and data must remain immutable",
+		"Supplied original assets, including the supplied Doom executable and data, must remain immutable",
 		"preemptive execution",
 		"Trusted tools available to you",
 		"Trusted provided-asset host services",
@@ -468,6 +468,8 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	planText := "PRIVATE PLAN Ω must stay in response evidence"
 	t.Setenv(generationHelperPlan, planText)
 	runtime := newGenerationTestRuntime(t)
+	const inheritedHandoff = "source DoomGeneric would not satisfy supplied-executable milestone."
+	runtime.previous = inheritedHandoff
 	runtime.invoke = func(_ context.Context, name string, _ [][]byte) (guest.ToolResult, error) {
 		switch name {
 		case "list":
@@ -522,6 +524,14 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	}
 	firstParams := turns[0]["params"].(map[string]any)
 	secondParams := turns[1]["params"].(map[string]any)
+	prompt := firstParams["input"].([]any)[0].(map[string]any)["text"].(string)
+	assertDoomMilestoneInstructions(t, prompt)
+	if runtime.previous != inheritedHandoff || !strings.Contains(prompt, "Previous generation handoff:\n"+inheritedHandoff) {
+		t.Fatal("objective clarification rewrote the inherited handoff")
+	}
+	if strings.Index(prompt, "Operator objective clarification") < strings.Index(prompt, inheritedHandoff) {
+		t.Fatal("operator clarification did not follow inherited context")
+	}
 	assertAstraTurnSettings(t, firstParams, "high")
 	assertAstraTurnSettings(t, secondParams, "high")
 	if firstParams["permissions"] != planningPermissionProfile || secondParams["permissions"] != implementorPermissionProfile {
@@ -1331,6 +1341,7 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	if len(input) == 1 {
 		reviewerPrompt, _ = input[0].(map[string]any)["text"].(string)
 	}
+	assertDoomMilestoneInstructions(t, reviewerPrompt)
 	if !strings.Contains(reviewerPrompt, string(proposal)) || !strings.Contains(reviewerPrompt, fmt.Sprintf("Stable source snapshot: sha256=%s bytes=%d.", reviewerSnapshotDigest, len(reviewerSnapshot))) {
 		t.Fatalf("reviewer prompt did not receive the exact proposal: %#v", reviewerRecord)
 	}

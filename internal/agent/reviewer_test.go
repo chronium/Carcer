@@ -105,7 +105,7 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 		}
 	}
 	stream := observability.NewActivityStream()
-	objective := "Improve the current bootstrap safely."
+	objective := "Run the supplied DOS executable; source DoomGeneric would not satisfy supplied-executable milestone."
 	request := "Check the source-read boundary."
 	worker := NewReviewWorker(ReviewWorkerOptions{
 		Executable:     os.Args[0],
@@ -132,7 +132,13 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	if config := threadParams["config"].(map[string]any); config["model_reasoning_effort"] != "low" {
 		t.Fatalf("reviewer thread reasoning = %#v", config)
 	}
-	assertAstraTurnSettings(t, record["turn_request"].(map[string]any)["params"].(map[string]any), "low")
+	turnParams := record["turn_request"].(map[string]any)["params"].(map[string]any)
+	assertAstraTurnSettings(t, turnParams, "low")
+	prompt := turnParams["input"].([]any)[0].(map[string]any)["text"].(string)
+	assertDoomMilestoneInstructions(t, prompt)
+	if !strings.Contains(prompt, objective) || strings.Index(prompt, "Operator objective clarification") < strings.Index(prompt, objective) {
+		t.Fatal("reviewer did not receive the clarification after the older objective")
+	}
 	if len(runtime.calls) != 2 {
 		t.Fatalf("runtime calls = %#v", runtime.calls)
 	}

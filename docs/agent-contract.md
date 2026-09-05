@@ -5,12 +5,29 @@ the harness. The repository README, harness source, Git history, human discussio
 and prior Codex or reviewer transcripts are not exposed.
 
 The contract describes the behavioral destination: a genuinely general-purpose
-operating system, with Doom as an ordinary immutable user workload and an early
+operating system, with Doom as an ordinary user workload and an early
 interactive milestone rather than the purpose of the system. It requires generic
 userland mechanisms, eventual preemptive progress among independent runnable
 workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
+
+Go contract version 9 clarifies that a source-built Doom port, including
+DoomGeneric, can satisfy the milestone. The exact supplied DOS executable is
+not required, and its availability creates no DOS/4G compatibility requirement.
+Supplied originals remain immutable; guest-authored adaptations and build outputs
+are separate artifacts. Generic userland execution, no Doom-specific kernel or
+scheduling treatment, and concurrent progress by an unrelated workload remain
+required with the same milestone timing.
+
+The implementor and reviewer receive the same authoritative clarification after
+their inherited context or supplied objective. It explicitly supersedes contrary
+interpretations in older handoffs, guest notes, review requests or proposals, and
+objective wording, without prescribing a port or implementation approach or
+granting a capability. This is a recorded
+[operator intervention dated 2026-09-05](operator-interventions/2026-09-05-doom-milestone.md),
+applied to fresh sessions under the updated Go harness. The Python reference,
+historical handoffs, and archives are unchanged.
 
 Contract version 8 retains the version 7 behavioral contract and makes review
 requests explicit turn-yield boundaries. The requesting Sol turn is stopped and
@@ -157,10 +174,11 @@ This is a Go-only serving change. The Python reference still uses `gpt-5.6-sol`
 high for implementation and `gpt-5.6-luna` high for review, both with `auto` and
 `priority`. Existing Sol/Luna display and transcript labels remain implementor/
 reviewer role labels; recorded model metadata identifies the actual model.
-Contract version 8, prompts, permissions, tool delivery checks, and the review
-yield/quiesce/resume lifecycle are unchanged. Historical events and archives are
-not backfilled. The Go serving update does not authorize live cutover or provision
-pending feature request #3.
+That serving update retained contract version 8, prompts, permissions, tool
+delivery checks, and the review yield/quiesce/resume lifecycle. The later Go
+version 9 objective clarification is described above. Historical events and
+archives are not backfilled. The Go serving update does not authorize live
+cutover or provision pending feature request #3.
 
 Installed-server observations, disposable runtime probes, and the Go test results
 are recorded in [astra-model-upgrade.md](astra-model-upgrade.md).
