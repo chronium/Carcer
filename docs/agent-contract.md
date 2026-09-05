@@ -118,21 +118,52 @@ tool added by generation N becomes available to the fresh generation N+1 session
 but need not appear in generation N's already-running session. Unknown advertised
 names do not acquire schemas or trusted bridge behavior.
 
-The implementor requests `gpt-5.6-sol` with high reasoning, automatic reasoning
-summaries, and Codex Fast mode. The reviewer independently requests
-`gpt-5.6-luna` with high reasoning, automatic reasoning summaries, and Fast mode.
-Reasoning effort and reasoning-summary mode are separate serving settings; every
-turn explicitly sends `effort=high` and `summary=auto`. In the current app-server
-catalog, Fast is the protocol service-tier ID `priority`. The harness validates
-that exact catalog-backed tier before starting either thread and repeats all
-requested serving settings on every turn; it never falls back silently to an
-omitted summary or the default service tier. The thread remains on the same
-settings across explicit continuation turns and pause/resume.
+## Serving settings
 
-Structured Codex lifecycle events record the requested reasoning-summary mode,
-service-tier ID, and its catalog display name, when supplied, while implementor
-events also record agent contract version 7. These are serving and prompt
-provenance only. Model-token metric labels remain exactly `model` and `role`.
+The Go v1 harness uses these defaults:
+
+| Role/phase | Model | Reasoning effort | Reasoning summary | Service tier |
+| --- | --- | --- | --- | --- |
+| Implementor planning and implementation | `gpt-6-astra` | `high` | `auto` | `priority` (Fast) |
+| Independent reviewer | `gpt-6-astra` | `low` | `auto` | `priority` (Fast) |
+| Implementor continuation, pause/resume, and review-result continuation | `gpt-6-astra` | `high` | `auto` | `priority` (Fast) |
+| Retained read-only exit interview | `gpt-6-astra` | `high` | `auto` | `priority` (Fast) |
+
+The installed Codex 0.153.4 app-server's `model/list`, checked on 2026-09-05,
+advertises `gpt-6-astra` with `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`.
+Its description of `low` is lighter reasoning; “Astra light” therefore selects
+`low`, not a model alias or a literal `light` effort. The same catalog advertises
+Fast with the protocol tier ID `priority`. These local observations supplement
+the [official Astra model reference](https://developers.openai.com/api/docs/models/gpt-6-astra);
+each new process still validates its exact requested settings against its own catalog.
+
+Go sends `config.model_reasoning_effort` in `thread/start` and checks the returned
+`reasoningEffort`, model, and tier before admitting the session. Every turn repeats
+the role's model, effort, `summary=auto`, and tier. Unsupported catalog choices or
+substituted thread settings fail without silent fallback. Summary mode is separate
+from reasoning effort; Fast changes the serving tier, not the role's reasoning.
+
+The existing operational events in `events.jsonl` record `model`,
+`reasoning_effort`, `reasoning_summary`, `service_tier`, and the catalog tier name.
+Go session/review startup events follow confirmed thread selection. Planning,
+implementation, review completion, and interview events retain those settings;
+failure events describe the attempted settings and do not prove successful model
+execution. Review IDs correlate review events with private evidence; planning
+thread/turn IDs correlate planning events with its response evidence. Interview
+metadata also preserves the implementor settings. Model-token metric labels remain
+exactly `model` and `role`, keeping the two Astra roles distinguishable.
+
+This is a Go-only serving change. The Python reference still uses `gpt-5.6-sol`
+high for implementation and `gpt-5.6-luna` high for review, both with `auto` and
+`priority`. Existing Sol/Luna display and transcript labels remain implementor/
+reviewer role labels; recorded model metadata identifies the actual model.
+Contract version 8, prompts, permissions, tool delivery checks, and the review
+yield/quiesce/resume lifecycle are unchanged. Historical events and archives are
+not backfilled. The Go serving update does not authorize live cutover or provision
+pending feature request #3.
+
+Installed-server observations, disposable runtime probes, and the Go test results
+are recorded in [astra-model-upgrade.md](astra-model-upgrade.md).
 
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
 Generation 10 ran under contract version 4. No autonomous generation ran under
@@ -157,8 +188,8 @@ of runtime workspace roots. Codex 0.150.1 does not support removing a thread's
 dynamic tool declarations on a later turn, so the trusted bridge also rejects
 every dynamic tool request during an interview before it can reach guest,
 build, feature-request, or reviewer services. Questions are wrapped only with a
-neutral retrospective/read-only boundary. Serving settings remain Sol, high
-reasoning, `summary=auto`, and Fast/`priority`.
+neutral retrospective/read-only boundary. Serving settings remain those of the
+implementor: Astra high in Go, Sol high in Python, with `summary=auto` and Fast/`priority`.
 
 The plain console commands are `interview`, `ask <text>`, and
 `end-interview`; while interview mode is open, plain question text is also

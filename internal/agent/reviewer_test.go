@@ -114,6 +114,8 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 		StopTimeout:    time.Second,
 	})
 	setReviewerHelper(t, "success", "", "")
+	recordPath := filepath.Join(t.TempDir(), "reviewer.json")
+	t.Setenv(reviewerHelperRecord, recordPath)
 	result, err := worker.RunReview(context.Background(), runtime, ReviewOptions{
 		Objective: &objective,
 		Focus:     "security",
@@ -125,6 +127,12 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	if result != "No meaningful issues found." {
 		t.Fatalf("review result = %q", result)
 	}
+	record := readReviewerJSON(t, recordPath)
+	threadParams := record["thread_request"].(map[string]any)["params"].(map[string]any)
+	if config := threadParams["config"].(map[string]any); config["model_reasoning_effort"] != "low" {
+		t.Fatalf("reviewer thread reasoning = %#v", config)
+	}
+	assertAstraTurnSettings(t, record["turn_request"].(map[string]any)["params"].(map[string]any), "low")
 	if len(runtime.calls) != 2 {
 		t.Fatalf("runtime calls = %#v", runtime.calls)
 	}
@@ -155,6 +163,41 @@ func TestReviewWorkerCapturesReadOnlySourceAndEvidence(t *testing.T) {
 	events, err := os.ReadFile(runtime.eventLog.Path())
 	if err != nil || !reviewerEventHasHarnessIdentity(t, events, "review_completed", identity) {
 		t.Fatalf("review completion lacks harness identity: %v", err)
+	}
+	assertAstraServingEvents(t, events, "review_started", "low")
+	assertAstraServingEvents(t, events, "review_completed", "low")
+}
+
+func assertAstraTurnSettings(t *testing.T, params map[string]any, effort string) {
+	t.Helper()
+	if params["model"] != "gpt-6-astra" || params["effort"] != effort || params["summary"] != "auto" || params["serviceTier"] != "priority" {
+		t.Fatalf("Astra turn serving settings = %#v, want %s reasoning", params, effort)
+	}
+}
+
+func assertAstraServingEvents(t *testing.T, contents []byte, eventName, effort string) {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	found := false
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["event"] != eventName {
+			continue
+		}
+		found = true
+		data, _ := event["data"].(map[string]any)
+		if data["model"] != "gpt-6-astra" || data["reasoning_effort"] != effort || data["reasoning_summary"] != "auto" || data["service_tier"] != "priority" {
+			t.Fatalf("%s serving provenance = %#v, want %s reasoning", eventName, data, effort)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("missing %s serving provenance", eventName)
 	}
 }
 
@@ -519,21 +562,21 @@ func runReviewerFakeAppServer() {
 	respond(account, map[string]any{"account": map[string]any{"type": "chatgpt"}})
 	modelRequest := expect("model/list")
 	respond(modelRequest, map[string]any{"data": []any{map[string]any{
-		"model": "gpt-5.6-luna", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}},
+		"model": "gpt-6-astra", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "low"}},
 		"serviceTiers": []any{map[string]any{"id": "priority", "name": "Fast"}},
 	}}, "nextCursor": nil})
 	threadRequest := expect("thread/start")
 	threadID := fmt.Sprintf("thread-%d", os.Getpid())
 	respond(threadRequest, map[string]any{
 		"thread": map[string]any{"id": threadID, "ephemeral": true},
-		"model":  "gpt-5.6-luna", "serviceTier": "priority",
+		"model":  "gpt-6-astra", "reasoningEffort": "low", "serviceTier": "priority",
 		"activePermissionProfile": map[string]any{"id": "codexos-reviewer"},
 		"sandbox":                 map[string]any{"type": "readOnly", "networkAccess": false},
 	})
 	turnRequest := expect("turn/start")
 	turnID := fmt.Sprintf("turn-%d", os.Getpid())
 	respond(turnRequest, map[string]any{"turn": map[string]any{"id": turnID}})
-	writeReviewerRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "turn_request": turnRequest})
+	writeReviewerRecord(map[string]any{"pid": os.Getpid(), "thread_id": threadID, "thread_request": threadRequest, "turn_request": turnRequest})
 	if path := os.Getenv(reviewerHelperReady); path != "" {
 		_ = os.WriteFile(path, []byte("ready"), 0o600)
 	}

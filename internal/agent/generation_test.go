@@ -481,6 +481,7 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	session := NewGenerationSession(runtime, GenerationSessionOptions{
 		Executable: os.Args[0], AuthFile: fakeAuthFile(t), StopTimeout: time.Second,
 	})
+	t.Cleanup(func() { _ = session.Close() })
 	result, err := session.RunInitialTurn()
 	if err != nil {
 		if _, statErr := os.Stat(recordPath); statErr == nil {
@@ -521,6 +522,8 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	}
 	firstParams := turns[0]["params"].(map[string]any)
 	secondParams := turns[1]["params"].(map[string]any)
+	assertAstraTurnSettings(t, firstParams, "high")
+	assertAstraTurnSettings(t, secondParams, "high")
 	if firstParams["permissions"] != planningPermissionProfile || secondParams["permissions"] != implementorPermissionProfile {
 		t.Fatalf("turn permissions = %#v, %#v", firstParams, secondParams)
 	}
@@ -549,6 +552,9 @@ func TestGenerationSessionRunsPlanningAndImplementationOnOneThread(t *testing.T)
 	}
 	if bytes.Contains(events, []byte(planText)) {
 		t.Fatal("private planning response leaked into events.jsonl")
+	}
+	for _, event := range []string{"codex_session_started", "planning_started", "planning_completed", "codex_turn_started", "codex_turn_completed"} {
+		assertAstraServingEvents(t, events, event, "high")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -1256,6 +1262,7 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	session := NewGenerationSession(runtime, GenerationSessionOptions{
 		Executable: os.Args[0], AuthFile: fakeAuthFile(t), ReviewerExecutable: reviewerExecutable, ActivityStream: activity, StopTimeout: time.Second,
 	})
+	t.Cleanup(func() { _ = session.Close() })
 	result, err := session.RunInitialTurn()
 	if err != nil || result.TurnStatus != "completed" {
 		t.Fatalf("yielded review result = %#v, %v", result, err)
@@ -1315,6 +1322,10 @@ func assertGenerationPlanningReviewYield(t *testing.T, mode, reviewerMode string
 	reviewerRecord := readReviewerJSON(t, reviewerRecordPath)
 	turnRequest, _ := reviewerRecord["turn_request"].(map[string]any)
 	params, _ := turnRequest["params"].(map[string]any)
+	assertAstraTurnSettings(t, params, "low")
+	assertAstraServingEvents(t, events, "review_started", "low")
+	assertAstraServingEvents(t, events, "planning_started", "high")
+	assertAstraServingEvents(t, events, "codex_turn_started", "high")
 	input, _ := params["input"].([]any)
 	reviewerPrompt := ""
 	if len(input) == 1 {
@@ -1518,6 +1529,7 @@ func TestGenerationSessionRetainsReadOnlyExitInterviewOnFrozenThread(t *testing.
 		t.Fatalf("turn/start messages = %#v", turns)
 	}
 	for _, turn := range turns[2:] {
+		assertAstraTurnSettings(t, turn, "high")
 		if turn["threadId"] != threadID || turn["permissions"] != interviewPermissionProfile {
 			t.Fatalf("interview turn identity/policy = %#v", turn)
 		}
@@ -2518,14 +2530,14 @@ func runGenerationFakeAppServer() {
 	respond(account, map[string]any{"account": map[string]any{"type": "chatgpt"}})
 	model := expect("model/list")
 	respond(model, map[string]any{"data": []any{map[string]any{
-		"model": "gpt-5.6-sol", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}},
+		"model": "gpt-6-astra", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}},
 		"serviceTiers": []any{map[string]any{"id": "priority", "name": "Priority"}},
 	}}, "nextCursor": nil})
 	thread := expect("thread/start")
 	threadID := fmt.Sprintf("generation-thread-%d", os.Getpid())
 	respond(thread, map[string]any{
 		"thread": map[string]any{"id": threadID, "ephemeral": true},
-		"model":  "gpt-5.6-sol", "serviceTier": "priority",
+		"model":  "gpt-6-astra", "reasoningEffort": "high", "serviceTier": "priority",
 		"activePermissionProfile": map[string]any{"id": implementorPermissionProfile},
 		"sandbox":                 map[string]any{"type": "workspace-write", "networkAccess": false},
 	})

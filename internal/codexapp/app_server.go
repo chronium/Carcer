@@ -40,6 +40,7 @@ type CodexAppServerOptions struct {
 // StartThreadOptions contains the exact policy values sent to thread/start.
 type StartThreadOptions struct {
 	Model             string
+	Effort            string
 	ServiceTier       string
 	PermissionProfile string
 	DynamicTools      []map[string]any
@@ -395,6 +396,7 @@ func (s *CodexAppServer) StartThread(ctx context.Context, options StartThreadOpt
 		"allowProviderModelFallback": false,
 		"approvalPolicy":             "never",
 		"approvalsReviewer":          "user",
+		"config":                     map[string]any{"model_reasoning_effort": options.Effort},
 		"cwd":                        workspace,
 		"dynamicTools":               options.DynamicTools,
 		"environments":               []any{},
@@ -424,6 +426,9 @@ func (s *CodexAppServer) StartThread(ctx context.Context, options StartThreadOpt
 	}
 	if values["model"] != options.Model {
 		return "", &Error{Reason: "Codex app-server did not select the requested model"}
+	}
+	if values["reasoningEffort"] != options.Effort {
+		return "", &Error{Reason: "Codex app-server did not select the requested reasoning effort"}
 	}
 	if values["serviceTier"] != options.ServiceTier {
 		return "", &Error{Reason: "Codex app-server did not select the requested service tier"}
