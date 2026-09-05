@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"codexos/internal/sourcecapacity"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,13 @@ func CaptureSourceSnapshot(ctx context.Context, invoke func(context.Context, str
 // CaptureCanonicalSourceSnapshot obtains and identifies the canonical source
 // snapshot while the caller owns the mutable-source serialization boundary.
 func CaptureCanonicalSourceSnapshot(ctx context.Context, invoke func(context.Context, string, [][]byte) (ToolResult, error)) (SourceSnapshot, error) {
+	return CaptureCanonicalSourceSnapshotWithBudget(ctx, invoke, 0)
+}
+
+func CaptureCanonicalSourceSnapshotWithBudget(ctx context.Context, invoke func(context.Context, string, [][]byte) (ToolResult, error), budget sourcecapacity.Budget) (SourceSnapshot, error) {
+	if err := budget.Validate(); err != nil {
+		return SourceSnapshot{}, err
+	}
 	if ctx == nil || invoke == nil {
 		return SourceSnapshot{}, errors.New("source snapshot capture is unavailable")
 	}
@@ -42,6 +50,9 @@ func CaptureCanonicalSourceSnapshot(ctx context.Context, invoke func(context.Con
 	if text != "" {
 		paths = strings.Split(text, "\n")
 	}
+	if len(paths) > maxSnapshotFiles {
+		return SourceSnapshot{}, errors.New("source snapshot contains more than 128 files")
+	}
 	sort.Strings(paths)
 	files := make([]SnapshotFile, 0, len(paths))
 	total := 0
@@ -55,7 +66,7 @@ func CaptureCanonicalSourceSnapshot(ctx context.Context, invoke func(context.Con
 		if err := ValidateSourcePath(path); err != nil {
 			return SourceSnapshot{}, err
 		}
-		requested := maxSnapshotContent - total + 1
+		requested := budget.Bytes() - total + 1
 		result, readErr := invoke(ctx, "read", [][]byte{
 			[]byte(path), []byte("0"), []byte(strconv.Itoa(requested)),
 		})
@@ -65,11 +76,11 @@ func CaptureCanonicalSourceSnapshot(ctx context.Context, invoke func(context.Con
 		if result.Status != 0 {
 			return SourceSnapshot{}, fmt.Errorf("source read for %q failed with status %d", path, result.Status)
 		}
-		if len(result.Output) > maxSnapshotContent-total {
-			return SourceSnapshot{}, errors.New("source snapshot content exceeds 64 KiB")
+		if len(result.Output) > budget.Bytes()-total {
+			return SourceSnapshot{}, budget.Exceeded()
 		}
 		total += len(result.Output)
 		files = append(files, SnapshotFile{Path: path, Content: append([]byte(nil), result.Output...)})
 	}
-	return NewCanonicalSourceSnapshot(files)
+	return NewCanonicalSourceSnapshotWithBudget(files, budget)
 }
