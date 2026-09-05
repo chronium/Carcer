@@ -162,6 +162,9 @@ yield/quiesce/resume lifecycle are unchanged. Historical events and archives are
 not backfilled. The Go serving update does not authorize live cutover or provision
 pending feature request #3.
 
+Installed-server observations, disposable runtime probes, and the Go test results
+are recorded in [astra-model-upgrade.md](astra-model-upgrade.md).
+
 In `experiment-002`, generations 0 through 9 ran under contract version 3.
 Generation 10 ran under contract version 4. No autonomous generation ran under
 contract version 5 before it was superseded. Generations 11 through 15 ran under
