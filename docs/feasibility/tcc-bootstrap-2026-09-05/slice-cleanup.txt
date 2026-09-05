@@ -1,0 +1,5 @@
+Removed '/run/user/1000/systemd/user.control/codexos-tcc-feas-285048.slice.d/50-TasksMax.conf'.
+Removed '/run/user/1000/systemd/user.control/codexos-tcc-feas-285048.slice.d/50-CPUQuota.conf'.
+Removed '/run/user/1000/systemd/user.control/codexos-tcc-feas-285048.slice.d/50-MemorySwapMax.conf'.
+Removed '/run/user/1000/systemd/user.control/codexos-tcc-feas-285048.slice.d/50-MemoryMax.conf'.
+Removed '/run/user/1000/systemd/user.control/codexos-tcc-feas-285048.slice.d'.

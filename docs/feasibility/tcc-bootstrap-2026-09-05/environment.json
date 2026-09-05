@@ -1,0 +1,39 @@
+{
+  "host": {
+    "arch": "amd64",
+    "os": "linux",
+    "cgroupVersion": "v2",
+    "cgroupManager": "systemd",
+    "cgroupControllers": [
+      "cpu",
+      "io",
+      "memory",
+      "pids"
+    ],
+    "security": {
+      "apparmorEnabled": false,
+      "capabilities": "CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT",
+      "rootless": true,
+      "seccompEnabled": true,
+      "seccompProfilePath": "/usr/share/containers/seccomp.json",
+      "selinuxEnabled": true
+    },
+    "ociRuntime": {
+      "name": "crun",
+      "package": "crun-1.27-1.fc44.x86_64",
+      "path": "/usr/bin/crun",
+      "version": "crun version 1.27\ncommit: a718a92cc9a94955a5a550b6fdec1378c247ec50\nrundir: /run/user/1000/crun\nspec: 1.0.0\n+SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +LIBKRUN +WASM:wasmedge +YAJL"
+    }
+  },
+  "version": {
+    "APIVersion": "5.8.1",
+    "Version": "5.8.1",
+    "GoVersion": "go1.26.0-X:nodwarf5",
+    "GitCommit": "c6077f645788743258a1a749f8005b4fb3cbe533",
+    "BuiltTime": "Wed Mar 11 02:00:00 2026",
+    "Built": 1773187200,
+    "BuildOrigin": "Fedora Project",
+    "OsArch": "linux/amd64",
+    "Os": "linux"
+  }
+}

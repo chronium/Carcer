@@ -1,0 +1,4 @@
+memory.max=805306368
+memory.swap.max=0
+cpu.max=100000 100000
+pids.max=96

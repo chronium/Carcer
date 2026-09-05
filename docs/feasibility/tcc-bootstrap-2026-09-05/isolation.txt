@@ -1,0 +1,14 @@
+uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)
+memory.max=67108864
+memory.swap.max=0
+pids.max=16
+cpu.max=50000 100000
+CapEff:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	2
+Max file size             67108864             67108864             bytes
+Max core file size        0                    0                    bytes
+Max open files            128                  128                  files
+lo
+native-c99-c11-smoke=42
+retrieved-tcc-executes

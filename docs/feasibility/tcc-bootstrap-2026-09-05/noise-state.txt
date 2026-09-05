@@ -1,0 +1,3 @@
+captured_bytes=65537
+retained_diagnostic_bytes=65536
+overflow_cancelled=true
