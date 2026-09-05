@@ -21,6 +21,7 @@ import (
 	"codexos/internal/observability"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 	"codexos/internal/store"
 )
 
@@ -3124,7 +3125,15 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 		}
 		approvedText = "Approved external feature requests for this run:\n\n" + strings.Join(parts, "\n\n")
 	}
-	return implementorContract + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
+	var budget sourcecapacity.Budget
+	if value, ok := runtime.(interface{ SourceCapacity() sourcecapacity.Budget }); ok {
+		budget = value.SourceCapacity()
+	}
+	if err := budget.Validate(); err != nil {
+		return "", err
+	}
+	capacityText := fmt.Sprintf("Current trusted source capacity: %d aggregate file-content bytes, plus v1 serialized framing (at most %d snapshot bytes). File count remains 128 and path length remains 255 bytes. This is the harness capacity; guest-side buffers and tools are separate.", budget.Bytes(), budget.SnapshotLimit())
+	return implementorContract + "\n\n" + capacityText + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
 }
 
 func currentPromptContextFor(runtime GenerationRuntime) (string, bool, bool, qemu.HardwareProfile, []store.FeatureRequest, error) {

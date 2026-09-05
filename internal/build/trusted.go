@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"codexos/internal/guest"
+	"codexos/internal/sourcecapacity"
 )
 
 const (
@@ -65,6 +66,7 @@ type ToolPaths struct {
 // pinned third_party/limine inputs.  Empty RepositoryRoot enables discovery.
 // The zero timeout and diagnostic limit select the Python reference defaults.
 type Config struct {
+	SourceCapacity  sourcecapacity.Budget
 	RepositoryRoot  string
 	Tools           ToolPaths
 	StepTimeout     time.Duration
@@ -129,7 +131,7 @@ func (e *buildStepError) Error() string {
 func (e *buildStepError) Unwrap() error { return e.err }
 
 func buildSourceSnapshot(ctx context.Context, snapshotData []byte, outputDirectory string, configuration Config) BuildResult {
-	snapshot, err := guest.ParseSourceSnapshot(snapshotData)
+	snapshot, err := guest.ParseSourceSnapshotWithBudget(snapshotData, configuration.SourceCapacity)
 	if err != nil {
 		return harnessFailure(err)
 	}

@@ -156,6 +156,12 @@ func runWithIOConfigured(
 	if inheritanceRequested && !gitConfigured {
 		return errors.New("cross-run inheritance requires Git provenance options")
 	}
+	if options.InheritSourceCapacity != 0 && !inheritanceRequested {
+		return errors.New("--inherit-source-capacity requires cross-run inheritance")
+	}
+	if err := options.InheritSourceCapacity.Validate(); err != nil {
+		return err
+	}
 	harnessIdentity := provenance.CloneHarnessIdentity(configuration.harnessIdentity)
 	if harnessIdentity == nil {
 		captured, captureErr := provenance.CaptureCurrentHarnessIdentity()
@@ -165,7 +171,7 @@ func runWithIOConfigured(
 		harnessIdentity = &captured
 	}
 	if inheritanceRequested {
-		if _, err := store.InitializeCrossRunBootstrapWithHarnessIdentity(
+		if _, err := store.InitializeCrossRunBootstrapWithCapacity(
 			options.RunDirectory,
 			options.InitialISO,
 			options.InheritFromRun,
@@ -173,6 +179,7 @@ func runWithIOConfigured(
 			options.GitRepository,
 			options.GitBaseRef,
 			harnessIdentity,
+			options.InheritSourceCapacity,
 		); err != nil {
 			return err
 		}

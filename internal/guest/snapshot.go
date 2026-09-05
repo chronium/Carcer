@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"codexos/internal/sourcecapacity"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -38,7 +39,11 @@ func (e *SourceSnapshotError) Error() string { return e.Reason }
 
 // NewSourceSnapshot validates and frames files in their supplied order.
 func NewSourceSnapshot(files []SnapshotFile) (SourceSnapshot, error) {
-	if err := validateSnapshotFiles(files); err != nil {
+	return NewSourceSnapshotWithBudget(files, 0)
+}
+
+func NewSourceSnapshotWithBudget(files []SnapshotFile, budget sourcecapacity.Budget) (SourceSnapshot, error) {
+	if err := validateSnapshotFiles(files, budget); err != nil {
 		return SourceSnapshot{}, err
 	}
 	files = cloneSnapshotFiles(files)
@@ -48,15 +53,26 @@ func NewSourceSnapshot(files []SnapshotFile) (SourceSnapshot, error) {
 
 // NewCanonicalSourceSnapshot orders selected source paths before framing.
 func NewCanonicalSourceSnapshot(files []SnapshotFile) (SourceSnapshot, error) {
+	return NewCanonicalSourceSnapshotWithBudget(files, 0)
+}
+
+func NewCanonicalSourceSnapshotWithBudget(files []SnapshotFile, budget sourcecapacity.Budget) (SourceSnapshot, error) {
 	files = cloneSnapshotFiles(files)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return NewSourceSnapshot(files)
+	return NewSourceSnapshotWithBudget(files, budget)
 }
 
 // ParseSourceSnapshot validates framing while retaining its exact bytes and
 // file order. Incoming build snapshots are not silently rewritten.
 func ParseSourceSnapshot(data []byte) (SourceSnapshot, error) {
-	files, err := decodeSnapshotFiles(data)
+	return ParseSourceSnapshotWithBudget(data, 0)
+}
+
+func ParseSourceSnapshotWithBudget(data []byte, budget sourcecapacity.Budget) (SourceSnapshot, error) {
+	if err := budget.Validate(); err != nil {
+		return SourceSnapshot{}, err
+	}
+	files, err := decodeSnapshotFiles(data, budget)
 	if err != nil {
 		return SourceSnapshot{}, err
 	}
@@ -72,7 +88,11 @@ func (s SourceSnapshot) SHA256() string { return s.sha256 }
 func (s SourceSnapshot) Size() uint64 { return uint64(len(s.encoded)) }
 
 func EncodeSourceSnapshot(files []SnapshotFile) ([]byte, error) {
-	snapshot, err := NewSourceSnapshot(files)
+	return EncodeSourceSnapshotWithBudget(files, 0)
+}
+
+func EncodeSourceSnapshotWithBudget(files []SnapshotFile, budget sourcecapacity.Budget) ([]byte, error) {
+	snapshot, err := NewSourceSnapshotWithBudget(files, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +121,18 @@ func encodeSnapshotFiles(files []SnapshotFile) []byte {
 }
 
 func DecodeSourceSnapshot(data []byte) ([]SnapshotFile, error) {
-	snapshot, err := ParseSourceSnapshot(data)
+	return DecodeSourceSnapshotWithBudget(data, 0)
+}
+
+func DecodeSourceSnapshotWithBudget(data []byte, budget sourcecapacity.Budget) ([]SnapshotFile, error) {
+	snapshot, err := ParseSourceSnapshotWithBudget(data, budget)
 	if err != nil {
 		return nil, err
 	}
 	return snapshot.Files(), nil
 }
 
-func decodeSnapshotFiles(data []byte) ([]SnapshotFile, error) {
+func decodeSnapshotFiles(data []byte, budget sourcecapacity.Budget) ([]SnapshotFile, error) {
 	offset := 0
 	take := func(length int) ([]byte, error) {
 		if length < 0 || length > len(data)-offset {
@@ -152,8 +176,8 @@ func decodeSnapshotFiles(data []byte) ([]SnapshotFile, error) {
 			return nil, err
 		}
 		contentLength := int(binary.LittleEndian.Uint32(encodedContentLength))
-		if contentLength > maxSnapshotContent-totalContent {
-			return nil, &SourceSnapshotError{Reason: "source snapshot content exceeds 64 KiB"}
+		if contentLength > budget.Bytes()-totalContent {
+			return nil, &SourceSnapshotError{Reason: budget.Exceeded().Error()}
 		}
 		totalContent += contentLength
 		content, err := take(contentLength)
@@ -165,7 +189,7 @@ func decodeSnapshotFiles(data []byte) ([]SnapshotFile, error) {
 	if offset != len(data) {
 		return nil, &SourceSnapshotError{Reason: "unexpected trailing source snapshot data"}
 	}
-	if err := validateSnapshotFiles(files); err != nil {
+	if err := validateSnapshotFiles(files, budget); err != nil {
 		return nil, err
 	}
 	return files, nil
@@ -184,7 +208,10 @@ func cloneSnapshotFiles(files []SnapshotFile) []SnapshotFile {
 	return cloned
 }
 
-func validateSnapshotFiles(files []SnapshotFile) error {
+func validateSnapshotFiles(files []SnapshotFile, budget sourcecapacity.Budget) error {
+	if err := budget.Validate(); err != nil {
+		return err
+	}
 	if len(files) > maxSnapshotFiles {
 		return &SourceSnapshotError{Reason: "source snapshot contains more than 128 files"}
 	}
@@ -198,8 +225,8 @@ func validateSnapshotFiles(files []SnapshotFile) error {
 			return &SourceSnapshotError{Reason: fmt.Sprintf("duplicate source path: %s", file.Path)}
 		}
 		paths[file.Path] = struct{}{}
-		if len(file.Content) > maxSnapshotContent-totalContent {
-			return &SourceSnapshotError{Reason: "source snapshot content exceeds 64 KiB"}
+		if len(file.Content) > budget.Bytes()-totalContent {
+			return &SourceSnapshotError{Reason: budget.Exceeded().Error()}
 		}
 		totalContent += len(file.Content)
 	}

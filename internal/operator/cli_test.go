@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"codexos/internal/sourcecapacity"
 )
 
 func TestCommandPreservesValidatedStartupOptions(t *testing.T) {
@@ -151,5 +153,44 @@ func TestCommandPreservesExplicitEmptyPathFlagPresence(t *testing.T) {
 	}
 	if !received.GitConfigured || !received.InheritanceRequested || !received.ProvidedAssetsConfigured {
 		t.Fatalf("explicit flag presence was lost: %#v", received)
+	}
+}
+
+func TestCommandInheritanceSourceCapacity(t *testing.T) {
+	base := []string{"--run-directory", "new", "--initial-iso", "successor.iso", "--inherit-from-run", "old", "--inherit-from-generation", "1", "--git-repository", "repo", "--git-base-ref", "base"}
+	for _, test := range []struct {
+		value   string
+		want    sourcecapacity.Budget
+		invalid bool
+	}{
+		{"", 0, false}, {"65536", sourcecapacity.Default, false}, {"1048576", sourcecapacity.Expanded, false}, {"0", 0, true}, {"-1", 0, true}, {"1048577", 0, true},
+	} {
+		called := false
+		command := NewCommand(false, func(_ context.Context, options Options) error {
+			called = true
+			if options.InheritSourceCapacity != test.want {
+				t.Fatalf("capacity: %v", options.InheritSourceCapacity)
+			}
+			return nil
+		})
+		args := append([]string(nil), base...)
+		if test.value != "" {
+			args = append(args, "--inherit-source-capacity", test.value)
+		}
+		command.SetArgs(args)
+		err := command.Execute()
+		if (err != nil) != test.invalid || called == test.invalid {
+			t.Fatalf("capacity %q: %v, runner called %v", test.value, err, called)
+		}
+	}
+	for _, mode := range [][]string{{"--initial-iso", "seed.iso"}, {"--resume-at-gate"}} {
+		command := NewCommand(false, func(context.Context, Options) error {
+			t.Fatal("capacity without inheritance reached runner")
+			return nil
+		})
+		command.SetArgs(append(append([]string{"--run-directory", "new", "--inherit-source-capacity", "1048576"}, mode...), "--plain"))
+		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "requires cross-run inheritance") {
+			t.Fatalf("mode %v: %v", mode, err)
+		}
 	}
 }

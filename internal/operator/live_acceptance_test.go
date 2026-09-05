@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	"codexos/internal/observability"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 	"codexos/internal/store"
 )
 
@@ -288,6 +290,12 @@ func TestRunnerCompletesContinuesAndRollsBackDisposableGeneration(t *testing.T) 
 }
 
 func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
+	for _, budget := range []sourcecapacity.Budget{0, sourcecapacity.Expanded} {
+		t.Run(fmt.Sprint(budget.Bytes()), func(t *testing.T) { testRunnerBootsCrossRunInheritanceWithGitProvenance(t, budget) })
+	}
+}
+
+func testRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T, budget sourcecapacity.Budget) {
 	processRecords := t.TempDir()
 	t.Setenv("CODEXOS_DISPOSABLE_PROCESS_RECORDS", processRecords)
 	qemuExecutable := buildDisposableRunnerQEMU(t)
@@ -305,14 +313,14 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := guest.EncodeSourceSnapshot([]guest.SnapshotFile{{
-		Path: "seed/kernel.c", Content: []byte("inherited source\n"),
-	}})
+	snapshot, err := guest.EncodeSourceSnapshotWithBudget([]guest.SnapshotFile{{
+		Path: "seed/kernel.c", Content: bytes.Repeat([]byte("x"), budget.Bytes()),
+	}}, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := experiment.WriteCompletedArchive(sourceRun, experiment.CompletedArchive{
-		Generation: 0, Transition: "initial", Hardware: hardware,
+		Generation: 0, Transition: "initial", Hardware: hardware, SourceCapacity: budget,
 		BootISO: []byte("source boot image"), Handoff: "Inherited handoff λ.\n",
 		SourceSnapshot: snapshot, KernelELF: []byte("inherited kernel"),
 		SuccessorISO: []byte("inherited successor image"),
@@ -361,7 +369,7 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 		GitRepository:         repository,
 		GitBaseRef:            "source/generation-0000",
 		InheritFromRun:        sourceRun,
-		InheritFromGeneration: 0,
+		InheritFromGeneration: 0, InheritSourceCapacity: budget,
 	}, strings.NewReader("status\nfeatures\nfeature 1\nfeature 2\nabort cross-run acceptance stop\ny\nquit\n"), &output, runnerConfiguration{
 		live: experiment.LiveRunOptions{
 			QEMUExecutable: qemuExecutable, HardwareProfile: qemu.TestHardwareProfile,
@@ -415,9 +423,18 @@ func TestRunnerBootsCrossRunInheritanceWithGitProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := loaded.ReopenAtGate(); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SourceCapacity().Bytes() != budget.Bytes() {
+		t.Fatal("inherited budget lost on gate reopen")
+	}
 	archive, err := loaded.InspectGeneration(0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if archive.SourceCapacity.Bytes() != budget.Bytes() {
+		t.Fatal("inherited generation budget missing from archive")
 	}
 	if archive.Outcome != "aborted" || archive.Transition != "initial" || archive.ParentGeneration != nil {
 		t.Fatalf("destination archive = %#v", archive)

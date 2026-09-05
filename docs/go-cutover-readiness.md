@@ -251,10 +251,16 @@ Cross-run loading bounds each provenance file at 16 MiB and each Git verificatio
 command at 1 MiB of combined output. Python does not impose those explicit
 limits; valid handoffs, ledgers, manifests, and Git identities are much smaller.
 Generation archive loading similarly bounds metadata at 64 KiB, hardware and
-forensic manifests at 1 MiB, handoffs at 16 KiB, and source snapshots at 1 MiB.
+forensic manifests at 1 MiB, and handoffs at 16 KiB. Source snapshot reads use
+the archived content budget plus the maximum v1 framing overhead (33,410 bytes),
+including completed and aborted forensic snapshots. Default/legacy content stays
+64 KiB; an explicitly provisioned Go run supports 1 MiB of content. See
+[run source capacity](run-source-capacity.md) for request #4 and the operator
+procedure. Provisioned archives add a Go-only setting file; Python is unchanged.
 It also rejects symlinks anywhere under archived boot, source, or successor
 trees, whereas Python checks their roots and named required files. Valid archives
-produced by either harness contain no such symlinks and remain compatible.
+produced by either harness contain no such symlinks. Unprovisioned archives
+retain cross-language compatibility; the provisioned extension requires Go.
 Go bounds metric label values at 128 UTF-8 bytes and maps unknown reviewer
 focuses, operator actions, and token roles to fixed fallback values. Python
 passes those trusted strings through unchanged. Current harness catalogs and
