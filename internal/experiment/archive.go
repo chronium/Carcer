@@ -16,6 +16,7 @@ import (
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 )
 
 // CompletedArchive is the trusted input required to publish one completed
@@ -35,6 +36,7 @@ type CompletedArchive struct {
 	QEMUStdout       []byte
 	QEMUStderr       []byte
 	HarnessIdentity  *provenance.HarnessIdentity
+	SourceCapacity   sourcecapacity.Budget
 }
 
 // AbortedArchive is the trusted input required to publish one aborted
@@ -51,6 +53,7 @@ type AbortedArchive struct {
 	QEMUStderr       []byte
 	LatestSuccess    *AbortedSuccessEvidence
 	HarnessIdentity  *provenance.HarnessIdentity
+	SourceCapacity   sourcecapacity.Budget
 }
 
 // AbortedSuccessEvidence is the optional latest-success pair retained in an
@@ -75,6 +78,7 @@ type completedArchiveFiles struct {
 	QEMUStdout       string
 	QEMUStderr       string
 	HarnessIdentity  *provenance.HarnessIdentity
+	SourceCapacity   sourcecapacity.Budget
 }
 
 type abortedArchiveFiles struct {
@@ -88,6 +92,7 @@ type abortedArchiveFiles struct {
 	QEMUStderr       string
 	LatestSuccess    *AbortedSuccessEvidence
 	HarnessIdentity  *provenance.HarnessIdentity
+	SourceCapacity   sourcecapacity.Budget
 }
 
 // WriteCompletedArchive validates and durably publishes one immutable
@@ -104,7 +109,7 @@ func WriteCompletedArchive(runDirectory string, input CompletedArchive) (Archive
 	if !utf8.ValidString(input.Handoff) {
 		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation handoff is not valid UTF-8"}
 	}
-	if _, err := guest.DecodeSourceSnapshot(input.SourceSnapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(input.SourceSnapshot, input.SourceCapacity); err != nil {
 		return ArchivedGeneration{}, err
 	}
 	return publishArchive(runDirectory, input.Generation, func(staging string) error {
@@ -113,6 +118,11 @@ func WriteCompletedArchive(runDirectory string, input CompletedArchive) (Archive
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "completed", input.ParentGeneration, input.Transition); err != nil {
 			return err
+		}
+		if input.SourceCapacity != 0 {
+			if err := sourcecapacity.Save(staging, input.SourceCapacity); err != nil {
+				return err
+			}
 		}
 		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
@@ -130,7 +140,7 @@ func WriteCompletedArchive(runDirectory string, input CompletedArchive) (Archive
 		if err := writeArchiveFile(staging, sourceSnapshotName, input.SourceSnapshot); err != nil {
 			return err
 		}
-		if err := materializeSnapshot(input.SourceSnapshot, filepath.Join(staging, sourceName)); err != nil {
+		if err := materializeSnapshot(input.SourceSnapshot, filepath.Join(staging, sourceName), input.SourceCapacity); err != nil {
 			return err
 		}
 		if err := writeArchiveFile(staging, filepath.Join(successorName, "kernel.elf"), input.KernelELF); err != nil {
@@ -162,7 +172,7 @@ func writeCompletedArchiveFiles(runDirectory string, input completedArchiveFiles
 	if !utf8.ValidString(input.Handoff) {
 		return ArchivedGeneration{}, &GenerationRuntimeError{Reason: "generation handoff is not valid UTF-8"}
 	}
-	if _, err := guest.DecodeSourceSnapshot(input.SourceSnapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(input.SourceSnapshot, input.SourceCapacity); err != nil {
 		return ArchivedGeneration{}, err
 	}
 	return publishArchive(runDirectory, input.Generation, func(staging string) error {
@@ -171,6 +181,11 @@ func writeCompletedArchiveFiles(runDirectory string, input completedArchiveFiles
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "completed", input.ParentGeneration, input.Transition); err != nil {
 			return err
+		}
+		if input.SourceCapacity != 0 {
+			if err := sourcecapacity.Save(staging, input.SourceCapacity); err != nil {
+				return err
+			}
 		}
 		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
@@ -188,7 +203,7 @@ func writeCompletedArchiveFiles(runDirectory string, input completedArchiveFiles
 				return err
 			}
 		}
-		if err := materializeSnapshot(input.SourceSnapshot, filepath.Join(staging, sourceName)); err != nil {
+		if err := materializeSnapshot(input.SourceSnapshot, filepath.Join(staging, sourceName), input.SourceCapacity); err != nil {
 			return err
 		}
 		for destination, source := range map[string]string{
@@ -223,7 +238,7 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 		return ArchivedGeneration{}, err
 	}
 	if input.LatestSuccess != nil {
-		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation); err != nil {
+		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation, input.SourceCapacity); err != nil {
 			return ArchivedGeneration{}, err
 		}
 	}
@@ -233,6 +248,11 @@ func WriteAbortedArchive(runDirectory string, input AbortedArchive) (ArchivedGen
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "aborted", input.ParentGeneration, input.Transition); err != nil {
 			return err
+		}
+		if input.SourceCapacity != 0 {
+			if err := sourcecapacity.Save(staging, input.SourceCapacity); err != nil {
+				return err
+			}
 		}
 		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
@@ -282,7 +302,7 @@ func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (A
 		return ArchivedGeneration{}, err
 	}
 	if input.LatestSuccess != nil {
-		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation); err != nil {
+		if err := validateAbortedSuccessEvidenceBytes(input.LatestSuccess.Manifest, input.LatestSuccess.Snapshot, input.Generation, input.SourceCapacity); err != nil {
 			return ArchivedGeneration{}, err
 		}
 	}
@@ -292,6 +312,11 @@ func writeAbortedArchiveFiles(runDirectory string, input abortedArchiveFiles) (A
 		}
 		if err := writeArchiveMetadata(staging, input.Generation, "aborted", input.ParentGeneration, input.Transition); err != nil {
 			return err
+		}
+		if input.SourceCapacity != 0 {
+			if err := sourcecapacity.Save(staging, input.SourceCapacity); err != nil {
+				return err
+			}
 		}
 		if err := writeArchiveHarnessIdentity(staging, input.HarnessIdentity); err != nil {
 			return err
@@ -508,8 +533,8 @@ func copyArchiveFileVerified(staging, relative, source string, expected *provena
 	return nil
 }
 
-func materializeSnapshot(snapshot []byte, destination string) error {
-	files, err := guest.DecodeSourceSnapshot(snapshot)
+func materializeSnapshot(snapshot []byte, destination string, budget sourcecapacity.Budget) error {
+	files, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget)
 	if err != nil {
 		return err
 	}
@@ -594,7 +619,7 @@ func syncArchiveTree(root string) error {
 	return nil
 }
 
-func validateAbortedSuccessEvidenceBytes(manifestBytes, snapshot []byte, generation uint64) error {
+func validateAbortedSuccessEvidenceBytes(manifestBytes, snapshot []byte, generation uint64, budget sourcecapacity.Budget) error {
 	temporary, err := os.MkdirTemp("", ".codexos-aborted-evidence-")
 	if err != nil {
 		return &GenerationRuntimeError{Reason: "could not validate aborted generation forensic evidence", Err: err}
@@ -608,5 +633,5 @@ func validateAbortedSuccessEvidenceBytes(manifestBytes, snapshot []byte, generat
 	if err := os.WriteFile(snapshotPath, snapshot, 0o600); err != nil {
 		return err
 	}
-	return validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation)
+	return validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation, budget)
 }

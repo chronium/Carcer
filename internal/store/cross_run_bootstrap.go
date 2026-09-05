@@ -23,6 +23,7 @@ import (
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 )
 
 const (
@@ -252,6 +253,15 @@ func initializeCrossRunBootstrap(
 	archived := archives[len(archives)-1]
 	if archived.Outcome != "completed" || archived.Handoff == nil {
 		return nil, &CrossRunBootstrapError{Reason: "inherited generation did not complete cooperatively"}
+	}
+	// A fresh destination always starts at the legacy budget, independently of
+	// the source run. Reject before creating any destination/staging state.
+	inheritedSnapshot, err := sourcecapacity.ReadFile(filepath.Join(archived.ArchivePath, "source.snapshot"), archived.SourceCapacity.SnapshotLimit())
+	if err != nil {
+		return nil, wrapCrossRunSourceError(err)
+	}
+	if _, err := guest.ParseSourceSnapshot(inheritedSnapshot); err != nil {
+		return nil, &CrossRunBootstrapError{Reason: "inherited source exceeds destination source content capacity (65536 bytes)", Err: err}
 	}
 	successorISO := filepath.Join(archived.ArchivePath, "successor", "codexos.iso")
 	if equal, compareErr := crossRunFilesEqual(image, successorISO); compareErr != nil {
@@ -489,6 +499,7 @@ type crossRunIdentity struct {
 }
 
 type crossRunArchivedGeneration struct {
+	SourceCapacity  sourcecapacity.Budget
 	Generation      uint64
 	Parent          *uint64
 	Transition      string
@@ -606,6 +617,11 @@ func isASCIIDigits(value string) bool {
 
 func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchivedGeneration, error) {
 	archive := crossRunArchivedGeneration{Generation: expectedGeneration, ArchivePath: path}
+	budget, err := sourcecapacity.Load(path)
+	if err != nil {
+		return archive, crossRunArchiveError(expectedGeneration, err)
+	}
+	archive.SourceCapacity = budget
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		if err == nil {
@@ -670,11 +686,11 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 		}
 		handoff := string(handoffBytes)
 		archive.Handoff = &handoff
-		snapshot, readErr := readCrossRunRegular(path, "source.snapshot")
+		snapshot, readErr := sourcecapacity.ReadFile(filepath.Join(path, "source.snapshot"), budget.SnapshotLimit())
 		if readErr != nil {
 			return archive, crossRunArchiveError(expectedGeneration, readErr)
 		}
-		if _, decodeErr := guest.DecodeSourceSnapshot(snapshot); decodeErr != nil {
+		if _, decodeErr := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); decodeErr != nil {
 			return archive, crossRunArchiveError(expectedGeneration, decodeErr)
 		}
 		for _, name := range []string{"source", "successor"} {
@@ -690,6 +706,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 		expected := map[string]struct{}{
 			"boot": {}, "metadata.json": {}, "hardware.json": {}, "handoff.txt": {},
 			"source.snapshot": {}, "source": {}, "successor": {}, "qemu.stdout": {}, "qemu.stderr": {},
+		}
+		if budget != 0 {
+			expected[sourcecapacity.Filename] = struct{}{}
 		}
 		if archive.HarnessIdentity != nil {
 			expected[provenance.GenerationHarnessFilename] = struct{}{}
@@ -718,6 +737,9 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 			archive.AbortReason = &value
 			expected["abort-reason.txt"] = struct{}{}
 		}
+		if budget != 0 {
+			expected[sourcecapacity.Filename] = struct{}{}
+		}
 		if archive.HarnessIdentity != nil {
 			expected[provenance.GenerationHarnessFilename] = struct{}{}
 		}
@@ -729,7 +751,7 @@ func readCrossRunArchive(path string, expectedGeneration uint64) (crossRunArchiv
 			if !manifestExists || !snapshotExists {
 				return archive, crossRunArchiveError(expectedGeneration, errors.New("aborted generation forensic evidence is incomplete"))
 			}
-			if err := validateCrossRunAbortedSuccessEvidence(path, expectedGeneration); err != nil {
+			if err := validateCrossRunAbortedSuccessEvidence(path, expectedGeneration, budget); err != nil {
 				return archive, crossRunArchiveError(expectedGeneration, err)
 			}
 			expected["latest-success.json"] = struct{}{}
@@ -838,12 +860,12 @@ func validateCrossRunArchiveContents(path string, expected map[string]struct{}) 
 	return nil
 }
 
-func validateCrossRunAbortedSuccessEvidence(path string, generation uint64) error {
+func validateCrossRunAbortedSuccessEvidence(path string, generation uint64, budget sourcecapacity.Budget) error {
 	manifestBytes, err := readCrossRunRegular(path, "latest-success.json")
 	if err != nil {
 		return err
 	}
-	snapshot, err := readCrossRunRegular(path, "latest-success.snapshot")
+	snapshot, err := sourcecapacity.ReadFile(filepath.Join(path, "latest-success.snapshot"), budget.SnapshotLimit())
 	if err != nil {
 		return err
 	}
@@ -878,7 +900,7 @@ func validateCrossRunAbortedSuccessEvidence(path string, generation uint64) erro
 	if sourceValue["sha256"] != identity.SHA256 || sourceValue["size"] != identity.Size {
 		return errors.New("aborted generation source identity is invalid")
 	}
-	if _, err := guest.DecodeSourceSnapshot(snapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); err != nil {
 		return errors.New("aborted generation source identity is invalid")
 	}
 	for _, name := range []string{"kernel", "iso"} {

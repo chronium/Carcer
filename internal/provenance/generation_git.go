@@ -21,6 +21,7 @@ import (
 
 	"codexos/internal/guest"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 )
 
 const (
@@ -207,12 +208,13 @@ func (r *GenerationGitRecorder) Reconcile() ([]GenerationGitRecord, error) {
 }
 
 type generationArchive struct {
-	generation  uint64
-	parent      *uint64
-	transition  string
-	outcome     string
-	archivePath string
-	handoff     string
+	sourceCapacity sourcecapacity.Budget
+	generation     uint64
+	parent         *uint64
+	transition     string
+	outcome        string
+	archivePath    string
+	handoff        string
 }
 
 func (r *GenerationGitRecorder) archivedGenerations() ([]generationArchive, error) {
@@ -278,6 +280,10 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 	if !isDirectoryWithoutSymlink(archivePath) {
 		return generationArchive{}, fmt.Errorf("generation archive is missing: %s", archivePath)
 	}
+	budget, err := sourcecapacity.Load(archivePath)
+	if err != nil {
+		return generationArchive{}, err
+	}
 	metadataPath := filepath.Join(archivePath, "metadata.json")
 	if !isRegularWithoutSymlink(metadataPath) {
 		return generationArchive{}, fmt.Errorf("generation archive artifact is missing: %s", metadataPath)
@@ -335,11 +341,12 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 	}
 
 	archive := generationArchive{
-		generation:  generation,
-		parent:      metadata.parent,
-		transition:  metadata.transition,
-		outcome:     metadata.outcome,
-		archivePath: archivePath,
+		sourceCapacity: budget,
+		generation:     generation,
+		parent:         metadata.parent,
+		transition:     metadata.transition,
+		outcome:        metadata.outcome,
+		archivePath:    archivePath,
 	}
 	if metadata.outcome == "completed" {
 		handoffPath := filepath.Join(archivePath, "handoff.txt")
@@ -368,16 +375,19 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 		if !utf8.Valid(handoffBytes) {
 			return generationArchive{}, errors.New("generation handoff is not valid UTF-8")
 		}
-		snapshot, err := os.ReadFile(snapshotPath)
+		snapshot, err := sourcecapacity.ReadFile(snapshotPath, budget.SnapshotLimit())
 		if err != nil {
 			return generationArchive{}, err
 		}
-		if _, err := guest.DecodeSourceSnapshot(snapshot); err != nil {
+		if _, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); err != nil {
 			return generationArchive{}, err
 		}
 		archive.handoff = string(handoffBytes)
 		names := []string{
 			"boot", "metadata.json", "hardware.json", "handoff.txt", "source.snapshot", "source", "successor", "qemu.stdout", "qemu.stderr",
+		}
+		if budget != 0 {
+			names = append(names, sourcecapacity.Filename)
 		}
 		if hasHarnessIdentity {
 			names = append(names, GenerationHarnessFilename)
@@ -411,6 +421,9 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return generationArchive{}, statErr
 		}
+		if budget != 0 {
+			names = append(names, sourcecapacity.Filename)
+		}
 		if hasHarnessIdentity {
 			names = append(names, GenerationHarnessFilename)
 		}
@@ -422,7 +435,7 @@ func (r *GenerationGitRecorder) readArchivedGeneration(generation uint64) (gener
 			if !isRegularWithoutSymlink(manifestPath) || !isRegularWithoutSymlink(snapshotPath) {
 				return generationArchive{}, errors.New("aborted generation forensic evidence is incomplete")
 			}
-			if err := validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation); err != nil {
+			if err := validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation, budget); err != nil {
 				return generationArchive{}, err
 			}
 			names = append(names, "latest-success.json", "latest-success.snapshot")
@@ -508,7 +521,7 @@ func validateArchiveNames(directory string, expected []string) error {
 	return nil
 }
 
-func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generation uint64) error {
+func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generation uint64, budget sourcecapacity.Budget) error {
 	manifestBytes, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return errors.New("aborted generation forensic manifest is malformed")
@@ -530,7 +543,7 @@ func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generatio
 	if !ok || !strings.HasPrefix(attemptID, "build-") {
 		return errors.New("aborted generation build attempt ID is invalid")
 	}
-	snapshot, err := os.ReadFile(snapshotPath)
+	snapshot, err := sourcecapacity.ReadFile(snapshotPath, budget.SnapshotLimit())
 	if err != nil {
 		return errors.New("aborted generation source identity is invalid")
 	}
@@ -538,7 +551,7 @@ func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generatio
 	if !ok || len(source) != 2 || source["sha256"] != generationGitHashBytes(snapshot) || source["size"] != float64(len(snapshot)) {
 		return errors.New("aborted generation source identity is invalid")
 	}
-	if _, err := guest.DecodeSourceSnapshot(snapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); err != nil {
 		return errors.New("aborted generation source identity is invalid")
 	}
 	for _, name := range []string{"kernel", "iso"} {
@@ -554,17 +567,18 @@ func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generatio
 }
 
 func (r *GenerationGitRecorder) record(archive generationArchive) (record GenerationGitRecord, err error) {
+	budget := archive.sourceCapacity
 	snapshotPath := filepath.Join(archive.archivePath, "source.snapshot")
 	if !isRegularWithoutSymlink(snapshotPath) {
 		return GenerationGitRecord{}, &GenerationGitRecorderError{
 			Reason: fmt.Sprintf("generation %d source snapshot is unavailable", archive.generation),
 		}
 	}
-	snapshot, err := os.ReadFile(snapshotPath)
+	snapshot, err := sourcecapacity.ReadFile(snapshotPath, budget.SnapshotLimit())
 	if err != nil {
 		return GenerationGitRecord{}, generationGitError(fmt.Sprintf("generation %d source snapshot is unavailable", archive.generation), err)
 	}
-	entries, err := guest.DecodeSourceSnapshot(snapshot)
+	entries, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget)
 	if err != nil {
 		return GenerationGitRecord{}, asGenerationGitError(err)
 	}

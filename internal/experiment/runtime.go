@@ -25,6 +25,7 @@ import (
 	"codexos/internal/guest"
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
+	"codexos/internal/sourcecapacity"
 )
 
 const (
@@ -49,7 +50,6 @@ const (
 	archiveMetadataLimit         int64 = 64 * 1024
 	archiveHardwareLimit         int64 = 1024 * 1024
 	archiveHandoffLimit          int64 = 16 * 1024
-	archiveSnapshotLimit         int64 = 1024 * 1024
 	archiveForensicManifestLimit int64 = 1024 * 1024
 	archiveHarnessIdentityLimit  int64 = 256 * 1024
 	abortBootImageLimit          int64 = 128 * 1024 * 1024
@@ -81,6 +81,7 @@ type ArchivedGeneration struct {
 	AbortReason      *string
 	Hardware         qemu.HardwareManifest
 	HarnessIdentity  *provenance.HarnessIdentity
+	SourceCapacity   sourcecapacity.Budget
 }
 
 // PendingGenerationFinish identifies the exact immutable successor selected
@@ -117,10 +118,11 @@ func (e *GenerationRuntimeError) Unwrap() error { return e.Err }
 // process-free archive/gate model; NewLiveCodexOSRun attaches concrete QEMU,
 // serial, build, and guest-tool ownership to the same durable contract.
 type CodexOSRun struct {
-	gateMu       sync.Mutex
-	runDirectory string
-	state        RuntimeState
-	live         *liveRun
+	sourceCapacity sourcecapacity.Budget
+	gateMu         sync.Mutex
+	runDirectory   string
+	state          RuntimeState
+	live           *liveRun
 
 	generationNumber        *uint64
 	previousHandoff         *string
@@ -145,9 +147,14 @@ func NewCodexOSRun(runDirectory string) (*CodexOSRun, error) {
 	if err != nil {
 		return nil, &GenerationRuntimeError{Reason: "could not resolve run directory", Err: err}
 	}
+	budget, err := sourcecapacity.Load(run)
+	if err != nil {
+		return nil, err
+	}
 	return &CodexOSRun{
-		runDirectory: run,
-		state:        RuntimeStateStopped,
+		sourceCapacity: budget,
+		runDirectory:   run,
+		state:          RuntimeStateStopped,
 	}, nil
 }
 
@@ -195,6 +202,7 @@ func (r *CodexOSRun) GenerationNumber() (uint64, bool) {
 // RunPresentationSnapshot is the small runtime view needed by interactive
 // frontends.
 type RunPresentationSnapshot struct {
+	SourceCapacity         sourcecapacity.Budget
 	RunDirectory           string
 	State                  RuntimeState
 	Generation             uint64
@@ -213,6 +221,7 @@ func (r *CodexOSRun) PresentationSnapshot() RunPresentationSnapshot {
 	snapshot := RunPresentationSnapshot{RunDirectory: r.runDirectory}
 	r.gateMu.Lock()
 	snapshot.State = r.state
+	snapshot.SourceCapacity = r.sourceCapacity
 	if r.generationNumber != nil {
 		snapshot.Generation = *r.generationNumber
 		snapshot.HasGeneration = true
@@ -414,7 +423,7 @@ func (r *CodexOSRun) ReopenAtGate() (resultErr error) {
 			return &GenerationRuntimeError{Reason: "completed generation handoff is unavailable"}
 		}
 		snapshotPath := filepath.Join(latest.ArchivePath, sourceSnapshotName)
-		snapshot, readErr := readRegular(snapshotPath)
+		snapshot, readErr := readRegularLimited(snapshotPath, latest.SourceCapacity.SnapshotLimit())
 		if readErr != nil {
 			return generationArchiveError(latest.Generation, readErr)
 		}
@@ -514,6 +523,9 @@ func (r *CodexOSRun) ContinueGeneration() error {
 		return &GenerationRuntimeError{Reason: "selected successor artifact is missing: " + r.pendingFinish.ISO}
 	}
 
+	if _, err := guest.ParseSourceSnapshotWithBudget(r.pendingFinish.SourceSnapshot, r.sourceCapacity); err != nil {
+		return err
+	}
 	parent := *r.generationNumber
 	next := parent + 1
 	image := r.pendingFinish.ISO
@@ -574,6 +586,9 @@ func (r *CodexOSRun) ForkFromGeneration(generation uint64) error {
 	if archived.Handoff == nil {
 		return &GenerationRuntimeError{Reason: "completed generation handoff is unavailable"}
 	}
+	if err := validateInheritedSource(archived, r.sourceCapacity); err != nil {
+		return err
+	}
 	image := filepath.Join(archived.ArchivePath, successorName, "codexos.iso")
 	if !isRegularWithoutSymlink(image) {
 		return &GenerationRuntimeError{Reason: "generation archive artifact is missing: " + image}
@@ -626,6 +641,7 @@ func (r *CodexOSRun) AbortGeneration(reason string) error {
 		return &GenerationRuntimeError{Reason: "current generation boot image is unavailable", Err: err}
 	}
 	archive := AbortedArchive{
+		SourceCapacity:   r.sourceCapacity,
 		Generation:       *r.generationNumber,
 		ParentGeneration: cloneUint64Pointer(r.currentParent),
 		Transition:       r.currentTransition,
@@ -761,6 +777,10 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		return ArchivedGeneration{}, fmt.Errorf("generation archive is missing: %s", archive)
 	}
 
+	budget, err := sourcecapacity.Load(archive)
+	if err != nil {
+		return ArchivedGeneration{}, err
+	}
 	metadataBytes, err := readArchiveArtifact(filepath.Join(archive, archiveMetadataName), archiveMetadataLimit)
 	if err != nil {
 		return ArchivedGeneration{}, err
@@ -812,6 +832,7 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 	}
 
 	result := ArchivedGeneration{
+		SourceCapacity:   budget,
 		Generation:       generation,
 		ParentGeneration: cloneUint64Pointer(metadata.parent),
 		Transition:       metadata.transition,
@@ -851,11 +872,11 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		if readErr != nil || !utf8.Valid(handoffBytes) {
 			return ArchivedGeneration{}, errors.New("generation handoff is not valid UTF-8")
 		}
-		snapshot, readErr := readArchiveArtifact(filepath.Join(archive, sourceSnapshotName), archiveSnapshotLimit)
+		snapshot, readErr := readArchiveArtifact(filepath.Join(archive, sourceSnapshotName), budget.SnapshotLimit())
 		if readErr != nil {
 			return ArchivedGeneration{}, readErr
 		}
-		if _, decodeErr := guest.DecodeSourceSnapshot(snapshot); decodeErr != nil {
+		if _, decodeErr := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); decodeErr != nil {
 			return ArchivedGeneration{}, decodeErr
 		}
 		handoff := string(handoffBytes)
@@ -863,6 +884,9 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		names := []string{
 			archiveBootName, archiveMetadataName, hardwareManifestName, handoffName,
 			sourceSnapshotName, sourceName, successorName, stdoutName, stderrName,
+		}
+		if budget != 0 {
+			names = append(names, sourcecapacity.Filename)
 		}
 		if harnessIdentity != nil {
 			names = append(names, provenance.GenerationHarnessFilename)
@@ -899,6 +923,9 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 		if result.AbortReason != nil {
 			names = append(names, abortReasonName)
 		}
+		if budget != 0 {
+			names = append(names, sourcecapacity.Filename)
+		}
 		if harnessIdentity != nil {
 			names = append(names, provenance.GenerationHarnessFilename)
 		}
@@ -910,7 +937,7 @@ func readArchivedGeneration(run string, generation uint64) (ArchivedGeneration, 
 			if !isRegularWithoutSymlink(manifestPath) || !isRegularWithoutSymlink(snapshotPath) {
 				return ArchivedGeneration{}, errors.New("aborted generation forensic evidence is incomplete")
 			}
-			if err := validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation); err != nil {
+			if err := validateAbortedSuccessEvidence(manifestPath, snapshotPath, generation, budget); err != nil {
 				return ArchivedGeneration{}, err
 			}
 			names = append(names, latestSuccessManifestName, latestSuccessSnapshotName)
@@ -990,7 +1017,7 @@ func validateArchiveNames(directory string, expected []string) error {
 	return nil
 }
 
-func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generation uint64) error {
+func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generation uint64, budget sourcecapacity.Budget) error {
 	manifestBytes, err := readArchiveArtifact(manifestPath, archiveForensicManifestLimit)
 	if err != nil {
 		return errors.New("aborted generation forensic manifest is malformed")
@@ -1015,7 +1042,7 @@ func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generatio
 	if !ok || !strings.HasPrefix(attemptID, "build-") {
 		return errors.New("aborted generation build attempt ID is invalid")
 	}
-	snapshot, err := readArchiveArtifact(snapshotPath, archiveSnapshotLimit)
+	snapshot, err := readArchiveArtifact(snapshotPath, budget.SnapshotLimit())
 	if err != nil {
 		return errors.New("aborted generation source identity is invalid")
 	}
@@ -1026,7 +1053,7 @@ func validateAbortedSuccessEvidence(manifestPath, snapshotPath string, generatio
 	if len(source) != 2 || source["sha256"] != sha256Hex(snapshot) || !sameJSONSize(source["size"], uint64(len(snapshot))) {
 		return errors.New("aborted generation source identity is invalid")
 	}
-	if _, err := guest.DecodeSourceSnapshot(snapshot); err != nil {
+	if _, err := guest.DecodeSourceSnapshotWithBudget(snapshot, budget); err != nil {
 		return errors.New("aborted generation source identity is invalid")
 	}
 	for _, name := range []string{"kernel", "iso"} {
@@ -1150,10 +1177,6 @@ func isSHA256(value any) bool {
 func sha256Hex(value []byte) string {
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
-}
-
-func readRegular(path string) ([]byte, error) {
-	return readRegularLimited(path, archiveSnapshotLimit)
 }
 
 func readRegularLimited(path string, limit int64) ([]byte, error) {
