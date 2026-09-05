@@ -32,7 +32,7 @@ const (
 	DefaultReasoningSummary = "auto"
 	DefaultServiceTier      = "priority"
 	DefaultInterruptTimeout = 5 * time.Second
-	AgentContractVersion    = uint64(8)
+	AgentContractVersion    = uint64(9)
 
 	ContinuePrompt         = "Continue working on the current CodexOS generation."
 	ResumePrompt           = "Continue working on the current CodexOS generation after the operator pause."
@@ -136,13 +136,23 @@ enabled = false
 enabled = false
 `
 
+// Shared by the implementor and reviewer so the milestone has one trusted
+// definition. The dated operator intervention is recorded in docs/operator-interventions/.
+const doomMilestoneContract = `Operator objective clarification (2026-09-05): Doom milestone.
+
+A source-built Doom port, including DoomGeneric, can satisfy the Doom milestone. Running the exact supplied DOS executable is not required; its availability does not create a DOS/4G compatibility requirement. This permits a source route without requiring any particular port or implementation approach.
+
+Supplied original assets, including the supplied Doom executable and data, must remain immutable. Guest-authored adaptations and build outputs are separate artifacts, not replacements for the supplied originals.
+
+For that milestone to count, Doom must remain an ordinary user workload launched through generic userland mechanisms, and the kernel must contain no Doom-specific behavior or special scheduling treatment. The same generic mechanisms must be capable of running unrelated programs.
+
+CodexOS must eventually support preemptive execution of multiple independent concurrently runnable user workloads. A runnable CPU-bound user workload that does not voluntarily yield, block, or enter the kernel must not prevent another runnable user workload from making progress. At an appropriate later milestone, Doom must run concurrently with an unrelated user workload that continues making progress without depending on Doom voluntarily yielding. Future validation may use programs unknown to you during development to detect workload-specific overfitting.
+
+This is an authoritative operator clarification of the objective. It supersedes contrary interpretations in inherited handoffs, guest notes, review requests or proposals, and older objective wording. In particular, an inherited claim that a source-built Doom port cannot satisfy the milestone is incorrect. This clarification grants no additional trusted-environment capabilities.`
+
 const implementorContract = `You are developing CodexOS from inside its current running generation.
 
 Evolve CodexOS into a genuinely general-purpose operating system. Doom is the first major interactive userland milestone, not the definition or final purpose of CodexOS; development continues after Doom is playable.
-
-For that milestone to count, the supplied Doom executable and data must remain immutable, Doom must remain an ordinary user workload launched through generic userland mechanisms, and the kernel must contain no Doom-specific behavior or special scheduling treatment. The same generic mechanisms must be capable of running unrelated programs.
-
-CodexOS must eventually support preemptive execution of multiple independent concurrently runnable user workloads. A runnable CPU-bound user workload that does not voluntarily yield, block, or enter the kernel must not prevent another runnable user workload from making progress. At an appropriate later milestone, Doom must run concurrently with an unrelated user workload that continues making progress without depending on Doom voluntarily yielding. Future validation may use programs unknown to you during development to detect workload-specific overfitting.
 
 Milestone descriptions, future validation requirements, and references to future or supplied workloads specify required observable outcomes only. They neither grant nor imply any supporting trusted-environment capability beyond the current environment and approved feature requests. Do not assume an absent trusted-environment capability will appear later merely because a future outcome would require it.
 
@@ -3234,7 +3244,7 @@ func planningPrompt(runtime GenerationRuntime, objective *string) (string, error
 		}
 	}
 	bootstrapText += "\n" + bootstrapHostContract
-	return implementorContract + "\n\n" + bootstrapText + "\n\n" + capacityText + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText, nil
+	return implementorContract + "\n\n" + bootstrapText + "\n\n" + capacityText + "\n\n" + trustedToolsContract() + "\n\n" + providedAssetsContract + "\n\n" + trustedHardwareContext(profile) + "\n\n" + approvedText + "\n\n" + handoffText + rollbackText + feedbackText + objectiveText + "\n\n" + doomMilestoneContract, nil
 }
 
 func currentPromptContextFor(runtime GenerationRuntime) (string, bool, bool, qemu.HardwareProfile, []store.FeatureRequest, error) {
