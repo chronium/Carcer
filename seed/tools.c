@@ -1,6 +1,7 @@
 #pragma GCC target("general-regs-only")
 #include "tools.h"
 #include "build.h"
+#include "bootstrap.h"
 #include "files.h"
 #include "protocol.h"
 #include "serial.h"
@@ -9,7 +10,7 @@ typedef unsigned char u8;typedef unsigned short u16;typedef unsigned u32;typedef
 #define MAX_TOOL_ARGUMENTS 3u
 struct bytes{const u8*d;u32 n;};struct invocation{struct bytes name;u16 count;struct bytes a[MAX_TOOL_ARGUMENTS];};
 #define N(x) {(const u8*)x,sizeof(x)-1u}
-static const struct bytes names[]={N("list"),N("read"),N("write"),N("truncate"),N("remove"),N("build"),N("finish_generation"),N("request_feature"),N("list_provided_assets"),N("read_provided_asset"),N("import_provided_asset"),N("run"),N("reap")};
+static const struct bytes names[]={N("list"),N("read"),N("write"),N("truncate"),N("remove"),N("build"),N("finish_generation"),N("request_feature"),N("list_provided_assets"),N("read_provided_asset"),N("import_provided_asset"),N("run"),N("reap"),N("bootstrap_job"),N("read_bootstrap_artifact"),N("import_bootstrap_artifact")};
 static int eq(struct bytes a,struct bytes b){if(a.n!=b.n)return 0;for(u32 i=0;i<a.n;++i)if(a.d[i]!=b.d[i])return 0;return 1;}
 static u16 r16(const u8*p){return(u16)p[0]|((u16)p[1]<<8);}static u32 r32(const u8*p){return(u32)p[0]|((u32)p[1]<<8)|((u32)p[2]<<16)|((u32)p[3]<<24);}
 static int dec(struct bytes b,u32*v){u32 x=0;if(!b.n)return 0;for(u32 i=0;i<b.n;++i){u8 c=b.d[i];if(c<'0'||c>'9'||x>(UINT32_MAX-(c-'0'))/10u)return 0;x=x*10u+c-'0';}*v=x;return 1;}
@@ -32,4 +33,7 @@ case 9:if(v.count!=3||!v.a[0].n||!fu(v.a[0].d,v.a[0].n)||!canonical(v.a[1])||!ca
 case 10:{if(v.count!=2||!v.a[0].n||!fu(v.a[0].d,v.a[0].n)||!path(v.a[1]))break;u64 f=lock();int done=aimp(v.a[0].d,v.a[0].n,v.a[1].d,v.a[1].n);unlock(f);if(!done)break;ok(id);return;}
 case 11:{if(v.count!=1||!path(v.a[0]))break;u64 f=lock();int task=tfile(v.a[0].d,v.a[0].n);unlock(f);if(task<0)break;number(id,(u32)task);return;}
 case 12:{u32 task;if(v.count!=1||!dec(v.a[0],&task))break;u64 status;int state=twait(task,&status);if(state<0)break;if(!state){header(id,0,7);swb((const u8*)"running",7);}else number(id,status);return;}
+case 13:if(v.count!=1)break;tbootstrap(id,v.a[0].d,v.a[0].n);return;
+case 14:if(v.count!=3)break;tbootread(id,v.a[0].d,v.a[0].n,v.a[1].d,v.a[1].n,v.a[2].d,v.a[2].n);return;
+case 15:if(v.count!=3)break;tbootimport(id,v.a[0].d,v.a[0].n,v.a[1].d,v.a[1].n,v.a[2].d,v.a[2].n);return;
 }tlsfail(id);}

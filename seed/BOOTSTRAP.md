@@ -1,0 +1,101 @@
+# Bootstrap development bridge
+
+## Implemented tools
+
+These are guest-owned tools advertised by tools.c. Discovery is fixed for each
+fresh session, so a validated generation transition is needed before newly
+advertised tools become callable. They are development tools, not user syscalls.
+
+- bootstrap_job(json): one UTF-8 JSON request argument, 1..12,000 bytes, no NUL.
+  The guest forwards the exact bytes and a consistent current v1 source snapshot
+  as two host-service arguments. It does not parse or rewrite JSON. Strict schema,
+  asset hashes, artifact authorization, job admission and resource enforcement
+  belong to the provisioned trusted service. Invalid JSON is not authorized by
+  passing guest transport validation.
+- read_bootstrap_artifact(id, offset, length): opaque UTF-8 ID, 1..255 bytes, no
+  NUL; canonical unsigned decimal offset and length, no signs or leading zeroes.
+  Offset fits uint64; length is 0..1,048,576; offset+length must not overflow.
+  A successful response must contain exactly the requested bytes. Host failure
+  status and diagnostics pass through unchanged.
+- import_bootstrap_artifact(id, length, path): the same ID rules; length is a
+  canonical decimal count in 0..33,554,432; path uses ordinary RAM-file rules.
+  Reads [0,length) in chunks of at most 1 MiB, stages privately, then publishes
+  one ordinary mutable file. The destination must be absent both initially and
+  at commit. Failed/short reads, denied access and destination races leave no
+  partial import and do not overwrite another file. A zero-byte import still
+  issues a host read to establish access. This tool imports a requested PREFIX;
+  it cannot determine the total artifact size. Use the length in trusted artifact
+  metadata to import the whole artifact. It does not independently hash content.
+
+Import never changes the retained host artifact. Imports are mutable RAM files,
+unlike sealed imports of provided assets; importing never relaxes an existing
+file's immutable flag. Non-seed runtime files do not survive a generation.
+Importing under seed/ includes the bytes in later source snapshots and remains
+subject to source count/content/framing limits. Import performs no extraction,
+executable conversion, relocation or execution.
+
+## Transport and concurrency
+
+All development serial traffic belongs to task0. Host request correlation IDs
+are shared with the inherited build/provided-asset bridge. Calls are synchronous
+and sequential; there is no concurrent host request multiplexing or cancellation.
+
+Bootstrap snapshot measurement and emission run with interrupts disabled so
+user file writes cannot change the source halfway through capture. Artifact
+allocation, publication and cleanup have short filesystem/allocator critical
+sections (publication copies the requested bytes). The wait for host execution
+and artifact response bytes does not disable interrupts. Normal user tasks can
+be scheduled during that wait. Large allocation/copy and serial snapshot emission
+can still delay preemption; this is not broad kernel preemptibility.
+
+Responses require canonical protocol framing and matching request ID/type.
+Mismatched but well-framed responses are drained and reported as failures.
+A bad magic/version or frame length beyond FM halts this serial transaction,
+matching inherited protocol behavior: arbitrary binary streams cannot be safely
+resynchronized. Successful artifact reads with an unexpected size are drained
+and fail before publication.
+
+## Validation
+
+bootstrap_tests.h is included only by bootstrap.c. boottest runs after filesystem
+initialization, before scheduling. It uses in-memory peers with the production
+request/response/import code, and submits no real host requests. Coverage includes
+exact job envelope and snapshot argument framing, maximum snapshot arithmetic,
+decimal overflow, range limits, invalid UTF-8/NUL, binary relay, diagnostic status,
+wrong request ID/type, unknown status, short/long reads, multi-chunk import,
+existing destinations, a destination race, later-chunk denial/short read, and
+empty authorized/denied reads. File count and physical-page availability recover.
+
+bootlive runs after tinit. It loads two ordinary user images through tuser:
+an infinite non-syscalling loop and an unrelated program that exits with 37.
+Both tasks are created with interrupts disabled, and the simulated slow response
+reader restores interrupts at the start of its eight-tick wait. Before returning
+any response byte, it disables interrupts and verifies that the unrelated program
+finished and the infinite loop remains runnable. Completion outside that reader
+cannot satisfy the check. The kernel does not explicitly yield in that reader. Both task resources are
+then recovered. Existing scheduler, FP, loader, memory and wait tests remain.
+
+These tests validate guest framing/import behavior and scheduling during a
+simulated response. They do not establish actual host admission, execution,
+artifact production, cross-generation retention, or fresh-session tool binding.
+
+## Provisioned scope and dependencies
+
+The optional bootstrap service is configured with the pinned GCC container
+specified by the operator, declared asset/artifact inputs, captured source at
+/inputs/source/seed/, /work as cwd, and declared regular outputs below /work/out.
+The operator's stated execution, input, output, retention and resource limits
+remain authoritative. The TCC source asset is immutable source, not a runnable
+guest compiler. Configured execution is distinct from job authorization:
+the latest stated authorized-job count is ZERO.
+
+Request #5 asks for a bounded batch of four jobs; until approved, it is advisory.
+Request #3 for a complete generic user compilation pipeline remains pending.
+A future authorized job alone still needs guest-owned startup/syscall support,
+runtime, compilation commands and executable packaging before C can run here.
+No such complete pipeline is implemented by this bridge. No compiler invocation
+has been executed through it, and no supplied Doom executable has run.
+
+Request #2 for display observation/input injection remains pending. The immutable
+DOS/4G/Watcom DOOM.EXE remains unsupported by CXE loaders. Any compatibility path
+must be generic userland work and preserve supplied executable/data bytes.

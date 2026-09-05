@@ -67,6 +67,29 @@ mov RAX,RSP. RESTORE must contain no calls or pushes. A call after selecting a
 scheduler-owned frame corrupts preceding slot fields. Nested immutable-read
 continuations and user frames retain distinct FP images and stacks.
 
+## Bootstrap bridge
+
+See BOOTSTRAP.md for guest tool contracts, tests and precise provisioned scope.
+bootstrap.c implements bootstrap_job, read_bootstrap_artifact and transactional
+import_bootstrap_artifact; tools.c advertises them for fresh-session discovery.
+Host execution/response waits preserve caller interrupt state, so task0's normal
+enabled interrupts allow user preemption. Source capture and filesystem/allocator
+critical sections remain interrupt-disabled. build.c exports the shared hostid
+allocator; the inherited host bridge behavior otherwise remains unchanged.
+
+Boot in-memory tests use production framing/import logic, exercise binary
+multi-chunk transfers and failures, and recover file/page counts. A post-tinit
+simulated slow response additionally allows an unrelated user task to exit while
+another non-syscalling user loop remains runnable. Both tasks are created under
+an interrupt lock; the reader opens the scheduling interval and samples task
+states before returning, preventing completion outside the wait from passing.
+Independent source review found no blockers in production framing, concurrency
+or import cleanup; its live-test timing observation was fixed as above.
+No real bootstrap job has run.
+The latest operator-authorized job count is zero. New tool binding is unverified
+until a fresh session. Request #5 asks for four jobs but is only advisory while
+pending. This bridge is not a complete userland compilation pipeline.
+
 ## Provisioning and remaining work
 
 Approved: immutable provided-asset list/read services (request 1), and expanded
