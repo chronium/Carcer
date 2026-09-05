@@ -2356,6 +2356,45 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 			return guest.ToolResult{}, err
 		}
 		return s.runtime.InvokeTool(ctx, "list_provided_assets", [][]byte{})
+	case "run", "import_provided_asset":
+		required := map[string]struct{}{"path": {}}
+		if tool == "import_provided_asset" {
+			required["id"] = struct{}{}
+		}
+		if err := checkGenerationFields(arguments, required, nil); err != nil {
+			return guest.ToolResult{}, err
+		}
+		path, err := generationUTF8(arguments["path"], "path")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		// Guest RAM paths are length-delimited UTF-8, not host filesystem paths.
+		if len(path) == 0 || len(path) > 255 {
+			return guest.ToolResult{}, errors.New("path must contain 1 through 255 UTF-8 bytes")
+		}
+		if tool == "run" {
+			return s.runtime.InvokeTool(ctx, tool, [][]byte{path})
+		}
+		id, err := generationUTF8(arguments["id"], "id")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		if len(id) == 0 {
+			return guest.ToolResult{}, errors.New("id must not be empty")
+		}
+		return s.runtime.InvokeTool(ctx, tool, [][]byte{id, path})
+	case "reap":
+		if err := checkGenerationFields(arguments, map[string]struct{}{"task_id": {}}, nil); err != nil {
+			return guest.ToolResult{}, err
+		}
+		taskID, err := generationUnsignedDecimal(arguments["task_id"], "task_id")
+		if err != nil {
+			return guest.ToolResult{}, err
+		}
+		if _, err := strconv.ParseUint(string(taskID), 10, 32); err != nil {
+			return guest.ToolResult{}, errors.New("task_id must be an unsigned 32-bit integer")
+		}
+		return s.runtime.InvokeTool(ctx, tool, [][]byte{taskID})
 	case "bootstrap_job":
 		if err := checkGenerationFields(arguments, map[string]struct{}{"request": {}}, nil); err != nil {
 			return guest.ToolResult{}, err
@@ -2842,6 +2881,9 @@ func advertisedGuestToolsInOrder(advertised []string) (map[string]struct{}, []st
 
 func guestToolRegistry() map[string]map[string]any {
 	return map[string]map[string]any{
+		"run":                       dynamicFunction("run", "Ask the advertised guest helper to load and launch a guest RAM file through its existing executable loaders. On guest success, output is the decimal task slot ID, not an exit status. No launch arguments or host execution are provided.", map[string]any{"path": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}}, []string{"path"}),
+		"reap":                      dynamicFunction("reap", "Ask the advertised guest helper to inspect or consume a task result. Guest success output is either running or the decimal unsigned 64-bit exit status; completed results are consumed. A fault may return 18446744073709551615 with guest status 0. Invalid, free or reserved task IDs fail. IDs are reusable slots, not durable handles.", map[string]any{"task_id": map[string]any{"type": "integer", "minimum": 0, "maximum": uint64(4294967295)}}, []string{"task_id"}),
+		"import_provided_asset":     dynamicFunction("import_provided_asset", "Ask the advertised guest helper to import a provided asset by ID into a new immutable guest RAM file. The guest owns listing, exact reads, cleanup and sealing. Existing destinations fail; this does not extract or execute the asset, and RAM files do not persist automatically.", map[string]any{"id": map[string]any{"type": "string", "minLength": 1}, "path": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}}, []string{"id", "path"}),
 		"import_bootstrap_artifact": dynamicFunction("import_bootstrap_artifact", "Ask the advertised guest helper to import the first length bytes of an authorized bootstrap artifact into a new mutable RAM file. The guest stages and commits the import without overwriting an existing path; this does not execute or unpack the artifact.", map[string]any{"id": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 33554432}, "path": map[string]any{"type": "string", "minLength": 1, "maxLength": 255}}, []string{"id", "length", "path"}),
 		"bootstrap_job":             dynamicFunction("bootstrap_job", "Ask the advertised guest helper to capture its source and invoke an explicitly provisioned, isolated Linux bootstrap job. The request is a JSON string; guest commands execute only in its container.", map[string]any{"request": map[string]any{"type": "string", "maxLength": 16384}}, []string{"request"}),
 		"read_bootstrap_artifact":   dynamicFunction("read_bootstrap_artifact", "Ask the advertised guest helper to retrieve an exact range of an authorized immutable bootstrap artifact.", map[string]any{"id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}, "length": map[string]any{"type": "integer", "minimum": 0, "maximum": 1048576}}, []string{"id", "offset", "length"}),
@@ -2859,7 +2901,7 @@ func guestToolRegistry() map[string]map[string]any {
 }
 
 func dynamicToolNamespace(selected map[string]struct{}) map[string]any {
-	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset", "bootstrap_job", "read_bootstrap_artifact", "import_bootstrap_artifact"})
+	_, order, _ := advertisedGuestToolsInOrder([]string{"list", "read", "write", "truncate", "remove", "build", "finish_generation", "request_feature", "list_provided_assets", "read_provided_asset", "import_provided_asset", "run", "reap", "bootstrap_job", "read_bootstrap_artifact", "import_bootstrap_artifact"})
 	return dynamicToolNamespaceInOrder(selected, order)
 }
 
