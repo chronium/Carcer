@@ -284,3 +284,11 @@ frozen tool set; reviewers and exit interviews gain no job capability. Supplying
 TCC/Linux bootstrap tooling does not itself supply compiler adaptations, SDK/runtime,
 executable packaging or a guest-runnable compilation pipeline. These remain the
 implementor's work, with no required native port or self-hosting milestone.
+
+## Advertised guest task and immutable asset tools
+
+The Go implementation tool registry recognizes guest-advertised `run(path)`,
+`reap(task_id)` and `import_provided_asset(id, path)`. All are implementation-only
+mutations and retain the guest's argument and result semantics, including
+full-width exit status text. Loading, execution, reaping and immutable import
+remain guest-owned. See [the binding contracts](guest-task-asset-tools.md).
