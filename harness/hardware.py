@@ -259,7 +259,13 @@ def validate_hardware_manifest(value: object) -> HardwareManifest:
         Path("<QMP_SOCKET>"),
         Path("<SERIAL_SOCKET>"),
     )
-    if qemu_arguments != expected_arguments:
+    # Go live generations show the existing VGA output; accept their recorded
+    # frontend while retaining compatibility with historical headless archives.
+    display_arguments = expected_arguments.copy()
+    display_arguments[display_arguments.index("-display") + 1] = (
+        "gtk,show-menubar=off,window-close=off"
+    )
+    if qemu_arguments not in (expected_arguments, display_arguments):
         raise ValueError("generation hardware manifest is malformed")
     return HardwareManifest(
         schema_version=1,

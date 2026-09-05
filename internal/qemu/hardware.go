@@ -202,6 +202,18 @@ func (p HardwareProfile) Manifest(qemuVersion string) (HardwareManifest, error) 
 	return manifest, nil
 }
 
+// EnableLiveDisplay changes generated QEMU arguments to show the existing VGA
+// output. Keep VM shutdown under operator control instead of the window's close
+// button or QEMU menu. Candidate validation keeps the headless arguments.
+func EnableLiveDisplay(arguments []string) {
+	for i := 0; i+1 < len(arguments); i++ {
+		if arguments[i] == "-display" {
+			arguments[i+1] = "gtk,show-menubar=off,window-close=off"
+			return
+		}
+	}
+}
+
 func ValidateHardwareManifest(manifest HardwareManifest) error {
 	if manifest.SchemaVersion != hardwareSchemaVersion || manifest.WritableBlockDevices == nil || manifest.QEMUArguments == nil {
 		return malformedHardwareManifest()
@@ -228,7 +240,10 @@ func ValidateHardwareManifest(manifest HardwareManifest) error {
 		return err
 	}
 	if !equalStrings(manifest.QEMUArguments, expected) {
-		return malformedHardwareManifest()
+		EnableLiveDisplay(expected)
+		if !equalStrings(manifest.QEMUArguments, expected) {
+			return malformedHardwareManifest()
+		}
 	}
 	return nil
 }
