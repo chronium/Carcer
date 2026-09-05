@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	model                             = "gpt-5.6-sol"
+	model                             = "gpt-6-astra"
 	serviceTier                       = "priority"
 	planningPermissions               = "codexos-planning"
 	implementationProfile             = "codexos-implementor"
@@ -94,6 +94,7 @@ func run() error {
 	if err := server.respond(threadStart, map[string]any{
 		"thread":                  map[string]any{"id": threadID, "ephemeral": true},
 		"model":                   model,
+		"reasoningEffort":         "high",
 		"serviceTier":             serviceTier,
 		"activePermissionProfile": map[string]any{"id": implementationProfile},
 		"sandbox":                 map[string]any{"type": "workspace-write", "networkAccess": false},

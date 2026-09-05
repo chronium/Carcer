@@ -25,8 +25,8 @@ const (
 	// DefaultReviewerModel, DefaultReviewerReasoningEffort,
 	// DefaultReviewerReasoningSummary, and DefaultReviewerServiceTier are the
 	// serving settings in the trusted reviewer contract.
-	DefaultReviewerModel            = "gpt-5.6-luna"
-	DefaultReviewerReasoningEffort  = "high"
+	DefaultReviewerModel            = "gpt-6-astra"
+	DefaultReviewerReasoningEffort  = "low"
 	DefaultReviewerReasoningSummary = "auto"
 	DefaultReviewerServiceTier      = "priority"
 
@@ -356,16 +356,10 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		startedData["review_id"] = id
 	}
 	startedData = mergeMaps(startedData, options.Origin)
-	w.record(runtime, "review_started", generationPointer, startedData)
-	w.publish(generationPointer, observability.ActivityReviewer, observability.ActivityReviewStarted, map[string]any{
-		"model":            options.Model,
-		"reasoning_effort": options.ReasoningEffort,
-		"service_tier":     options.ServiceTier,
-		"focus":            options.Focus,
-	}, "", "", "")
 
 	threadID, err := server.StartThread(runContext, codexapp.StartThreadOptions{
 		Model:             options.Model,
+		Effort:            options.ReasoningEffort,
 		ServiceTier:       options.ServiceTier,
 		PermissionProfile: reviewerPermissionProfile,
 		DynamicTools:      []map[string]any{reviewerToolNamespace()},
@@ -377,6 +371,14 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 		}
 		return "", reviewError(err)
 	}
+	// Publish serving provenance only after the thread confirms the selection.
+	w.record(runtime, "review_started", generationPointer, startedData)
+	w.publish(generationPointer, observability.ActivityReviewer, observability.ActivityReviewStarted, map[string]any{
+		"model":            options.Model,
+		"reasoning_effort": options.ReasoningEffort,
+		"service_tier":     options.ServiceTier,
+		"focus":            options.Focus,
+	}, "", "", "")
 
 	var turnID string
 	server.SetServerRequestHandler(func(message map[string]any) {

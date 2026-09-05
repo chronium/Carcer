@@ -72,7 +72,7 @@ func runOperatorFakeAppServer() {
 	respond(account, map[string]any{"account": map[string]any{"type": "chatgpt"}})
 	models := expect("model/list")
 	respond(models, map[string]any{"data": []any{map[string]any{
-		"model":                     "gpt-5.6-sol",
+		"model":                     "gpt-6-astra",
 		"supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}},
 		"serviceTiers":              []any{map[string]any{"id": "priority", "name": "Priority"}},
 	}}, "nextCursor": nil})
@@ -80,7 +80,7 @@ func runOperatorFakeAppServer() {
 	threadID := fmt.Sprintf("operator-thread-%d", os.Getpid())
 	respond(thread, map[string]any{
 		"thread": map[string]any{"id": threadID, "ephemeral": true},
-		"model":  "gpt-5.6-sol", "serviceTier": "priority",
+		"model":  "gpt-6-astra", "reasoningEffort": "high", "serviceTier": "priority",
 		"activePermissionProfile": map[string]any{"id": "codexos-implementor"},
 		"sandbox":                 map[string]any{"type": "workspace-write", "networkAccess": false},
 	})

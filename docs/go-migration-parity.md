@@ -5,6 +5,12 @@ behavioral reference and the operational entry point until a separately approved
 cutover. `Complete` means the listed behavior has direct Go tests or conformance
 evidence; it does not mean that a larger calling flow is complete.
 
+The Go v1 serving defaults intentionally differ from Python: Astra high for the
+implementor and Astra low for the reviewer, with thread reasoning acknowledged
+before successful startup is recorded. See [agent-contract.md](agent-contract.md#serving-settings)
+for the exact settings. This does not change protocol/storage compatibility or
+the review yield and delivery lifecycle.
+
 Status values are `Not started`, `Partial`, and `Complete`.
 
 | Behavior / Python owner | Go owner | Compatibility requirements | Python evidence | Go evidence | Status / differences |

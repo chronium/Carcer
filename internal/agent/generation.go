@@ -26,7 +26,7 @@ import (
 
 const (
 	// These are the serving settings in the implementor contract.
-	DefaultModel            = "gpt-5.6-sol"
+	DefaultModel            = "gpt-6-astra"
 	DefaultReasoningEffort  = "high"
 	DefaultReasoningSummary = "auto"
 	DefaultServiceTier      = "priority"
@@ -820,6 +820,7 @@ func (s *GenerationSession) Start(ctx context.Context) (result error) {
 	}
 	threadID, err := server.StartThread(startupContext, codexapp.StartThreadOptions{
 		Model:             s.options.Model,
+		Effort:            s.options.ReasoningEffort,
 		ServiceTier:       s.options.ServiceTier,
 		PermissionProfile: implementorPermissionProfile,
 		DynamicTools:      []map[string]any{dynamicToolNamespaceInOrder(selected, order), reviewDynamicFunction()},

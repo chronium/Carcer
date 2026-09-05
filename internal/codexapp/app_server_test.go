@@ -315,6 +315,7 @@ func TestCodexAppServerHandshakeCatalogThreadTurnAndInterrupt(t *testing.T) {
 	}
 	threadID, err := server.StartThread(ctx, StartThreadOptions{
 		Model:             "model-x",
+		Effort:            "high",
 		ServiceTier:       "priority",
 		PermissionProfile: "codexos-implementor",
 		DynamicTools:      []map[string]any{},
@@ -336,6 +337,38 @@ func TestCodexAppServerHandshakeCatalogThreadTurnAndInterrupt(t *testing.T) {
 	}
 	if err := server.InterruptTurn(ctx, threadID, turnID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexAppServerRejectsUnconfirmedReasoningEffort(t *testing.T) {
+	if os.Getenv(appServerHelperEnvironment) == "1" {
+		return
+	}
+	authFile := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authFile, []byte("fake login"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(appServerHelperEnvironment, "1")
+	t.Setenv(appServerHelperMode, "high-level")
+	t.Setenv("CODEXOS_GO_APP_SERVER_WRONG_EFFORT", "1")
+	server := NewCodexAppServer(CodexAppServerOptions{
+		Executable: os.Args[0], AuthFile: authFile, StopTimeout: time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := server.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if _, err := server.ValidateModel(ctx, "model-x", "light", "priority", "auto"); err == nil || !strings.Contains(err.Error(), "does not support reasoning effort") {
+		t.Fatalf("unsupported literal light effort = %v", err)
+	}
+	_, err := server.StartThread(ctx, StartThreadOptions{
+		Model: "model-x", Effort: "high", ServiceTier: "priority",
+		PermissionProfile: "codexos-implementor", DynamicTools: []map[string]any{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not select the requested reasoning effort") {
+		t.Fatalf("silently substituted thread effort = %v", err)
 	}
 }
 
@@ -447,9 +480,17 @@ func runHighLevelHelper(read func() map[string]any, send func(map[string]any)) {
 			if !ok || params["model"] != "model-x" || params["serviceTier"] != "priority" || params["permissions"] != "codexos-implementor" || params["ephemeral"] != true {
 				os.Exit(12)
 			}
+			config, ok := params["config"].(map[string]any)
+			if !ok || config["model_reasoning_effort"] != "high" {
+				os.Exit(12)
+			}
+			effort := "high"
+			if os.Getenv("CODEXOS_GO_APP_SERVER_WRONG_EFFORT") == "1" {
+				effort = "medium"
+			}
 			send(map[string]any{"id": requestID, "result": map[string]any{
 				"thread": map[string]any{"id": "thread-high-level", "ephemeral": true},
-				"model":  "model-x", "serviceTier": "priority",
+				"model":  "model-x", "reasoningEffort": effort, "serviceTier": "priority",
 				"activePermissionProfile": map[string]any{"id": "codexos-implementor"},
 				"sandbox":                 map[string]any{"type": "workspaceWrite", "networkAccess": false},
 			}})
