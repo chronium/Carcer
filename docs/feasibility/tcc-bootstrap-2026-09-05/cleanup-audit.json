@@ -1,0 +1,12 @@
+{
+  "containers_remaining": 0,
+  "images_remaining": 0,
+  "job_cgroup_processes": [],
+  "build_init_and_conmon_pids_absent": [
+    285222,
+    285220
+  ],
+  "task_units_remaining": "",
+  "selinux": "Enforcing",
+  "cleanup": "Removed only task containers and newly acquired GCC image; stopped empty task parent slices after verifying populated=0. No system prune."
+}

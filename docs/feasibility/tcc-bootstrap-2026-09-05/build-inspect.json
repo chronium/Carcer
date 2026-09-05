@@ -1,0 +1,62 @@
+{
+  "State": {
+    "OciVersion": "1.2.1",
+    "Status": "paused",
+    "Running": false,
+    "Paused": true,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 285222,
+    "ConmonPid": 285220,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-09-05T09:32:57.239849349+03:00",
+    "FinishedAt": "0001-01-01T00:00:00Z",
+    "CgroupPath": "/user.slice/user-1000.slice/user@1000.service/codexos.slice/codexos-tcc.slice/codexos-tcc-feas.slice/codexos-tcc-feas-285048.slice/libpod-315c357e1ed5cb9bd69fe4a9baa3396779f441fee229b6062c3c757f3fbc7504.scope",
+    "CheckpointedAt": "0001-01-01T00:00:00Z",
+    "RestoredAt": "0001-01-01T00:00:00Z"
+  },
+  "HostConfig": {
+    "CgroupParent": "codexos-tcc-feas-285048.slice",
+    "NetworkMode": "none",
+    "ReadonlyRootfs": true,
+    "CapDrop": [
+      "CAP_CHOWN",
+      "CAP_DAC_OVERRIDE",
+      "CAP_FOWNER",
+      "CAP_FSETID",
+      "CAP_KILL",
+      "CAP_NET_BIND_SERVICE",
+      "CAP_SETFCAP",
+      "CAP_SETGID",
+      "CAP_SETPCAP",
+      "CAP_SETUID",
+      "CAP_SYS_CHROOT"
+    ],
+    "SecurityOpt": [
+      "no-new-privileges"
+    ],
+    "Memory": 536870912,
+    "MemorySwap": 536870912,
+    "PidsLimit": 64,
+    "CpuPeriod": 100000,
+    "CpuQuota": 100000
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/tmp/codexos-tcc-fixture-Msvmus",
+      "Destination": "/inputs",
+      "Driver": "",
+      "Mode": "",
+      "Options": [
+        "nosuid",
+        "nodev",
+        "rbind"
+      ],
+      "RW": false,
+      "Propagation": "rprivate"
+    }
+  ]
+}

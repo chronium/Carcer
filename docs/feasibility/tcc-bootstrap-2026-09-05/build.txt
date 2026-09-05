@@ -1,0 +1,90 @@
+Binary directory    /work/installed/bin
+TinyCC directory    /work/installed/lib/tcc
+Library directory   /work/installed/lib
+Include directory   /work/installed/include
+Manual directory    /work/installed/share/man
+Info directory      /work/installed/share/info
+Doc directory       /work/installed/share/doc
+Source path         /work/tinycc
+Build OS            Linux x86_64
+C compiler          gcc (14.3)
+Target OS           Linux
+CPU                 x86_64
+Triplet             x86_64-linux-gnu
+Config              cross selinux
+Creating config.mak and config.h
+gcc -o tcc.o -c tcc.c -I. -DONE_SOURCE=0 -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o libtcc.o -c libtcc.c -I. -DONE_SOURCE=0 -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -DC2STR conftest.c -o c2str.exe
+./c2str.exe include/tccdefs.h tccdefs_.h
+gcc -o tccpp.o -c tccpp.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o tccgen.o -c tccgen.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o tccdbg.o -c tccdbg.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o tccelf.o -c tccelf.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o tccasm.o -c tccasm.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o tccrun.o -c tccrun.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o x86_64-gen.o -c x86_64-gen.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o x86_64-link.o -c x86_64-link.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o i386-asm.o -c i386-asm.c -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+ar rcs libtcc.a libtcc.o tccpp.o tccgen.o tccdbg.o tccelf.o tccasm.o tccrun.o x86_64-gen.o x86_64-link.o i386-asm.o
+gcc -o tcc tcc.o libtcc.a -lm -ldl -lpthread
+make[1]: Entering directory '/work/tinycc/lib'
+../tcc -c libtcc1.c -o libtcc1.o -B.. -I..
+../tcc -c stdatomic.c -o stdatomic.o -B.. -I..
+../tcc -c atomic.S -o atomic.o -B.. -I..
+../tcc -c builtin.c -o builtin.o -B.. -I..
+../tcc -c alloca.S -o alloca.o -B.. -I..
+../tcc -c alloca-bt.S -o alloca-bt.o -B.. -I..
+../tcc -c tcov.c -o tcov.o -B.. -I..
+../tcc -c va_list.c -o va_list.o -B.. -I..
+../tcc -c dsohandle.c -o dsohandle.o -B.. -I..
+../tcc -ar rcs ../libtcc1.a libtcc1.o stdatomic.o atomic.o builtin.o alloca.o alloca-bt.o tcov.o va_list.o dsohandle.o
+../tcc -c runmain.c -o ../runmain.o -B.. -I..
+../tcc -c bt-exe.c -o ../bt-exe.o -B.. -I..
+../tcc -c bt-log.c -o ../bt-log.o -B.. -I..
+../tcc -c bcheck.c -o ../bcheck.o -B.. -I.. -bt
+../tcc -c bcheck.c -o ../bcheck_run.o -B.. -I..  -bt -DBCHECK_RUN
+make[1]: Leaving directory '/work/tinycc/lib'
+gcc -o i386-tcc.o -c tcc.c -DTCC_TARGET_I386 -DCONFIG_SYSROOT="\"/usr/i686-linux-gnu\"" -DCONFIG_TCC_CRTPREFIX="\"{R}/lib\"" -DCONFIG_TCC_LIBPATHS="\"{R}/lib:{B}\"" -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include\"" -DCONFIG_TCC_CROSSPREFIX="\"i386-\"" -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o i386-tcc i386-tcc.o -lm -ldl -lpthread
+gcc -o arm64-tcc.o -c tcc.c -DTCC_TARGET_ARM64 -DCONFIG_SYSROOT="\"/usr/aarch64-linux-gnu\"" -DCONFIG_TCC_CRTPREFIX="\"{R}/lib\"" -DCONFIG_TCC_LIBPATHS="\"{R}/lib:{B}\"" -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include\"" -DCONFIG_TCC_CROSSPREFIX="\"arm64-\"" -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o arm64-tcc arm64-tcc.o -lm -ldl -lpthread
+gcc -o riscv64-tcc.o -c tcc.c -DTCC_TARGET_RISCV64 -DCONFIG_SYSROOT="\"/usr/riscv64-linux-gnu\"" -DCONFIG_TCC_CRTPREFIX="\"{R}/lib\"" -DCONFIG_TCC_LIBPATHS="\"{R}/lib:{B}\"" -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include\"" -DCONFIG_TCC_CROSSPREFIX="\"riscv64-\"" -I. -O0 -Wdeclaration-after-statement -Wno-unused-result
+gcc -o riscv64-tcc riscv64-tcc.o -lm -ldl -lpthread
+tcc version 0.9.28rc (x86_64 Linux)
+native-c99-c11-smoke=42
+native-c99-c11-smoke=42
+File: /work/export/arm64.o
+  Class:                             ELF64
+  Machine:                           AArch64
+File: /work/export/i386.o
+  Class:                             ELF32
+  Machine:                           Intel 80386
+File: /work/export/riscv64.o
+  Class:                             ELF64
+  Machine:                           RISC-V
+File: /work/export/x86_64.o
+  Class:                             ELF64
+  Machine:                           Advanced Micro Devices X86-64
+41c6d799e5260b03630a030ddc640171df89d1da81ae4f86c7099c08d365cc98  /work/export/arm64.o
+160892d5ad4b1a73a622bdb02e2cdaea05e594d25d8d0cd4e25671c3378807be  /work/export/converted.bin
+95cff556fe308b2e60b189be6a929b20f421553366984a8414a1c68c60ee4c69  /work/export/converter
+d52a40c190ad0327429f6f43ec4fe275b003b6440ba9f764dfe998a6905efdd4  /work/export/hello
+cc99820f608a576541b8e7d2f863e226af22d304b05dbba6290aa077077a3934  /work/export/i386.o
+72780b4ea1c625e9afc2c8911c79c4dded405656697467bc76bdee09f30d562e  /work/export/limits
+5e157f7cecbdcf7f6b2a7fe3f0cdd5431de408f67332fe0d9ff754873ce3b369  /work/export/riscv64.o
+484ffee95fcdbc00cdc154b9dc2fe03fed65610bf1a73b610871cc39698e6f8e  /work/export/tool/include/float.h
+7612d46571099ccaa7616a510f78f180cb1e91671e6e5e9223a2e297b84b789d  /work/export/tool/include/stdalign.h
+a38f8d34f5e09658cc3a8892b3a7e80ff566eaeedc194e5a85ece0b675993137  /work/export/tool/include/stdarg.h
+4fbd9d6ec9add338d41c06f44115121925f087dd91f445b56cca1aacb84360e1  /work/export/tool/include/stdatomic.h
+5252824225ddc486b0460677f765e4157af5d3ed7acd65b310a4045eafb56af7  /work/export/tool/include/stdbool.h
+c42eaa62f574527b8d0d64f802b20c27ebeb66feb2c3608e9b9659225ad6ed45  /work/export/tool/include/stddef.h
+ec64d8fbf7fb2e800df9784b2efca0a99fc25a3eb5e8da56e4df098937f787f2  /work/export/tool/include/stdnoreturn.h
+d1016b6170c45f1b8e7f8d83bf1f00f21e288eb2e446d9f141457f6f821acf7b  /work/export/tool/include/tccdefs.h
+e60c66ff9017f13ab18ee38824792ca771b9235bcb4df57688fec582739524a5  /work/export/tool/include/tgmath.h
+07858857f4eed0a61df94beb1a9d678b53fc3d67a0b0e8936155f85ddbcd1dcc  /work/export/tool/include/varargs.h
+7fac7e6c3717e8e82e7b424a69f5ff47f61eea49ea5448e791ebecc208800215  /work/export/tool/libtcc1.a
+c4d28fa3699c6c5f752f25f4a24bb66db73dcaa8a1b8a7496e9b9deecf7d210d  /work/export/tool/runmain.o
+bae3c616f885f9bd655372fb9a27fbdb4dfe70755603b9455b4f301437b749d6  /work/export/tool/tcc
+aae264cc699eedc1127143a1f5b13c59f4cd6b70ee06cb86c5d976f07394b71c  /work/export/x86_64.o
+FEASIBILITY_READY

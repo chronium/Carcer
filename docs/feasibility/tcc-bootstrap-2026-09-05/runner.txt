@@ -1,0 +1,4 @@
+/tmp/codexos-tcc-prepared-reproducer/tcc-source.tar: OK
+Running as unit: codexos-tcc-feas-285048-anchor.service; invocation ID: 88f06f7584eb4315b9698a191a09dd2f
+time="2026-09-05T09:33:03+03:00" level=warning msg="StopSignal SIGTERM failed to stop container codexos-tcc-feas-285048-build in 2 seconds, resorting to SIGKILL"
+time="2026-09-05T09:33:13+03:00" level=warning msg="StopSignal SIGTERM failed to stop container codexos-tcc-feas-285048-noise in 2 seconds, resorting to SIGKILL"
