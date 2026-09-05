@@ -37,6 +37,7 @@ type References struct {
 	Limits     Limits   `json:"limits"`
 }
 type Manifest struct {
+	RunID              string     `json:"run_id"`
 	Version            int        `json:"version"`
 	ID                 string     `json:"id"`
 	Generation         uint64     `json:"generation"`
@@ -339,7 +340,7 @@ func (s *Storage) manifest(ref JobRef) (Manifest, error) {
 	if e = strictJSON(b, &m, MaxManifest); e != nil {
 		return m, e
 	}
-	if m.Version != 1 || m.ID != ref.ID || m.Image != Image || m.ImageID != ImageID || m.TCCCommit != TCCCommit || m.Limits != Baseline() || m.Result.Status != 0 || !m.Result.Cleaned || !validID(m.SnapshotSHA256) || m.Finished.Before(m.Started) {
+	if m.Version != 1 || !validID(m.RunID) || m.ID != ref.ID || m.Image != Image || m.ImageID != ImageID || m.TCCCommit != TCCCommit || m.Limits != Baseline() || m.Result.Status != 0 || !m.Result.Cleaned || !validID(m.SnapshotSHA256) || m.Finished.Before(m.Started) {
 		return m, errors.New("invalid bootstrap job provenance")
 	}
 	if e = m.Request.Validate(); e != nil {
@@ -461,6 +462,9 @@ func (s *Storage) artifact(refs References, id string) ([]byte, error) {
 	return nil, errors.New("artifact is not authorized for this generation lineage")
 }
 func (s *Storage) Publish(m Manifest, outputs []Input, refs *References) error {
+	if err := s.Admit(len(outputs)); err != nil {
+		return err
+	}
 	if len(refs.Jobs) >= 64 {
 		return errors.New("bootstrap successful job quota exhausted")
 	}
@@ -717,6 +721,37 @@ func copyBounded(dst io.Writer, src io.Reader, n int64) error {
 	}
 	if written > n {
 		return errors.New("byte limit exceeded")
+	}
+	return nil
+}
+
+// Admit counts all retained successes; rollback does not reset object quotas.
+func (s *Storage) Admit(outputs int) error {
+	entries, err := os.ReadDir(filepath.Join(s.Directory, "jobs"))
+	if err != nil {
+		return err
+	}
+	jobs, artifacts := 0, outputs
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".stage-") {
+			continue
+		}
+		if !validID(entry.Name()) || !entry.IsDir() {
+			return errors.New("invalid retained bootstrap job")
+		}
+		b, err := sourcecapacity.ReadFile(filepath.Join(s.Directory, "jobs", entry.Name(), "manifest.json"), MaxManifest)
+		if err != nil {
+			return err
+		}
+		m, err := s.manifest(JobRef{entry.Name(), Digest(b)})
+		if err != nil {
+			return err
+		}
+		jobs++
+		artifacts += len(m.Result.Artifacts)
+	}
+	if jobs >= 64 || artifacts > 256 {
+		return errors.New("bootstrap retained job/artifact quota exhausted")
 	}
 	return nil
 }

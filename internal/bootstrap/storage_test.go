@@ -68,7 +68,7 @@ func fixtureStore(t *testing.T) (string, *Storage, References) {
 func publishFixture(t *testing.T, s *Storage, r *References, data string) Manifest {
 	t.Helper()
 	now := time.Now().UTC()
-	m := Manifest{Version: 1, ID: randomID(), Generation: r.Generation, Image: Image, ImageID: ImageID, TCCCommit: TCCCommit, Request: fixtureRequest(), SnapshotSHA256: Digest(fixtureSnapshot(t)), SourceContentBytes: 65536, Limits: Baseline(), Started: now, Finished: now, Result: Result{Status: 0, Reason: "completed", Cleaned: true, Artifacts: []Artifact{{ID: Digest([]byte(data)), Name: "tool", Size: int64(len(data))}}}}
+	m := Manifest{Version: 1, RunID: s.Config.RunID, ID: randomID(), Generation: r.Generation, Image: Image, ImageID: ImageID, TCCCommit: TCCCommit, Request: fixtureRequest(), SnapshotSHA256: Digest(fixtureSnapshot(t)), SourceContentBytes: 65536, Limits: Baseline(), Started: now, Finished: now, Result: Result{Status: 0, Reason: "completed", Cleaned: true, Artifacts: []Artifact{{ID: Digest([]byte(data)), Name: "tool", Size: int64(len(data))}}}}
 	if e := s.Publish(m, []Input{{"tool", []byte(data)}}, r); e != nil {
 		t.Fatal(e)
 	}

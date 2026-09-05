@@ -36,7 +36,7 @@ const (
 	MaxRead            = 1 << 20
 	MaxRunBytes        = 128 << 20
 	MaxGlobalBytes     = 512 << 20
-	MaxManifest        = 128 << 10
+	MaxManifest        = 512 << 10
 )
 
 // Limits are recorded verbatim in provenance. Version 1 is deliberately fixed.

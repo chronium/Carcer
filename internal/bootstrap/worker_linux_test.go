@@ -1,0 +1,144 @@
+//go:build linux
+
+package bootstrap
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "__") {
+		if e := Helper(os.Args[1:], os.Stdout); e != nil {
+			fmt.Fprintln(os.Stderr, e)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) == 4 && os.Args[1] == "--bootstrap-worker-fixture" {
+		e := ServeWorker(context.Background(), os.Stdin, os.Stdout, WorkerOptions{os.Args[2], os.Args[3]})
+		if e != nil {
+			fmt.Fprintln(os.Stderr, e)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+func TestCollectorRejectsLinksAndSpecialFiles(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret")
+	_ = os.WriteFile(outside, []byte("host data"), 0600)
+	_ = os.WriteFile(filepath.Join(root, "good"), []byte("opaque bytes"), 0600)
+	_ = os.Symlink(outside, filepath.Join(root, "symlink"))
+	_ = os.Link(outside, filepath.Join(root, "hardlink"))
+	_ = os.Symlink(filepath.Dir(outside), filepath.Join(root, "dirlink"))
+	if e := exec.Command("mkfifo", filepath.Join(root, "fifo")).Run(); e != nil {
+		t.Fatal(e)
+	}
+	f, e := os.Open(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer f.Close()
+	for _, p := range []string{"symlink", "hardlink", "dirlink/secret", "fifo", "../secret", "/etc/passwd", "good/../good", "good//x"} {
+		if _, e := CollectFiles(f, []string{p}); e == nil {
+			t.Fatalf("accepted unsafe %s", p)
+		}
+	}
+	values, e := CollectFiles(f, []string{"good"})
+	if e != nil || string(values[0].Data) != "opaque bytes" {
+		t.Fatalf("valid capture %+v %v", values, e)
+	}
+	large, e := os.Create(filepath.Join(root, "large"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	e = large.Truncate(MaxOutput + 1)
+	large.Close()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = CollectFiles(f, []string{"large"}); e == nil {
+		t.Fatal("oversized output accepted")
+	}
+}
+func TestDiagnosticAndWireBounds(t *testing.T) {
+	cancelled := false
+	b := boundedBuffer{limit: 8, cancel: func() { cancelled = true }}
+	_, _ = b.Write([]byte("12345678"))
+	if cancelled {
+		t.Fatal("exact boundary rejected")
+	}
+	_, _ = b.Write([]byte("9"))
+	if !cancelled || string(b.Bytes()) != "12345678" {
+		t.Fatal("diagnostic bound not enforced")
+	}
+	var wire bytes.Buffer
+	if e := writeWire(&wire, wireRequest{Kind: "probe"}); e != nil {
+		t.Fatal(e)
+	}
+	var req wireRequest
+	if e := readWire(&wire, &req, 8); e == nil {
+		t.Fatal("oversized wire input accepted")
+	}
+	if e := readWire(strings.NewReader("\x00\x00\x00\x08{}"), &req, 16); e != io.ErrUnexpectedEOF {
+		t.Fatalf("partial publication input: %v", e)
+	}
+}
+func acceptanceClient(t *testing.T) *Client {
+	t.Helper()
+	if os.Getenv("CODEXOS_BOOTSTRAP_ACCEPTANCE") != "1" {
+		t.Skip("set CODEXOS_BOOTSTRAP_ACCEPTANCE=1 for serialized rootless Podman acceptance")
+	}
+	exe, e := os.Executable()
+	if e != nil {
+		t.Fatal(e)
+	}
+	slice := fmt.Sprintf("bootstrapaccept%d.slice", os.Getpid())
+	anchor := fmt.Sprintf("bootstrapaccept%d.service", os.Getpid())
+	run := func(args ...string) {
+		t.Helper()
+		c := exec.Command(args[0], args[1:]...)
+		if b, e := c.CombinedOutput(); e != nil {
+			t.Fatalf("%v: %v: %s", args, e, b)
+		}
+	}
+	run("systemd-run", "--user", "--unit="+anchor, "--slice="+slice, "--property=RuntimeMaxSec=1200", "/usr/bin/sleep", "1200")
+	run("systemctl", "--user", "set-property", "--runtime", slice, "MemoryMax=805306368", "MemorySwapMax=0", "CPUQuota=100%", "TasksMax=96")
+	dir := filepath.Join(t.TempDir(), "worker")
+	t.Cleanup(func() {
+		// The worker owns cleanup. Audit before removing the disposable aggregate.
+		b, e := exec.Command("podman", "ps", "-aq", "--filter", "label=io.codexos.bootstrap=1").Output()
+		if e != nil || len(bytes.TrimSpace(b)) != 0 {
+			t.Errorf("leftover bootstrap containers: %s %v", b, e)
+		}
+		_ = exec.Command("systemctl", "--user", "stop", anchor, slice).Run()
+		_ = exec.Command("systemctl", "--user", "revert", slice).Run()
+	})
+	return &Client{command: []string{"/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--slice=" + slice, exe, "--bootstrap-worker-fixture", dir, slice}}
+}
+func TestRootlessWorkerSmoke(t *testing.T) {
+	c := acceptanceClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	v, e := c.call(ctx, wireRequest{Kind: "probe"})
+	if e != nil || v.Result.Status != 0 {
+		t.Fatalf("preflight: %+v %v", v, e)
+	}
+	req := fixtureRequest()
+	req.Argv = []string{"/bin/sh", "-ec", "test $(id -u) = 65534; if kill -0 1 2>/dev/null; then exit 9; fi; printf opaque > /work/out/tool"}
+	v, e = c.call(ctx, wireRequest{Kind: "job", Request: req, Snapshot: fixtureSnapshot(t), TCCAsset: "tcc"})
+	if e != nil || v.Result.Status != 0 || !v.Result.Cleaned || len(v.Outputs) != 1 || string(v.Outputs[0].Data) != "opaque" {
+		t.Fatalf("job: %+v %v", v, e)
+	}
+	t.Logf("worker smoke: reason=%s cleaned=%t output=%s", v.Result.Reason, v.Result.Cleaned, v.Outputs[0].Data)
+}
