@@ -122,6 +122,48 @@ func TestHardwareManifestExactEncodingAndParsing(t *testing.T) {
 	}
 }
 
+func TestHardwareManifestLiveDisplayRoundTrip(t *testing.T) {
+	manifest, err := TestHardwareProfile.Manifest("QEMU emulator version test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	EnableLiveDisplay(manifest.QEMUArguments)
+	encoded, err := EncodeHardwareManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseHardwareManifest(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parsed, manifest) {
+		t.Fatalf("live display manifest changed on round trip: %#v", parsed)
+	}
+	for _, change := range []string{"display backend", "extra device"} {
+		t.Run(change, func(t *testing.T) {
+			modified := manifest
+			modified.QEMUArguments = append([]string(nil), manifest.QEMUArguments...)
+			if change == "display backend" {
+				for i, argument := range modified.QEMUArguments {
+					if argument == "-display" {
+						modified.QEMUArguments[i+1] = "sdl"
+						break
+					}
+				}
+			} else {
+				modified.QEMUArguments = append(modified.QEMUArguments, "-device", "virtio-net-pci")
+			}
+			encoded, err := json.Marshal(modified)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseHardwareManifest(encoded); err == nil {
+				t.Fatal("live display manifest accepted unsupported arguments")
+			}
+		})
+	}
+}
+
 func TestHardwareManifestRejectsMalformedState(t *testing.T) {
 	manifest, err := TestHardwareProfile.Manifest("QEMU emulator version test")
 	if err != nil {

@@ -514,6 +514,14 @@ func TestLiveRunCompletesStreamsArchiveAndBootsSuccessor(t *testing.T) {
 
 func TestLiveRunAbortPausedGenerationStreamsArchive(t *testing.T) {
 	run := startLiveTestRun(t, 2*time.Second)
+	pid, _ := run.ActivePID()
+	arguments, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(arguments, []byte("-display\x00gtk,show-menubar=off,window-close=off\x00")) {
+		t.Fatal("live QEMU did not receive display arguments")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := run.Pause(ctx); err != nil {
@@ -534,6 +542,9 @@ func TestLiveRunAbortPausedGenerationStreamsArchive(t *testing.T) {
 	}
 	if archived.Outcome != "aborted" {
 		t.Fatalf("abort outcome = %q", archived.Outcome)
+	}
+	if !strings.Contains(strings.Join(archived.Hardware.QEMUArguments, " "), "-display gtk,show-menubar=off,window-close=off") {
+		t.Fatal("archive did not preserve the live display setting")
 	}
 	if err := run.ContinueGeneration(); err == nil || !strings.Contains(err.Error(), "no selected successor") {
 		t.Fatalf("continue after abort error = %v", err)
