@@ -193,8 +193,12 @@ Provisioning validates archive history, inactivity, absence of partial generatio
 state/interview retention, the frozen TCC asset, and worker/image/resource
 availability before atomically recording `bootstrap-service.json`. It does not
 start a VM or Codex session, approve a request, or change request #3's status.
-An unavailable worker or incorrect pin fails without enabling the run. The
-`bootstrap` command reports configuration, pins, limits and authorized job count;
+An unavailable worker or incorrect pin fails without enabling the run.
+An enabled service permits new jobs under existing limits without a separate batch
+grant, even with zero retained job references. The count describes previous jobs;
+it is neither an execution permission nor job credits. Disabled services reject
+new execution regardless of retained references. The
+`bootstrap` command reports execution availability, pins, limits and retained job reference count;
 `inspect GENERATION` reports archived artifact references and limits.
 
 When the operator separately chooses to proceed, the existing `continue` and

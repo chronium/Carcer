@@ -99,7 +99,11 @@ func (r *CodexOSRun) BootstrapStatus() (string, error) {
 		jobs = len(refs.Jobs)
 	}
 	b, _ := json.Marshal(bootstrap.Baseline())
-	return fmt.Sprintf("Bootstrap configured=%t; TCC asset=%s; image=%s; authorized jobs=%d; limits=%s. Runtime availability is verified at provisioning and job admission. This does not fulfill feature request #3.", c.Enabled, c.TCCAsset, bootstrap.Image, jobs, b), nil
+	availability := "Bootstrap execution is disabled; new jobs are not permitted. Retained references do not enable execution."
+	if c.Enabled {
+		availability = "Bootstrap execution is enabled and permits new jobs under existing service limits without a separate batch grant, including when no previous jobs exist. Retained job references count previous jobs, not execution permissions or job credits."
+	}
+	return fmt.Sprintf("%s TCC asset=%s; image=%s; retained job references=%d; limits=%s. Runtime availability is verified at provisioning and job admission. This does not fulfill feature request #3.", availability, c.TCCAsset, bootstrap.Image, jobs, b), nil
 }
 func (r *CodexOSRun) RecoverBootstrap(ctx context.Context) error {
 	if r == nil {

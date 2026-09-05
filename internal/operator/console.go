@@ -881,7 +881,7 @@ func (c *PlainConsole) printInspection(item experiment.ArchivedGeneration) {
 	c.printLine("Archive: " + item.ArchivePath)
 	c.printLine(fmt.Sprintf("Source content capacity: %d bytes (snapshot maximum: %d bytes)", item.SourceCapacity.Bytes(), item.SourceCapacity.SnapshotLimit()))
 	if item.Bootstrap != nil {
-		c.printLine(fmt.Sprintf("Bootstrap artifacts: %d authorized jobs; per-job memory=%d bytes; retained run budget=%d bytes", len(item.Bootstrap.Jobs), item.Bootstrap.Limits.Memory, item.Bootstrap.Limits.RunBytes))
+		c.printLine(fmt.Sprintf("Bootstrap artifacts: %d retained job references; per-job memory=%d bytes; retained run budget=%d bytes", len(item.Bootstrap.Jobs), item.Bootstrap.Limits.Memory, item.Bootstrap.Limits.RunBytes))
 	}
 	c.printLine("Hardware:")
 	c.printLine("  Profile: " + item.Hardware.Profile)
