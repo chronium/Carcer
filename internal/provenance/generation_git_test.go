@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"codexos/internal/bootstrap"
 	"codexos/internal/guest"
 	"codexos/internal/qemu"
 )
@@ -548,5 +549,37 @@ func TestGenerationGitPathValidationMatchesHostPlatform(t *testing.T) {
 	}
 	if _, err := NewGenerationGitRecorder(repository, run, "test-base"); err == nil || !strings.Contains(err.Error(), "cannot form a Git tag namespace or lineage branch namespace") {
 		t.Fatalf("invalid run basename error = %v", err)
+	}
+}
+
+func TestGenerationGitValidatesBootstrapReferences(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	createGenerationGitRepository(t, repo)
+	run := filepath.Join(root, "run")
+	archiveGenerationGitCompleted(t, run, 0, nil, "initial", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("fixture")}}, "handoff")
+	if e := bootstrap.Provision(run, filepath.Join(root, "artifacts"), "tcc"); e != nil {
+		t.Fatal(e)
+	}
+	if e := bootstrap.Freeze(run, filepath.Join(run, "generation-0000"), 0); e != nil {
+		t.Fatal(e)
+	}
+	archiveGenerationGitAborted(t, run, 1, generationGitUint64Pointer(0), "successor")
+	if e := bootstrap.Freeze(run, filepath.Join(run, "generation-0001"), 1); e != nil {
+		t.Fatal(e)
+	}
+	recorder, e := NewGenerationGitRecorder(repo, run, "test-base")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = recorder.Reconcile(); e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(run, "generation-0000", bootstrap.ReferencesFilename)
+	if e = os.WriteFile(path, []byte("{}"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = recorder.Reconcile(); e == nil {
+		t.Fatal("Git reconciliation accepted malformed bootstrap references")
 	}
 }
