@@ -223,3 +223,14 @@ quit while command work uses a separately cancelled context, ensuring the Linux
 terminal reader is joined before its descriptor is closed on harness-owned
 shutdown paths. It delegates command meaning, session ownership, interview
 Markdown, and runtime shutdown to the same console used by plain mode.
+
+## Per-run source capacity
+
+`internal/sourcecapacity` defines the two supported Go content budgets and their
+small durable record. `internal/experiment` owns gate-only provisioning and
+freezes the effective record in new provisioned archives. Guest snapshot/capture,
+review, trusted build/finish, archive loading, Git provenance, and cross-run
+inheritance explicitly select the current run or historical archive budget.
+Defaults remain 64 KiB; no process-global budget or general resource registry is
+introduced. See [run source capacity](run-source-capacity.md) for semantics,
+framing limits, compatibility, and post-merge provisioning of request #4.

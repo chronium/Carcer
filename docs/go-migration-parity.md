@@ -57,3 +57,13 @@ evidence, cross-run bootstrap records, Git refs/commits/tags, and finalized exit
 interview Markdown. Their schemas and durability behavior must be derived from
 the Python readers/writers and their failure-path tests before Go publishes any
 of them.
+
+## Explicit Go source-capacity extension
+
+[Request #4](run-source-capacity.md) adds gate-only `source-capacity BYTES`
+provisioning in Go. Unprovisioned/legacy runs remain at 64 KiB content with the
+legacy archive layout. Provisioned runs freeze an additional `source-capacity.json`
+in each archive and can accept 1 MiB content plus framing. Python is unchanged
+and does not support this opt-in persisted extension. Original recorded archive
+limits are used for history, Git reconciliation, and inheritance validation;
+fresh destinations still default to 64 KiB and reject oversized inherited source.

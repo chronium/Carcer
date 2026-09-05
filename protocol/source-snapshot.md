@@ -15,9 +15,9 @@ file records:
 | `content` | `uint8_t[content_length]` | Arbitrary file bytes |
 
 Version 1 permits at most 128 files, at most 255 encoded bytes per non-empty
-path, and at most 64 KiB of file content across the complete snapshot. Paths
-must be valid UTF-8 and unique. Truncated fields, duplicate paths, and bytes
-after the final file record are invalid.
+path, and by default at most 64 KiB of file content across the complete snapshot.
+Paths must be valid UTF-8 and unique. Truncated fields, duplicate paths, and
+bytes after the final file record are invalid.
 
 For a build snapshot, every path must be relative and have the form
 `seed/<remaining components>`. Empty, `.`, and `..` components, embedded NUL,
@@ -25,3 +25,11 @@ and absolute paths are invalid. Paths are rejected rather than rewritten.
 
 Snapshots contain no directories, permissions, timestamps, ownership,
 compression, checksums, or other metadata.
+
+The Go harness additionally supports an explicitly provisioned per-run 1 MiB
+**content** budget, with framing allowed separately; it does not change this wire
+encoding. The maximum serialized size is the selected content budget plus 33,410
+bytes (`2 + 128 * (2 + 255 + 4)`). Each provisioned Go archive records the budget
+under which its snapshot is validated. Python and the seed retain their existing
+limits. See [Go run source capacity](../docs/run-source-capacity.md) for gate-only
+provisioning, persistence, and request #4's serialized/content distinction.
