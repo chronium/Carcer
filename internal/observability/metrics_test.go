@@ -107,6 +107,38 @@ func TestMetricsRecordUsesExactNamesUnitsValuesAndBoundedAttributes(t *testing.T
 	metrics.Close()
 }
 
+func TestMetricsAbortFeedbackDoesNotCountAsOperatorAction(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	metrics, err := NewMetrics(t.TempDir(), MetricsOptions{MetricReaders: []sdkmetric.Reader{reader}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(metrics.Close)
+	metrics.Record("operator_abort_feedback_attached", map[string]any{
+		"source_abort_generation": 11, "reason": "Harness transport failed",
+	})
+	metrics.Record("operator_rollback", map[string]any{"parent_generation": 10, "result": "success"})
+	if !metrics.Healthy() {
+		t.Fatalf("abort feedback degraded metrics: %s", metrics.DegradedReason())
+	}
+	found := false
+	for _, scope := range testMetricsCollect(t, reader).ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name == "codexos_operator_actions_total" {
+				found = true
+				testMetricsAssertSum(t, metric, "", map[string]string{"action": "rollback", "result": "success"}, 1)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("rollback action metric was not collected")
+	}
+	metrics.Record("operator_rollback", nil)
+	if metrics.Healthy() {
+		t.Fatal("operator command without a result did not degrade metrics")
+	}
+}
+
 func TestMetricsMalformedPayloadAndCountsDegradeWithoutAffectingOtherEvents(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	metrics, err := NewMetrics(t.TempDir(), MetricsOptions{MetricReaders: []sdkmetric.Reader{reader}})

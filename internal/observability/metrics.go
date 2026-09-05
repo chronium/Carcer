@@ -495,6 +495,9 @@ func (m *Metrics) recordMetrics(event string, data map[string]any) {
 		attrs := metric.WithAttributes(attribute.String("outcome", outcome), attribute.String("transition", transition))
 		m.generations.Add(ctx, 1, attrs)
 		m.generationDuration.Record(ctx, duration, attrs)
+	case "operator_abort_feedback_attached":
+		// This provenance event is not an operator command result.
+		return
 	default:
 		if strings.HasPrefix(event, "operator_") {
 			action := metricOperatorAction(strings.TrimPrefix(event, "operator_"))
