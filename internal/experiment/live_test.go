@@ -1074,6 +1074,12 @@ func serveLiveHelperSerial(listener net.Listener, done <-chan struct{}) error {
 			}
 			payload := make([]byte, 4+len("tool:")+len(name))
 			copy(payload[4:], "tool:"+name)
+			if os.Getenv(liveQEMUHelperEnvironment) == "bootstrap" {
+				payload, err = liveBootstrapExchange(connection)
+				if err != nil {
+					return err
+				}
+			}
 			if os.Getenv(liveQEMUHelperEnvironment) == "capacity" {
 				switch name {
 				case "list":

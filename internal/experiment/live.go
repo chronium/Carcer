@@ -29,6 +29,7 @@ const (
 // LiveRunOptions contains trusted harness inputs for concrete generation
 // execution. No field is populated from guest state.
 type LiveRunOptions struct {
+	BootstrapClient         *bootstrap.Client // trusted fixture process; CLI leaves nil
 	QEMUExecutable          string
 	HardwareProfile         qemu.HardwareProfile
 	BuildConfig             build.Config
@@ -570,7 +571,7 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	if r.live.provided != nil {
 		assetRead = r.live.provided.ReadAsset
 	}
-	generation.bootstrap, err = bootstrap.NewService(r.runDirectory, number, parent, bootstrapAssets, assetRead)
+	generation.bootstrap, err = bootstrap.NewService(r.runDirectory, number, parent, bootstrapAssets, assetRead, options.BootstrapClient)
 	if err != nil {
 		return nil, qemu.HardwareManifest{}, err
 	}

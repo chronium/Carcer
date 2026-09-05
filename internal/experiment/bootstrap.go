@@ -67,7 +67,7 @@ func (r *CodexOSRun) ProvisionBootstrap(ctx context.Context, asset string) error
 	if !found {
 		return errors.New("provided assets do not contain the pinned upstream TCC archive under that ID")
 	}
-	if e := bootstrap.Probe(ctx); e != nil {
+	if e := r.live.options.BootstrapClient.Probe(ctx); e != nil {
 		return e
 	}
 	if e := bootstrap.Provision(r.runDirectory, bootstrap.StorageDirectory, asset); e != nil {
@@ -108,7 +108,13 @@ func (r *CodexOSRun) RecoverBootstrap(ctx context.Context) error {
 		defer r.live.operationMu.Unlock()
 	}
 	if g := r.liveGeneration(); g != nil {
-		return g.bootstrap.Recover(ctx)
+		if e := g.bootstrap.Recover(ctx); e != nil {
+			return e
+		}
+		if r.State() == RuntimeStateRunning {
+			g.bootstrap.Resume()
+		}
+		return nil
 	}
 	return bootstrap.RecoverRun(ctx, r.runDirectory)
 }

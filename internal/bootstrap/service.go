@@ -18,13 +18,14 @@ import (
 )
 
 // Client always uses the fixed installed worker in production. The unexported
-// command is populated only by package-local disposable acceptance fixtures.
-type Client struct{ command []string }
+// Command is a trusted process input for disposable integration fixtures, never
+// populated by the operator CLI, persisted configuration or guest requests.
+type Client struct{ Command []string }
 
 func (c *Client) call(ctx context.Context, r wireRequest) (wireResponse, error) {
 	argv := []string{"/usr/bin/sudo", "-n", "-u", Account, WorkerExecutable}
-	if c != nil && len(c.command) > 0 {
-		argv = c.command
+	if c != nil && len(c.Command) > 0 {
+		argv = c.Command
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -95,8 +96,10 @@ func (c *Client) call(ctx context.Context, r wireRequest) (wireResponse, error) 
 	}
 	return result.v, nil
 }
-func Probe(ctx context.Context) error {
-	v, e := (*Client)(nil).call(ctx, wireRequest{Kind: "probe"})
+func Probe(ctx context.Context) error { return (*Client)(nil).Probe(ctx) }
+
+func (c *Client) Probe(ctx context.Context) error {
+	v, e := c.call(ctx, wireRequest{Kind: "probe"})
 	if e != nil {
 		return e
 	}
@@ -129,7 +132,7 @@ type Service struct {
 
 // NewService selects exactly the completed parent's references. Restart at a
 // gate never recovers authorization from discarded later generation work.
-func NewService(run string, generation uint64, parent *uint64, assets []Asset, readAsset func(string, uint64, uint64) ([]byte, error)) (*Service, error) {
+func NewService(run string, generation uint64, parent *uint64, assets []Asset, readAsset func(string, uint64, uint64) ([]byte, error), clients ...*Client) (*Service, error) {
 	c, e := LoadConfig(run)
 	if e != nil || c == nil {
 		return nil, e
@@ -169,6 +172,9 @@ func NewService(run string, generation uint64, parent *uint64, assets []Asset, r
 		return nil, e
 	}
 	svc := &Service{run: run, config: *c, generation: generation, budget: budget, refs: refs, assets: map[string]Asset{}, readAsset: readAsset}
+	if len(clients) > 0 {
+		svc.client = clients[0]
+	}
 	for _, a := range assets {
 		svc.assets[a.ID] = a
 	}

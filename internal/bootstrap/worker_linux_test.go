@@ -125,7 +125,7 @@ func acceptanceClient(t *testing.T) *Client {
 		_ = exec.Command("systemctl", "--user", "stop", anchor, slice).Run()
 		_ = exec.Command("systemctl", "--user", "revert", slice).Run()
 	})
-	return &Client{command: []string{"/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--slice=" + slice, exe, "--bootstrap-worker-fixture", dir, slice}}
+	return &Client{Command: []string{"/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--slice=" + slice, exe, "--bootstrap-worker-fixture", dir, slice}}
 }
 func TestRootlessWorkerSmoke(t *testing.T) {
 	c := acceptanceClient(t)
@@ -156,7 +156,7 @@ func TestRootlessRecoversInterruptedWorker(t *testing.T) {
 		_, e := c.call(ctx, wireRequest{Kind: "job", Request: req, Snapshot: fixtureSnapshot(t), TCCAsset: "tcc"})
 		done <- e
 	}()
-	dir := c.command[len(c.command)-2]
+	dir := c.Command[len(c.Command)-2]
 	var active map[string]string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

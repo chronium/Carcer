@@ -253,7 +253,9 @@ bootstrap gc
 ```
 
 Recovery cancels any local active job, joins it, and asks the worker to reap owned
-orphan containers before clearing the cleanup block. It starts no guest. GC is
+orphan containers before clearing the cleanup block. Successful recovery restores
+job admission for a running generation; a paused generation stays suspended until
+`resume`. Failed recovery keeps admission suspended. Recovery starts no guest. GC is
 allowed only at a validated inactive gate and removes successes unreferenced by
 all archives/imported parents. Failed-record rotation never removes successful
 referenced data. A cleanup failure blocks successful publication and retirement;
