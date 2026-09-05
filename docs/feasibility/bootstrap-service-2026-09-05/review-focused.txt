@@ -1,0 +1,5 @@
+ok  	codexos/internal/bootstrap	0.478s
+ok  	codexos/internal/experiment	0.737s
+ok  	codexos/internal/operator	2.775s
+ok  	codexos/internal/provenance	0.862s
+ok  	codexos/internal/store	0.705s
