@@ -13,7 +13,7 @@ import (
 func TestCrossRunBootstrapCopiesOpaqueArtifactsBeforePublishing(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if e := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); e != nil {
+	if e := createCrossRunFixture(source); e != nil {
 		t.Fatal(e)
 	}
 	archive := filepath.Join(source, "generation-0000")

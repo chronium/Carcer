@@ -1,14 +1,11 @@
 package provenance
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -228,170 +225,6 @@ func TestGenerationGitRecorderBaseRefIsResolvedOnce(t *testing.T) {
 	commit := strings.TrimSpace(generationGitCommand(t, repository, "rev-parse", generationTag("experiment-002", 0)+"^{commit}"))
 	if got := strings.TrimSpace(generationGitCommand(t, repository, "rev-list", "--parents", "-n", "1", commit)); got != commit+" "+base {
 		t.Fatalf("generation parent changed with base ref: %q", got)
-	}
-}
-
-func TestGenerationGitMessagesMatchPythonReference(t *testing.T) {
-	root := provenanceRepositoryRoot(t)
-	pythonScript := `
-import base64, importlib.util, pathlib, sys, types
-root = pathlib.Path(sys.argv[1])
-runtime = types.ModuleType("harness.generation_runtime")
-runtime.ArchivedGeneration = object
-runtime.CodexOSRun = object
-sys.modules[runtime.__name__] = runtime
-source_spec = importlib.util.spec_from_file_location("harness.source_snapshot", root / "harness" / "source_snapshot.py")
-source = importlib.util.module_from_spec(source_spec)
-sys.modules[source_spec.name] = source
-source_spec.loader.exec_module(source)
-git_spec = importlib.util.spec_from_file_location("harness.generation_git", root / "harness" / "generation_git.py")
-git = importlib.util.module_from_spec(git_spec)
-sys.modules[git_spec.name] = git
-git_spec.loader.exec_module(git)
-archive = types.SimpleNamespace(generation=4, parent_generation=0, transition="rollback", handoff="Handoff λ\nnext")
-snapshot = b"snapshot\x00\xff"
-print(base64.b64encode(git._commit_message(archive, snapshot).encode()).decode())
-print(base64.b64encode(git._tag_message(archive, "experiment-002").encode()).decode())
-`
-	command := exec.Command("python3", "-c", pythonScript, root)
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("Python generation Git reference failed: %v", err)
-	}
-	lines := strings.Fields(string(output))
-	if len(lines) != 2 {
-		t.Fatalf("Python generation Git reference output = %q", output)
-	}
-	pythonCommit, err := base64.StdEncoding.DecodeString(lines[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	pythonTag, err := base64.StdEncoding.DecodeString(lines[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := uint64(0)
-	archive := generationArchive{generation: 4, parent: &parent, transition: "rollback", handoff: "Handoff λ\nnext"}
-	if got := []byte(generationCommitMessage(archive, []byte("snapshot\x00\xff"))); !bytes.Equal(got, pythonCommit) {
-		t.Fatalf("commit message differs:\nGo: %q\nPython: %q", got, pythonCommit)
-	}
-	if got := []byte(generationTagMessage(archive, "experiment-002")); !bytes.Equal(got, pythonTag) {
-		t.Fatalf("tag message differs:\nGo: %q\nPython: %q", got, pythonTag)
-	}
-}
-
-func TestGenerationGitObjectsMatchPythonReference(t *testing.T) {
-	t.Setenv("GIT_AUTHOR_DATE", "2026-01-02T03:04:05+0000")
-	t.Setenv("GIT_COMMITTER_DATE", "2026-01-02T03:04:05+0000")
-	root := t.TempDir()
-	pythonRepository := filepath.Join(root, "python-repository")
-	goRepository := filepath.Join(root, "go-repository")
-	createGenerationGitRepository(t, pythonRepository)
-	createGenerationGitRepository(t, goRepository)
-	pythonRun := filepath.Join(root, "python-run", "experiment-conformance")
-	goRun := filepath.Join(root, "go-run", "experiment-conformance")
-	archiveGenerationGitCompleted(t, pythonRun, 0, nil, "initial", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G0\n")}}, "Handoff λ")
-	archiveGenerationGitCompleted(t, pythonRun, 1, generationGitUint64Pointer(0), "successor", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G1\n")}}, "Handoff 1")
-	archiveGenerationGitCompleted(t, pythonRun, 2, generationGitUint64Pointer(0), "rollback", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G2\n")}}, "Handoff 2")
-	archiveGenerationGitCompleted(t, goRun, 0, nil, "initial", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G0\n")}}, "Handoff λ")
-	archiveGenerationGitCompleted(t, goRun, 1, generationGitUint64Pointer(0), "successor", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G1\n")}}, "Handoff 1")
-	archiveGenerationGitCompleted(t, goRun, 2, generationGitUint64Pointer(0), "rollback", []guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("G2\n")}}, "Handoff 2")
-
-	pythonScript := `
-import importlib.util, json, pathlib, sys, types
-root = pathlib.Path(sys.argv[1])
-repository = pathlib.Path(sys.argv[2])
-run = pathlib.Path(sys.argv[3])
-runtime = types.ModuleType("harness.generation_runtime")
-class CodexOSRun:
-    def __init__(self, directory):
-        self.directory = pathlib.Path(directory)
-    def archived_generations(self):
-        result = []
-        for archive in sorted(self.directory.iterdir()):
-            if not archive.name.startswith("generation-"):
-                continue
-            generation = int(archive.name.removeprefix("generation-"))
-            metadata = json.loads((archive / "metadata.json").read_text())
-            handoff = None
-            if metadata["outcome"] == "completed":
-                handoff = (archive / "handoff.txt").read_text()
-            result.append(types.SimpleNamespace(
-                generation=generation,
-                parent_generation=metadata["parent_generation"],
-                transition=metadata["transition"],
-                outcome=metadata["outcome"],
-                archive_path=archive,
-                handoff=handoff,
-            ))
-        return result
-    @staticmethod
-    def _validate_archived_history(archives):
-        by_generation = {archive.generation: archive for archive in archives}
-        if sorted(by_generation) != list(range(len(archives))):
-            raise ValueError("generation archive history is not contiguous")
-        for archive in archives[1:]:
-            parent = by_generation.get(archive.parent_generation)
-            if parent is None or parent.outcome != "completed":
-                raise ValueError("generation has no completed parent")
-            if archive.transition == "successor" and archive.parent_generation != archive.generation - 1:
-                raise ValueError("invalid successor ancestry")
-            if archive.transition == "rollback" and archive.parent_generation == archive.generation - 1:
-                raise ValueError("invalid rollback ancestry")
-runtime.CodexOSRun = CodexOSRun
-runtime.ArchivedGeneration = object
-sys.modules[runtime.__name__] = runtime
-package = types.ModuleType("harness")
-package.__path__ = [str(root / "harness")]
-sys.modules[package.__name__] = package
-source_spec = importlib.util.spec_from_file_location("harness.source_snapshot", root / "harness" / "source_snapshot.py")
-source = importlib.util.module_from_spec(source_spec)
-sys.modules[source_spec.name] = source
-source_spec.loader.exec_module(source)
-git_spec = importlib.util.spec_from_file_location("harness.generation_git", root / "harness" / "generation_git.py")
-git = importlib.util.module_from_spec(git_spec)
-sys.modules[git_spec.name] = git
-git_spec.loader.exec_module(git)
-for record in git.GenerationGitRecorder(repository, run, "test-base").reconcile():
-    print(record.generation, record.tag, record.commit, record.already_recorded)
-`
-	pythonCommand := exec.Command("python3", "-c", pythonScript, provenanceRepositoryRoot(t), pythonRepository, pythonRun)
-	pythonOutput, err := pythonCommand.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Python generation Git reference failed: %v\n%s", err, pythonOutput)
-	}
-	pythonLines := strings.Split(strings.TrimSpace(string(pythonOutput)), "\n")
-	if len(pythonLines) != 3 {
-		t.Fatalf("Python generation Git records = %q", pythonOutput)
-	}
-	goRecorder, err := NewGenerationGitRecorder(goRepository, goRun, "test-base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	goRecords, err := goRecorder.Reconcile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index, generation := range []uint64{0, 1, 2} {
-		fields := strings.Fields(pythonLines[index])
-		if len(fields) != 4 || fields[0] != strconv.FormatUint(generation, 10) || fields[1] != generationTag("experiment-conformance", generation) || fields[3] != "False" {
-			t.Fatalf("Python record %q", pythonLines[index])
-		}
-		if got, want := goRecords[index].Commit, fields[2]; got != want {
-			t.Fatalf("generation %d commit differs: Go %s Python %s", generation, got, want)
-		}
-		pythonTag := strings.TrimSpace(generationGitCommand(t, pythonRepository, "rev-parse", "refs/tags/"+fields[1]))
-		goTag := strings.TrimSpace(generationGitCommand(t, goRepository, "rev-parse", "refs/tags/"+goRecords[index].Tag))
-		if goTag != pythonTag {
-			t.Fatalf("generation %d tag object differs: Go %s Python %s", generation, goTag, pythonTag)
-		}
-	}
-	for _, branch := range []string{"lineage-0000", "lineage-0001"} {
-		pythonBranch := strings.TrimSpace(generationGitCommand(t, pythonRepository, "rev-parse", "refs/heads/experiment-conformance/"+branch))
-		goBranch := strings.TrimSpace(generationGitCommand(t, goRepository, "rev-parse", "refs/heads/experiment-conformance/"+branch))
-		if pythonBranch != goBranch {
-			t.Fatalf("%s differs: Go %s Python %s", branch, goBranch, pythonBranch)
-		}
 	}
 }
 

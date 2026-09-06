@@ -7,16 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"codexos/internal/guest"
+	"codexos/internal/qemu"
 )
 
-func TestCrossRunBootstrapPythonSourceAndGoDestinationConformance(t *testing.T) {
+func TestCrossRunBootstrapPreservesSourceHandoffAndFeatureStates(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "experiment-source")
-	repositoryRoot := repositoryRootForCrossRunTest(t)
-	if err := createPythonCrossRunFixture(source, repositoryRoot); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -38,7 +39,7 @@ func TestCrossRunBootstrapPythonSourceAndGoDestinationConformance(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded == nil || loaded.SourceRun != filepath.Base(source) || loaded.SourceGeneration != 0 || loaded.Handoff != "Python handoff λ.\n" {
+	if loaded == nil || loaded.SourceRun != filepath.Base(source) || loaded.SourceGeneration != 0 || loaded.Handoff != "Source handoff λ.\n" {
 		t.Fatalf("loaded bootstrap = %#v", loaded)
 	}
 	if !equalCrossRunRequestIDsFromValues(loaded.InheritedRequestIDs, []uint64{1, 2}) {
@@ -55,39 +56,12 @@ func TestCrossRunBootstrapPythonSourceAndGoDestinationConformance(t *testing.T) 
 	if len(requests) != 2 || requests[0].Status != FeaturePending || requests[1].Status != FeatureApproved {
 		t.Fatalf("inherited requests = %#v", requests)
 	}
-
-	// The Python reader accepts Go's exact manifest, handoff, and ledger bytes.
-	verify := `
-import importlib.util, pathlib, sys, types
-root = pathlib.Path(sys.argv[1])
-run = pathlib.Path(sys.argv[2])
-package = types.ModuleType("harness")
-package.__path__ = [str(root / "harness")]
-sys.modules["harness"] = package
-for name in ("feature_requests", "cross_run_bootstrap"):
-    spec = importlib.util.spec_from_file_location("harness." + name, root / "harness" / (name + ".py"))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-from harness.cross_run_bootstrap import load_cross_run_bootstrap
-from harness.feature_requests import FeatureRequestStore
-bootstrap = load_cross_run_bootstrap(run)
-assert bootstrap.source_run == "experiment-source"
-assert bootstrap.source_generation == 0
-assert bootstrap.handoff == "Python handoff λ.\n"
-assert bootstrap.inherited_request_ids == (1, 2)
-assert [(request.id, request.status) for request in FeatureRequestStore(run).requests()] == [(1, "pending"), (2, "approved")]
-`
-	if output, err := exec.Command("python3", "-c", verify, repositoryRoot, destination).CombinedOutput(); err != nil {
-		t.Fatalf("Python destination verification failed: %v\n%s", err, output)
-	}
 }
 
 func TestCrossRunBootstrapAllowsChainedInheritedRequestFromHigherGeneration(t *testing.T) {
 	root := t.TempDir()
-	repositoryRoot := repositoryRootForCrossRunTest(t)
 	predecessor := filepath.Join(root, "experiment-002")
-	if err := createPythonCrossRunHistory(predecessor, repositoryRoot, 10, 10); err != nil {
+	if err := createCrossRunHistory(predecessor, 10, 10); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -105,7 +79,7 @@ func TestCrossRunBootstrapAllowsChainedInheritedRequestFromHigherGeneration(t *t
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := createPythonCrossRunHistory(middle, repositoryRoot, 0, -1); err != nil {
+	if err := createCrossRunHistory(middle, 0, -1); err != nil {
 		t.Fatal(err)
 	}
 	runCrossRunGit(t, repository, "tag", "--annotate", "--no-sign", "--cleanup=verbatim", "-m", "Cross-run base", "experiment-003/generation-0000")
@@ -160,7 +134,7 @@ func TestCrossRunBootstrapAllowsChainedInheritedRequestFromHigherGeneration(t *t
 func TestCrossRunBootstrapRejectsIdentityAndLedgerTampering(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -205,7 +179,7 @@ func TestCrossRunBootstrapRejectsIdentityAndLedgerTampering(t *testing.T) {
 func TestCrossRunBootstrapRejectsCollisionsAndInvalidSourceSelectionWithoutPublishing(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -239,7 +213,7 @@ func TestCrossRunBootstrapRejectsCollisionsAndInvalidSourceSelectionWithoutPubli
 func TestCrossRunBootstrapRequiresAnnotatedGenerationTagAndCompleteTriple(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -267,77 +241,64 @@ func TestCrossRunBootstrapRequiresAnnotatedGenerationTagAndCompleteTriple(t *tes
 	}
 }
 
-func createPythonCrossRunFixture(source, repositoryRoot string) error {
-	return createPythonCrossRunHistory(source, repositoryRoot, 0, 0)
+func createCrossRunFixture(source string) error {
+	return createCrossRunHistory(source, 0, 0)
 }
 
-func createPythonCrossRunHistory(source, repositoryRoot string, latestGeneration, requestGeneration int) error {
-	script := `
-import importlib.util, json, pathlib, sys, types
-root = pathlib.Path(sys.argv[1])
-source = pathlib.Path(sys.argv[2])
-latest = int(sys.argv[3])
-request_generation = int(sys.argv[4])
-package = types.ModuleType("harness")
-package.__path__ = [str(root / "harness")]
-sys.modules["harness"] = package
-for name in ("source_snapshot", "hardware", "feature_requests"):
-    spec = importlib.util.spec_from_file_location("harness." + name, root / "harness" / (name + ".py"))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-snapshot_module = sys.modules["harness.source_snapshot"]
-hardware_module = sys.modules["harness.hardware"]
-feature_module = sys.modules["harness.feature_requests"]
-snapshot = snapshot_module.encode_source_snapshot((snapshot_module.SnapshotFile("seed/kernel.c", b"source\n"),))
-for generation in range(latest + 1):
-    archive = source / f"generation-{generation:04d}"
-    (archive / "boot").mkdir(parents=True)
-    (archive / "source" / "seed").mkdir(parents=True)
-    (archive / "successor").mkdir()
-    metadata = {
-        "generation": generation,
-        "outcome": "completed",
-        "parent_generation": generation - 1 if generation else None,
-        "transition": "successor" if generation else "initial",
-    }
-    (archive / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    hardware = hardware_module.TEST_HARDWARE_PROFILE.manifest("QEMU emulator version test")
-    (archive / "hardware.json").write_text(json.dumps(hardware.as_json_object(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (archive / "source.snapshot").write_bytes(snapshot)
-    (archive / "source" / "seed" / "kernel.c").write_bytes(b"source\n")
-    (archive / "handoff.txt").write_text("Python handoff λ.\n", encoding="utf-8")
-    (archive / "boot" / "codexos.iso").write_bytes(b"boot")
-    (archive / "successor" / "kernel.elf").write_bytes(b"kernel")
-    (archive / "successor" / "codexos.iso").write_bytes(b"successor")
-    (archive / "qemu.stdout").write_bytes(b"")
-    (archive / "qemu.stderr").write_bytes(b"")
-if request_generation >= 0:
-    store = feature_module.FeatureRequestStore(source)
-    store.create(
-        request_generation,
-        "Pending λ",
-        "Pending source request",
-    )
-    approved = store.create(
-        request_generation,
-        "Approved",
-        "Approved source request",
-    )
-    store.approve(approved.id)
-`
-	command := exec.Command(
-		"python3",
-		"-c",
-		script,
-		repositoryRoot,
-		source,
-		fmt.Sprintf("%d", latestGeneration),
-		fmt.Sprintf("%d", requestGeneration),
-	)
-	output, err := command.CombinedOutput()
+func createCrossRunHistory(source string, latestGeneration, requestGeneration int) error {
+	snapshot, err := guest.EncodeSourceSnapshot([]guest.SnapshotFile{{Path: "seed/kernel.c", Content: []byte("source\n")}})
 	if err != nil {
-		return fmt.Errorf("Python cross-run history fixture failed: %w\n%s", err, output)
+		return err
+	}
+	hardware, err := qemu.TestHardwareProfile.Manifest("QEMU emulator version test")
+	if err != nil {
+		return err
+	}
+	hardwareBytes, err := qemu.EncodeHardwareManifest(hardware)
+	if err != nil {
+		return err
+	}
+	for generation := 0; generation <= latestGeneration; generation++ {
+		archive := filepath.Join(source, fmt.Sprintf("generation-%04d", generation))
+		var parent *int
+		transition := "initial"
+		if generation > 0 {
+			previous := generation - 1
+			parent = &previous
+			transition = "successor"
+		}
+		files := map[string][]byte{
+			"metadata.json": mustJSONBytes(map[string]any{"generation": generation, "outcome": "completed", "parent_generation": parent, "transition": transition}),
+			"hardware.json": hardwareBytes, "source.snapshot": snapshot,
+			"source/seed/kernel.c": []byte("source\n"), "handoff.txt": []byte("Source handoff λ.\n"),
+			"boot/codexos.iso": []byte("boot"), "successor/kernel.elf": []byte("kernel"),
+			"successor/codexos.iso": []byte("successor"), "qemu.stdout": {}, "qemu.stderr": {},
+		}
+		for name, contents := range files {
+			path := filepath.Join(archive, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, contents, 0600); err != nil {
+				return err
+			}
+		}
+	}
+	if requestGeneration >= 0 {
+		requests, err := NewFeatureRequestStore(source)
+		if err != nil {
+			return err
+		}
+		if _, err = requests.Create(uint64(requestGeneration), "Pending λ", "Pending source request"); err != nil {
+			return err
+		}
+		approved, err := requests.Create(uint64(requestGeneration), "Approved", "Approved source request")
+		if err != nil {
+			return err
+		}
+		if _, err = requests.Approve(approved.ID, ""); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -381,13 +342,4 @@ func mustJSONBytes(value any) []byte {
 		panic(err)
 	}
 	return encoded
-}
-
-func repositoryRootForCrossRunTest(t *testing.T) string {
-	t.Helper()
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate cross-run conformance test")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(currentFile), "../.."))
 }

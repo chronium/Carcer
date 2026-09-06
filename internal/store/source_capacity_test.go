@@ -13,7 +13,7 @@ import (
 func TestSourceCapacityInheritanceRejectsBeforePublishingDestination(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	archive := filepath.Join(source, "generation-0000")

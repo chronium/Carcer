@@ -268,3 +268,51 @@ func TestProvidedAssetFileDoesNotFollowSymlink(t *testing.T) {
 		t.Fatal("readProvidedAssetFile followed a symlink")
 	}
 }
+
+func TestProvidedAssetsRunPathResolvesExistingSymlink(t *testing.T) {
+	target := t.TempDir()
+	parent := t.TempDir()
+	link := filepath.Join(parent, "run-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := ConfigureProvidedAssets(link, nil, uint64(0)); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := ConfigureProvidedAssets(link, &missing, uint64(0)); err == nil {
+		t.Fatal("missing external directory unexpectedly accepted")
+	}
+}
+
+func TestProvidedAssetsArchivePreservesLongUnicodePaths(t *testing.T) {
+	root := t.TempDir()
+	name := strings.Repeat("nested/", 18) + "é.bin"
+	path := filepath.Join(root, "tree", filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("pax path\x00\xff\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := LoadProvidedAssets(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := tar.NewReader(bytes.NewReader(snapshot.Assets[0].Data))
+	for {
+		header, err := archive.Next()
+		if err != nil {
+			t.Fatalf("long Unicode archive member missing: %v", err)
+		}
+		if header.Name != name {
+			continue
+		}
+		actual, err := io.ReadAll(archive)
+		if err != nil || !bytes.Equal(actual, content) || header.Format != tar.FormatPAX {
+			t.Fatalf("archive member: %#v, contents %x, error %v", header, actual, err)
+		}
+		break
+	}
+}

@@ -202,7 +202,7 @@ func TestOperatorRequestInheritancePreservesAttributionAndRejectsRewrites(t *tes
 func TestCrossRunBootstrapCopiesOperatorRequestsSeparately(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	s, err := NewOperatorRequestStore(source)
