@@ -929,7 +929,9 @@ func (a *Application) submitCommand(command string, preserveInput bool) tea.Cmd 
 	if a.busy {
 		return nil
 	}
-	interviewQuestion := a.status.Interview == InterviewIdle && !isInterviewEndCommand(command)
+	commandWords := strings.Fields(command)
+	operatorRequestCommand := len(commandWords) > 0 && (commandWords[0] == "os-request" || commandWords[0] == "os-requests")
+	interviewQuestion := a.status.Interview == InterviewIdle && !isInterviewEndCommand(command) && !operatorRequestCommand
 	if interviewQuestion {
 		a.model.BeginOperatorBlock(nil)
 	} else {

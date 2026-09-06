@@ -308,7 +308,7 @@ func TestGenerationToolSchemasPreserveAdvertisementOrderAndFeatureJSON(t *testin
 	}
 	namespace := dynamicToolNamespaceInOrder(selected, order)
 	tools, ok := namespace["tools"].([]map[string]any)
-	if !ok || len(tools) != 4 {
+	if !ok || len(tools) != 6 {
 		t.Fatalf("namespace tools = %#v", namespace["tools"])
 	}
 	var names []string
@@ -316,7 +316,7 @@ func TestGenerationToolSchemasPreserveAdvertisementOrderAndFeatureJSON(t *testin
 		name, _ := tool["name"].(string)
 		names = append(names, name)
 	}
-	if got, want := strings.Join(names, ","), "read,list,build,list_requests"; got != want {
+	if got, want := strings.Join(names, ","), "read,list,build,list_requests,list_operator_requests,record_operator_request"; got != want {
 		t.Fatalf("tool order = %q, want %q", got, want)
 	}
 	reviewSchema, _ := reviewDynamicFunction()["inputSchema"].(map[string]any)
@@ -2499,7 +2499,7 @@ func runGenerationFakeAppServer() {
 		writeGenerationRecord(map[string]any{"mode": "probe", "pid": os.Getpid()})
 		return
 	}
-	if mode != "guest-mutation" && mode != "bootstrap-import" && mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
+	if mode != "operator-requests" && mode != "guest-mutation" && mode != "bootstrap-import" && mode != "success" && mode != "terminal-before-tool-result" && mode != "orphaned-review" && mode != "completed-review" && mode != "sequential-reviews" && mode != "review-resume-failed" && mode != "review-resume-interrupt" && mode != "review-resume-hold" && mode != "review-origin-hold" && mode != "implementation-review" && mode != "interview" && mode != "interview-hold" && mode != "interview-interrupt" && mode != "interrupt" && mode != "interrupt-failed" && mode != "planning-interrupt" && mode != "planning-failed" && mode != "planning-complete-failure" && mode != "planning-manifest-failure" && mode != "resume-failed" && mode != "continuation-failed" && mode != "stalled-start" && mode != "hold" {
 		os.Exit(20)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
@@ -2662,6 +2662,14 @@ func runGenerationFakeAppServer() {
 				arguments = map[string]any{"id": "fixture", "path": "ram/test"}
 			default:
 				os.Exit(29)
+			}
+		}
+		if mode == "operator-requests" {
+			tool = "record_operator_request"
+			arguments = map[string]any{"id": 1, "revision": 1, "disposition": "deferred", "explanation": "Choose a later generation"}
+			if index == 1 {
+				tool = "list_operator_requests"
+				arguments = map[string]any{}
 			}
 		}
 		callID := fmt.Sprintf("generation-call-%d", index)

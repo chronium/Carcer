@@ -32,7 +32,7 @@ const (
 	DefaultReasoningSummary = "auto"
 	DefaultServiceTier      = "priority"
 	DefaultInterruptTimeout = 5 * time.Second
-	AgentContractVersion    = uint64(9)
+	AgentContractVersion    = uint64(10)
 
 	ContinuePrompt         = "Continue working on the current CodexOS generation."
 	ResumePrompt           = "Continue working on the current CodexOS generation after the operator pause."
@@ -367,6 +367,8 @@ type GenerationSession struct {
 	planningEvidence         *provenance.PlanningEvidence
 	planningEvidenceMu       sync.Mutex
 	tokenUsage               codexapp.CumulativeTokenUsage
+	operatorRequests         store.OperatorRequestContext
+	operatorRequestInput     string
 	availableTools           map[string]struct{}
 	serviceTierName          string
 	activeReviewer           *ReviewWorker
@@ -1191,16 +1193,31 @@ func (s *GenerationSession) runTurnWithInterview(prompt, phase string, interview
 	}
 	s.mu.Unlock()
 	startedAt := time.Now()
-	turnID, err := server.StartTurn(turnContext, codexapp.StartTurnOptions{
-		ThreadID:              threadID,
-		Prompt:                prompt,
-		Model:                 s.options.Model,
-		Effort:                s.options.ReasoningEffort,
-		ReasoningSummary:      s.options.ReasoningSummary,
-		ServiceTier:           s.options.ServiceTier,
-		PermissionProfile:     permission,
-		RuntimeWorkspaceRoots: workspaceRoots,
-	})
+	var presentation map[string]any
+	var err error
+	if interview == nil {
+		prompt, presentation, err = s.prepareOperatorRequests(prompt, phase, threadID)
+	}
+	var turnID string
+	if err == nil {
+		turnID, err = server.StartTurn(turnContext, codexapp.StartTurnOptions{
+			ThreadID:              threadID,
+			Prompt:                prompt,
+			Model:                 s.options.Model,
+			Effort:                s.options.ReasoningEffort,
+			ReasoningSummary:      s.options.ReasoningSummary,
+			ServiceTier:           s.options.ServiceTier,
+			PermissionProfile:     permission,
+			RuntimeWorkspaceRoots: workspaceRoots,
+		})
+	}
+	if err == nil && presentation != nil {
+		presentation["turn_id"] = turnID
+		_, _, err = provenance.WriteOperatorRequestPresentation(s.runtime.RunDirectory(), presentation)
+		if err == nil {
+			s.record("agent_operator_requests_presented", presentation)
+		}
+	}
 	if err != nil {
 		turnCancel()
 		s.mu.Lock()
@@ -2246,7 +2263,7 @@ func (s *GenerationSession) dynamicToolResponse(params any, threadID, turnID str
 }
 
 func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) (guest.ToolResult, error) {
-	if tool != "list_requests" {
+	if tool != "list_requests" && tool != "list_operator_requests" && tool != "record_operator_request" {
 		s.mu.Lock()
 		_, available := s.availableTools[tool]
 		s.mu.Unlock()
@@ -2256,6 +2273,8 @@ func (s *GenerationSession) dispatchTool(tool string, arguments map[string]any) 
 	}
 	ctx := s.runCtx
 	switch tool {
+	case "list_operator_requests", "record_operator_request":
+		return s.dispatchOperatorRequest(tool, arguments)
 	case "list":
 		if err := checkGenerationFields(arguments, nil, map[string]struct{}{"prefix": {}}); err != nil {
 			return guest.ToolResult{}, err
@@ -2859,6 +2878,7 @@ var planningTools = map[string]bool{
 	"list": true, "read": true, "build": true, "request_feature": true,
 	"list_provided_assets": true, "read_provided_asset": true, "list_requests": true,
 	"bootstrap_job": true, "read_bootstrap_artifact": true,
+	"list_operator_requests": true, "record_operator_request": true,
 }
 
 func advertisedGuestTools(advertised []string) (map[string]struct{}, error) {
@@ -2924,6 +2944,7 @@ func dynamicToolNamespaceInOrder(selected map[string]struct{}, order []string) m
 		}
 	}
 	tools = append(tools, dynamicFunction("list_requests", listRequestsToolDescription, map[string]any{}, nil))
+	tools = append(tools, operatorRequestTools()...)
 	return map[string]any{"type": "namespace", "name": "codexos", "description": "Develop the running CodexOS guest through its trusted tools.", "tools": tools}
 }
 
@@ -3070,16 +3091,21 @@ func generationData(arguments map[string]any) ([]byte, error) {
 
 func toolMetadata(tool string, arguments map[string]any) map[string]any {
 	metadata := map[string]any{"input_bytes": 0}
+	if tool == "record_operator_request" {
+		if id, ok := nonNegativeJSONInteger(arguments["id"]); ok {
+			metadata["request_id"] = id
+		}
+	}
 	encoded := make([][]byte, 0)
 	if path, ok := arguments["path"].(string); ok {
 		metadata["path"] = path
 	}
-	for _, name := range []string{"offset", "length", "size"} {
+	for _, name := range []string{"offset", "length", "size", "revision"} {
 		if value, ok := nonNegativeJSONInteger(arguments[name]); ok {
 			metadata[name] = value
 		}
 	}
-	for _, name := range []string{"prefix", "path", "id", "handoff", "title", "description"} {
+	for _, name := range []string{"prefix", "path", "id", "handoff", "title", "description", "disposition", "explanation", "evidence"} {
 		if value, ok := arguments[name].(string); ok && utf8.ValidString(value) {
 			encoded = append(encoded, []byte(value))
 		}
