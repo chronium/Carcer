@@ -208,6 +208,7 @@ func (v *CandidateBootValidator) validateInWorkspace(
 	if err != nil {
 		return harnessCandidateFailure(fmt.Errorf("could not start candidate QEMU: %w", err))
 	}
+	qemu.EnableDisplay(arguments)
 	// Keep the VM paused until both trusted controls have been established.
 	arguments = append(arguments, "-S")
 	if err := controller.Start(qemu.QEMUStartOptions{

@@ -3284,7 +3284,7 @@ func trustedHardwareContext(profile qemu.HardwareProfile) string {
 	if writable == "" {
 		writable = "none"
 	}
-	context := fmt.Sprintf("Current trusted hardware:\nProfile: %s\nMachine: %s\nAccelerator: %s\nCPU: %s\nvCPUs: %d\nRAM: %d MiB\nGraphics: %s\nNetwork interfaces: %s\nWritable block devices: %s\nThe standard VGA device is guest-visible while the current display frontend is headless.", profile.Profile, profile.Machine, profile.Accelerator, profile.CPUModel, profile.VCPUs, profile.MemoryMiB, profile.Graphics, profile.Network, writable)
+	context := fmt.Sprintf("Current trusted hardware:\nProfile: %s\nMachine: %s\nAccelerator: %s\nCPU: %s\nvCPUs: %d\nRAM: %d MiB\nGraphics: %s\nNetwork interfaces: %s\nWritable block devices: %s\nThe standard VGA device is guest-visible. A local operator window displays its output; this does not grant you a trusted observation or input capability.", profile.Profile, profile.Machine, profile.Accelerator, profile.CPUModel, profile.VCPUs, profile.MemoryMiB, profile.Graphics, profile.Network, writable)
 	if profile.Machine == "q35" {
 		context += " Normal q35 platform facilities remain available, including PCI/PCIe, ACPI, RTC, interrupt-controller, timer, and chipset facilities."
 	}

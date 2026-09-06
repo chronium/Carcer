@@ -127,7 +127,7 @@ func TestHardwareManifestLiveDisplayRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	EnableLiveDisplay(manifest.QEMUArguments)
+	EnableDisplay(manifest.QEMUArguments)
 	encoded, err := EncodeHardwareManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
