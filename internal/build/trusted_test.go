@@ -3,7 +3,6 @@ package build
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
@@ -319,41 +318,58 @@ func writeExecutable(t *testing.T, contents string, paths ...string) string {
 	return path
 }
 
-func TestPythonEmbeddedSourceConformance(t *testing.T) {
-	files := []guest.SnapshotFile{
-		{Path: "seed/z.bin", Content: []byte{0, 255, 'z'}},
-		{Path: "seed/a.c", Content: []byte("λ\x00\n")},
-		{Path: "seed/empty", Content: nil},
-	}
-	root := buildRepositoryRoot(t)
-	const script = `
-import base64, importlib.util, pathlib, sys, types
-root = pathlib.Path(sys.argv[1])
-package = types.ModuleType("harness")
-package.__path__ = [str(root / "harness")]
-sys.modules["harness"] = package
-snapshot_spec = importlib.util.spec_from_file_location("harness.source_snapshot", root / "harness" / "source_snapshot.py")
-snapshot = importlib.util.module_from_spec(snapshot_spec)
-sys.modules[snapshot_spec.name] = snapshot
-snapshot_spec.loader.exec_module(snapshot)
-trusted_spec = importlib.util.spec_from_file_location("harness.trusted_build", root / "harness" / "trusted_build.py")
-trusted = importlib.util.module_from_spec(trusted_spec)
-sys.modules[trusted_spec.name] = trusted
-trusted_spec.loader.exec_module(trusted)
-files = (snapshot.SnapshotFile("seed/z.bin", b"\x00\xffz"), snapshot.SnapshotFile("seed/a.c", "λ\x00\n".encode()), snapshot.SnapshotFile("seed/empty", b""))
-print(base64.b64encode(trusted._render_embedded_sources(files).encode()).decode("ascii"))
-`
-	command := exec.Command("python3", "-c", script, root)
-	output, err := command.Output()
+func TestEmbeddedSourcesPreserveFileBytes(t *testing.T) {
+	cc, err := exec.LookPath("cc")
 	if err != nil {
-		t.Fatalf("Python reference failed: %v", err)
+		t.Skip("host C compiler unavailable")
 	}
-	reference, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	files := []guest.SnapshotFile{
+		{Path: "seed/aλ.c", Content: []byte("λ\x00\n")},
+		{Path: "seed/empty", Content: nil},
+		{Path: "seed/z.bin", Content: []byte{0, 255, 'z'}},
+	}
+	// Exercise the generated table through the seed's actual C declaration.
+	// The consumer emits each length-delimited path/content with a separator,
+	// exposing byte loss, incorrect lengths, ordering, and empty-file handling.
+	const consumer = `
+#include <stdio.h>
+int main(void) {
+    if (initial_file_count != 3) return 1;
+    for (uint32_t i = 0; i < initial_file_count; ++i) {
+        const struct embedded_file *file = &initial_files[i];
+        fwrite(file->path, 1, file->path_length, stdout);
+        putchar(0);
+        fwrite(file->data, 1, file->end - file->data, stdout);
+        putchar(0);
+    }
+    return ferror(stdout) ? 1 : 0;
+}
+`
+	root := t.TempDir()
+	source := filepath.Join(root, "embedded.c")
+	program := filepath.Join(root, "embedded")
+	unsorted := []guest.SnapshotFile{files[2], files[0], files[1]}
+	if err := os.WriteFile(source, []byte(renderEmbeddedSources(unsorted)+consumer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, cc, "-std=c11", "-I", filepath.Join(buildRepositoryRoot(t), "seed"), source, "-o", program).CombinedOutput(); err != nil {
+		t.Fatalf("compile embedded sources: %v\n%s", err, output)
+	}
+	got, err := exec.CommandContext(ctx, program).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []byte(renderEmbeddedSources(files)); !bytes.Equal(got, reference) {
-		t.Fatalf("embedded source differs from Python:\nGo: %s\nPython: %s", got, reference)
+	var want []byte
+	for _, file := range files {
+		want = append(want, []byte(file.Path)...)
+		want = append(want, 0)
+		want = append(want, file.Content...)
+		want = append(want, 0)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("embedded file bytes = %q, want %q", got, want)
 	}
 }
 
