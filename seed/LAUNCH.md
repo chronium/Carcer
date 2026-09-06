@@ -135,3 +135,15 @@ There is now an optional path-backed stdio library and generic key-event ABI.
 Environment, terminal, directory enumeration, ownership, stable task/file handles,
 user cancellation, IPC/shared memory, persistent writable storage, full libc and
 guest-native compiler remain open general-purpose work.
+
+## Supervised concurrent launcher update
+The current concurrent.cxe uses calls17/18 to own both children. Its argv syntax
+is unchanged: first executable receives legacy-style argc0, second receives the
+complete vector starting with its path. If the second launch fails, the first
+is stopped and collected and the launcher returns3. Normal completion waits for
+both and retains the previous result policy. Launcher exit/fault/termination
+automatically cleans up remaining supervised descendants. Programs that spawn
+legacy children can still leave those outside cleanup. The updated executable
+requires the newly built kernel; earlier live Doom/concurrent evidence above
+was obtained with the earlier launcher. It does not demonstrate this update
+running live before generation transition.

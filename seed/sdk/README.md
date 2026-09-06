@@ -39,7 +39,7 @@ does not replace the current running generation's kernel.
 
 ## ABI and runtime
 See ../USER_ABI.md for syscalls and image layout. cx.h supplies wrappers for all
-existing calls 0..15 using byte spans and UINT64_MAX as failure. These raw wrappers
+existing calls 0..18 using byte spans and UINT64_MAX as failure. These raw wrappers
 have no errno or file descriptor layer; optional libc supplies path-backed streams. The compiler convention is ordinary x86-64 System V C calls
 inside the program; the kernel int 0x80 interface is CodexOS-specific.
 Startup clears DF, aligns RSP to 16 and calls main preserving the entry RDI/RSI
@@ -141,3 +141,8 @@ to runtime/cpu-result. No program name or instruction stream changes scheduling.
 Final rebuild job79f713e9efa493fb53c27ba9549ea3d88825f0627015b95eab3eccf496f41cdb
 ran both sdk/build.sh and doom/build.sh, passed packager/SHA/key mapping tests,
 and cmp verified all thirteen output binaries against persisted seed/user bytes.
+
+Supervised launch/control wrappers are in cx.h and specified in USER_ABI.md.
+They are an opt-in alternative to slot-based legacy spawn/reap/wait. The new
+jobtest fixture is built by console/build.sh; the generic compiler/packager
+remain independent of fixture names.

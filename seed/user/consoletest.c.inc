@@ -63,6 +63,19 @@ int main(void) {
     C(cx_size(log_path,strlen(log_path))==CX_ERROR);
     C(cx_read("test/con-target",15,0,kept,4)==4&&!memcmp(kept,"keep",4));
     remove_file(script_path);remove_file("test/con-target");
+    C(run("runfor 0 seed/user/spin.cxe\n",0)==125);cleanup();
+    C(run("runfor 18446744073709551615 seed/user/spin.cxe\n",0)==125);cleanup();
+    C(run("runfor nope seed/user/spin.cxe\n",0)==125);cleanup();
+    C(run("runfor 10 missing-program\n",0)==125);cleanup();
+    for(unsigned i=0;i<8;i++){
+        C(run("runfor 2 seed/user/spin.cxe\nrunfor 100 seed/user/child.cxe\nexit 0\n",0)==0);
+        log=log_read();C(strstr(log,"timeout\n")&&strstr(log,"status=37\n"));
+        free(log);cleanup();
+    }
+    C(run("runfor 100 seed/user/concurrent.cxe seed/user/spin.cxe missing-program\nexit 0\n",0)==0);
+    log=log_read();C(strstr(log,"status=3\n")&&!strstr(log,"timeout\n"));free(log);cleanup();
+    C(run("runfor 3 seed/user/concurrent.cxe seed/user/spin.cxe seed/user/spin.cxe\nrun seed/user/child.cxe\nexit 0\n",0)==0);
+    log=log_read();C(strstr(log,"timeout\n")&&strstr(log,"status=37\n"));free(log);cleanup();
     const char *script=
         "write 'test/con file' 'hello world'\n"
         "stat 'test/con file'\n"

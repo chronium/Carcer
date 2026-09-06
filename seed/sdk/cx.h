@@ -93,6 +93,25 @@ _Static_assert(sizeof(struct cx_file_record)==272,"file record ABI");
 static inline uint64_t cx_files(struct cx_file_record *records,size_t capacity) {
     return cx_call(16,(uintptr_t)records,capacity,0,0,0,0);
 }
+/* Supervised children: handles are opaque, creator-bound and never reused
+ * during a boot. Legacy spawn/reap/wait cannot collect these children.
+ * Owner exit/fault/termination disposes of supervised descendants only. */
+static inline uint64_t cx_job_spawn(const char *p,size_t n,
+                                    const struct cx_arg *args,size_t count) {
+    return cx_call(17,(uintptr_t)p,n,(uintptr_t)args,count,0,0);
+}
+/* 0 active (poll only), 1 completed and consumed, 2 stopped and consumed
+ * (stop only), CX_ERROR invalid. Status unchanged on 0/error; forced stop
+ * writes UINT64_MAX. Normal exit/fault keep the existing full64-bit status. */
+static inline uint64_t cx_job_poll(uint64_t job,uint64_t *status) {
+    return cx_call(18,job,0,(uintptr_t)status,0,0,0);
+}
+static inline uint64_t cx_job_wait(uint64_t job,uint64_t *status) {
+    return cx_call(18,job,1,(uintptr_t)status,0,0,0);
+}
+static inline uint64_t cx_job_stop(uint64_t job,uint64_t *status) {
+    return cx_call(18,job,2,(uintptr_t)status,0,0,0);
+}
 void *memcpy(void *,const void *,size_t);
 void *memmove(void *,const void *,size_t);
 void *memset(void *,int,size_t);

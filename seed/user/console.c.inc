@@ -74,6 +74,15 @@ static int init_screen(void) {
     con_clear(&screen);return 1;
 }
 static int path_ok(const char *p){size_t n=strlen(p);return n>0&&n<=255;}
+static int decimal(const char *p,uint64_t *out) {
+    uint64_t n=0;
+    if(!*p)return 0;
+    for(;*p;p++){
+        if(*p<'0'||*p>'9'||n>(UINT64_MAX-(unsigned)(*p-'0'))/10)return 0;
+        n=n*10+(unsigned)(*p-'0');
+    }
+    *out=n;return 1;
+}
 static int command(int argc,char **argv) {
     if(!argc)return 1;
     const char *cmd=argv[0];
@@ -81,6 +90,7 @@ static int command(int argc,char **argv) {
         output("help | ls [prefix] | cat path | stat path\n"
                "write path text | rm path | mv old new\n"
                "run executable [args...] | ticks | clear\n"
+               "runfor ticks executable [args...]\n"
                "exit [status]\n"
                "Quote spaces with single/double quotes.\n"
                "write creates a new file; cat shows <=4096 bytes.\n"
@@ -135,15 +145,35 @@ static int command(int argc,char **argv) {
         return cx_remove(argv[1],strlen(argv[1]))==0;
     if(!strcmp(cmd,"mv")&&argc==3&&path_ok(argv[1])&&path_ok(argv[2]))
         return cx_rename(argv[1],strlen(argv[1]),argv[2],strlen(argv[2]))==0;
-    if(!strcmp(cmd,"run")&&argc>=2&&path_ok(argv[1])) {
+    int timed=!strcmp(cmd,"runfor"),first=timed?2:1;
+    if((timed||!strcmp(cmd,"run"))&&argc>first&&path_ok(argv[first])) {
+        uint64_t duration=0,deadline=0;
+        if(timed&&(!decimal(argv[1],&duration)||!duration))return 0;
         struct cx_arg args[CON_ARGS];
-        for(int i=1;i<argc;i++){args[i-1].data=argv[i];args[i-1].size=strlen(argv[i]);}
+        for(int i=first;i<argc;i++){
+            args[i-first].data=argv[i];args[i-first].size=strlen(argv[i]);
+        }
         if(!paint())return 0;
-        uint64_t child=cx_spawn_args(argv[1],strlen(argv[1]),args,(unsigned)(argc-1)),status;
+        if(timed){
+            uint64_t now=cx_ticks();
+            if(duration>UINT64_MAX-now)return 0;
+            deadline=now+duration;
+        }
+        uint64_t child=cx_job_spawn(argv[first],strlen(argv[first]),args,
+                                    (unsigned)(argc-first)),status=0,state;
         if(child==CX_ERROR)return 0;
-        /* No drawing or keyboard reads while the foreground program runs. */
-        if(cx_wait(child,&status)!=1)return 0;
-        output("status=");number(status);output("\n");return 1;
+        /* Foreground policy: no drawing or key reads during child execution. */
+        if(!timed)state=cx_job_wait(child,&status);
+        else for(;;) {
+            state=cx_job_poll(child,&status);
+            if(state)break;
+            if(cx_ticks()>=deadline){state=cx_job_stop(child,&status);break;}
+            if(cx_sleep(1)!=0){(void)cx_job_stop(child,&status);return 0;}
+        }
+        if(state!=1&&state!=2){(void)cx_job_stop(child,&status);return 0;}
+        if(state==2)output("timeout\n");
+        else {output("status=");number(status);output("\n");}
+        return 1;
     }
     return 0;
 }

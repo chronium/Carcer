@@ -105,3 +105,83 @@ Post-review live smoke check used the final console binary to create/read a fres
 runtime/note and run child.cxe. The transcript contained "final console revision"
 and status37; the launcher returned0. New enumeration remains candidate-tested
 until transition. All live task results were consumed.
+
+## Supervised task generation, 2026-09-06
+The installed inherited console was first run with a script containing
+ls seed/user/ and exit0. Launcher returned0 and its transcript listed the full
+installed user namespace. All runtime script/launch/log files were removed.
+
+New production calls17/18 provide creator-bound lifetime handles, poll/wait/stop,
+and automatic supervised descendant teardown. console run/runfor and concurrent
+use these generic APIs. Fault/exit status remains full64-bit; forced stop is
+distinguished by return2 and console timeout output. USER_ABI.md is authoritative.
+
+Initial compiled fixtures came from job
+80b68a517e0d37caaba1a3dac3a62af670f468eaf82f6251ce4bc0a9f845c0d9.
+The first kernel link caught a compiler-emitted memset from a large test
+initializer; replaced it with initialization of the fields actually read.
+The next candidate passed the job suite but console regression detected a
+literal backslash-n output mistake. After correction and console rebuild job
+e0e6b0a50fe2a456867cd089f9cc256c1cfd774a3013929e764c0c4a575e7144,
+the entire candidate boot/protocol passed. The concurrent launcher migration
+and its real console failure/timeout tests were built in
+9685b735f43b24b1c4517458a2ce8a73841ab7e6fb5b56c591ec1a8228504d79;
+the full candidate again passed.
+
+Independent source review found no production blockers, but requested stronger
+regressions for immutable-copy cancellation and immediate ownership teardown.
+Both were added. Updated jobtest compiled in
+252d152890ec882a96de3ed74286ec9886b4056c39bc4b0e5689a9c93f754d19.
+The full candidate passed after correcting a test assumption about a1tick
+gated owner's transient sleep state. Exact pre-teardown descendant states and
+post-teardown resource/edge checks remain mandatory.
+
+The controlled suite gates each owner-exit/fault/stop case, verifies RUN/WAI/ZOM
+descendants (including a reservation on a surviving legacy task), and holds the
+client before its next launch/exit to require immediate slot/CR3/wait-edge/page
+recovery. Stop cases require WAI and long SLP owners individually.
+The copy test observes a managed child suspended in kernel context with ir set
+and its owner WAI, then kernel-kills the owner under the same interrupt lock.
+It reclaims and guards the exact former copy destination page, immediately
+reuses both task slots, and requires replacement memory integrity, continuing
+independent progress, no old post-read marker and complete resource recovery.
+Boot-only fxprobe lengthens the normal read window; no production scheduler,
+loader, copy or kill path recognizes a fixture name or behavior.
+
+Candidate boot is new-kernel execution evidence, not replacement of the running
+kernel. New17/18 and updated console/concurrent have not been run through live
+tools in this generation because the installed kernel is the inherited one.
+After transition run seed/user/jobtest.cxe without arguments, then a console
+script with runfor and an ordinary subsequent child for useful live confirmation.
+Special controlled/copy fixture modes require the boot observer.
+
+Current changed binaries before final reconstruction:
+- console.cxe28483 SHA405f3d7363688d82a139293d9c7bfc053afa6c940f358cd382b0b44cfc34b642
+- consoletest.cxe24003 SHAafff9fcfd5410bc79890e00b1190a3f0edf922b1fa60f8812d1deb23197d9b73
+- concurrent.cxe20131 SHAc65b6d8294e7817588200c3d4c5a35d4bc6f100bdc69646f4eedaa8a15c1da01
+- jobtest.cxe6739 SHAbfb8b1a5d7bf2045865f8bae8f20e12aa4a41e60614dcd8d2c6a508333ea2d1f
+
+Request2 remains pending, checked in this generation. Physical interactive Doom
+has no new verification. Supplied original assets and Doom binary are unchanged.
+
+### Follow-up review and independent reconstruction
+The second independent source review found no meaningful issues and confirmed
+that both added regression groups substantively cover the requested scenarios.
+It was source-only and did not independently execute tests.
+
+Reconstruction job76d1b72577166743964e218b81bc38d53b09718511221ae7c32a4fd3a5fad949
+ran console/verify.sh: sdk/build.sh, doom/build.sh and console/build.sh, packager/
+SHA-256/Doom-key/console-core tests, and byte comparison of ALL17 persisted CXE2
+executables. Every comparison passed. The only immutable input declared was
+doomgeneric-src with SHA93ca655ebfb9cccd2f02e05bf70d5bf1502bef21d09d3d353b9ed7aaceb61fb7.
+Exact report is console/rebuild.txt, artifact
+65a9556966b1a6d22f680009cdeed3028af5806a10f9d2b8dcdee8f557cfb9e4 (1648bytes).
+That snapshot contained117 source files and904247 content bytes, before these
+final report/notes updates. User binaries all persist under seed/user; boot
+does not depend on retained artifact access.
+
+Final generation validation uses a trusted build of the exact source AFTER
+these report/document updates and requires successful compile/link, canonical
+READY and development protocol before generation completion. Its result is
+recorded in the generation handoff. Physical VGA/input verification remains
+unavailable under pending request2; no approval or future arrival is assumed.

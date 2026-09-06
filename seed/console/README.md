@@ -34,8 +34,14 @@ to a multiple of8. It is the userland render buffer, not trusted VGA observation
 - mv old new: existing file-control rename, including replacement of a mutable
   destination. Both endpoints must permit modification.
 - rm path: remove a mutable file.
-- run executable [args...]: spawn with argv[0]=executable, block until it exits,
-  consume its result and print the full unsigned64-bit status.
+- run executable [args...]: supervised spawn with argv[0]=executable, block until
+  it exits, consume its result and print the full unsigned64-bit status.
+- runfor ticks executable [args...]: supervised run with a positive decimal
+  100Hz tick limit. Poll completion, sleeping1tick between checks. On observed
+  expiry, stop and collect the child, print timeout and continue the script.
+  A completed child instead prints status even if completion is observed at the
+  deadline. Invalid/zero/overflowing durations fail before launch. The deadline
+  is calculated just before launch, so load/scheduling time is included.
 - ticks: monotonic100Hz boot ticks.
 - clear: clear the visible text area.
 - exit [status]: exit with an unsigned decimal64-bit status, default0.
@@ -73,9 +79,18 @@ the256-event retained history; modifier state resets, and fresh presses are need
 There is no exclusive display/input ownership. Unrelated programs may still
 draw or observe keyboard history. There is no terminal stream redirection:
 children keep their own file-based output conventions. Inspect those with cat.
-There are no background jobs, cancellation, timeout or process ownership APIs.
-An indefinitely running foreground child keeps this session waiting; other
+There are no background-job commands or keyboard cancellation controls.
+runfor uses generic supervised-child handles and stop; USER_ABI.md specifies them.
+An indefinitely running plain run child keeps this session waiting; other
 independent tasks and the development bridge retain ordinary scheduling.
+
+Console exit/fault/termination cleans up its supervised descendants. The generic
+concurrent launcher also supervises both its children and stops the first if the
+second launch fails. Programs using legacy spawn calls can leave unsupervised
+children behind; runfor does not promise to contain those children. Forced stop
+does not roll back files, saves or display output and does not run user cleanup.
+Long IRQ-disabled kernel work can delay expiry checks; ticks are not a wall-clock
+or hard real-time deadline.
 
 All files are RAM files. Runtime transcripts, scripts, captures, saves and imports
 disappear across generations. FILE streams remain path-backed; concurrent rename,
@@ -89,7 +104,7 @@ or output/capture failure. Explicit exit statuses can coincide with these.
 sh /inputs/source/seed/console/build.sh
 uses the approved bootstrap executor and guest SDK; no external assets needed.
 Requested bootstrap output names are relative to /work/out (console.cxe,
-enumtest.cxe, consoletest.cxe). Do not include an extra out/ prefix.
+enumtest.cxe, consoletest.cxe, jobtest.cxe). Do not include an extra out/ prefix.
 
 coretest exercises the production lexer, editing bounds, modifier/loss handling,
 scrolling and glyph bounds. enum_tests.h runs enumtest.cxe through syscall16.
@@ -108,5 +123,19 @@ Production regressions cover both ceiling exhaustion and real transcript write
 failure. The substantive command script's capture is the framebuffer fixture.
 
 console/verify.sh rebuilds every persisted user binary with declared immutable
-Doom source input and compares all16 byte-for-byte; rebuild.txt and VALIDATION.md
+Doom source input and compares all17 byte-for-byte; rebuild.txt and VALIDATION.md
 record the observed successful run and final artifact hashes.
+
+## Supervision validation
+job_tests.h runs jobtest.cxe using production calls17/18 alongside a non-syscalling
+spin. console_tests.h exercises repeated runfor timeouts, subsequent successful
+children, bad durations, full-width/fault statuses and supervised concurrent
+launcher failure/termination. Existing transcript failure and framebuffer-buffer
+comparison checks remain. Candidate build validates new syscalls; live invocation
+requires the generation transition that installs the candidate kernel.
+
+The job boot suite also uses explicit observer-gated modes to inspect each
+ownership teardown before subsequent launches and cancellation of a suspended
+immutable-copy kernel continuation followed by slot and destination-page reuse.
+Only jobtest's default mode is a standalone user regression; the controlled,
+copy-owner and related probe modes are boot fixtures requiring their observer.

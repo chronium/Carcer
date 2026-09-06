@@ -7,7 +7,7 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history; 16 namespace snapshot.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history; 16 namespace snapshot; 17 supervised spawn with arguments; 18 supervised child control.
 
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
@@ -15,7 +15,7 @@ Blocking wait (12) uses RDI=target task ID and RSI=an 8-byte writable status des
 
 Only one blocking waiter may reserve a target's result. Another blocking wait or nonblocking reap (6), including a development-protocol reap, fails with UINT64_MAX / tool failure while that reservation exists. Nonblocking reap returns 0 for an unreserved waiting task, just as for runnable or sleeping tasks. Wait rejects an invalid/free/kernel target, self-wait, a dependency cycle, or an invalid destination before reserving or consuming anything. Failure leaves the destination unchanged and returns UINT64_MAX.
 
-Kernel-side cancellation of the target wakes its waiter with failure, without writing a status. Cancellation of a blocked waiter releases its reservation. Completion delivery and cancellation finish before a target slot can be reused; a pending wait cannot silently transfer to a replacement task. Task IDs remain reusable slot indices, however: an old ID submitted *after* reuse names the current occupant. There is no ownership model or user cancellation syscall. Waiting on an indefinitely running task can block indefinitely; there is no wait timeout.
+Kernel-side cancellation of the target wakes its waiter with failure, without writing a status. Cancellation of a blocked waiter releases its reservation. Completion delivery and cancellation finish before a target slot can be reused; a pending wait cannot silently transfer to a replacement task. Task IDs remain reusable slot indices, however: an old ID submitted *after* reuse names the current occupant. Legacy tasks have no ownership or user cancellation; supervised children use calls17/18 below. Waiting on an indefinitely running task can block indefinitely; there is no wait timeout.
 
 Display info uses RDI=output and RSI=capacity. It fails for capacity<32 or an invalid destination; otherwise it writes and returns 32 bytes: LE32 size=32,width,height,pitch,format=1,zero[3]. Format 1 is XRGB8888. Present uses RDI source, RSI stride, RDX x, RCX y, R8 width, R9 height; rectangles are nonempty, in bounds, and prevalidated. The framebuffer is kernel-owned.
 
@@ -112,3 +112,58 @@ writes nothing. The snapshot copies names/metadata atomically under the existing
 single scheduling CPU's syscall interrupt lock. Contents and future namespace
 operations are not part of the snapshot. No directory tree or access-control
 model is added. sdk/cx.h defines cx_file_record and cx_files.
+
+## Supervised children (17 and 18)
+
+Call17 has exactly call13's path and argument-span inputs and validation, but
+returns an opaque nonzero64-bit child handle instead of a reusable slot index.
+UINT64_MAX is failure and is never a handle. Handles identify a single successful
+supervised launch, increase monotonically and never wrap/recur during a boot.
+Exhaustion rejects further supervised launches. Failed launches publish no child
+and consume no handle. Handles have no meaning across reboot/generation changes.
+
+The calling task is the sole owner of that child, even if the owner itself was
+launched through a legacy API. Passing a handle to another task does not transfer
+control. Call18 and all cleanup are serialized with launch/completion on the
+single scheduling CPU. No handle can accidentally resolve to a replacement task.
+Legacy calls6/12 and protocol reap reject supervised children even if supplied
+their raw slot index. Existing unsupervised spawn/wait/reap contracts remain.
+
+Call18: RDI=handle, RSI=operation (0 poll,1 blocking wait,2 stop),
+RDX=8-byte writable status destination. RCX/R8/R9 are ignored.
+The full destination span is validated before any side effect, including poll
+of an active child. Unaligned and cross-page writable words are supported.
+
+- Return0: poll found an active child. Status is unchanged.
+- Return1: the child completed normally or faulted; its full64-bit exit status
+  is written and the result/handle is consumed. This applies to all operations,
+  including stop of an already completed child. A fault still uses UINT64_MAX;
+  it is not distinguishable from explicit exit with that status.
+- Return2: stop terminated an active child and consumed its handle. Status is
+  set to UINT64_MAX. The return value distinguishes termination from completion.
+- UINT64_MAX: invalid operation, handle, owner, destination, reservation or wait
+  dependency. Status is unchanged; no result is consumed and no child is stopped.
+
+Blocking wait retains all GPRs except RAX and supported FP state, reserves the
+result, and uses the existing acyclic wait graph. Its validated destination is
+saved separately from argument registers. Kernel-side cancellation retains the
+existing failure/wakeup semantics. Userland has no timeout-wait primitive;
+poll, monotonic ticks, sleep and stop compose bounded supervision.
+
+On owner exit, fault, or kernel/user termination, every still-owned supervised
+descendant is terminated and all their results/address spaces are discarded
+before owner-slot reuse. This includes runnable, sleeping, waiting and completed
+children. Cleanup detaches wait edges before freeing address spaces. It does not
+run user destructors or undo file/display effects. Legacy children spawned via
+calls5/13 are outside this automatic cleanup contract and can outlive an owner.
+No detach, transfer, adoption, group signal, global task enumeration or general
+process-security model is implied.
+
+This is immediate forced termination at a kernel scheduling opportunity, not
+a hard real-time guarantee. Long IRQ-disabled operations still delay scheduling.
+The existing immutable-file copy window can be preempted in kernel context.
+The implementation owns only private task mappings and kernel stack contexts;
+it does not add a general kernel-preemption or SMP design.
+
+SDK wrappers: cx_job_spawn, cx_job_poll, cx_job_wait, cx_job_stop.
+Console run and runfor and the generic concurrent launcher use supervision.

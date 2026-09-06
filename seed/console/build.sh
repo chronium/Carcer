@@ -10,3 +10,6 @@ for name in console consoletest; do
     CX_LIBC=1 sh "$src/sdk/compile.sh" "$src" "$out/$name" "$src/user/$name.c.inc"
 done
 sha256sum "$out/enumtest.cxe" "$out/console.cxe" "$out/consoletest.cxe"
+
+sh "$src/sdk/compile.sh" "$src" "$out/jobtest" "$src/user/jobtest.c.inc"
+sha256sum "$out/jobtest.cxe"

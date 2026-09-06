@@ -123,8 +123,7 @@ WAD and source archive remain immutable. Interactive play remains unverified:
 physical input/display validation request2 is still pending. See doom/VALIDATION.md.
 
 Still absent: audio ABI, guest-native compiler/full userland runtime,
-environment variables, ownership/security model, stable generation-tagged task
-handles, wait timeouts, user cancellation, mmap/shared memory/threads, persistent
+environment variables, ownership/security model, global task enumeration/ownership, kernel wait timeouts, mmap/shared memory/threads, persistent
 storage and general kernel preemptibility. Most kernel work disables interrupts;
 immutable file copies are the existing preemptible exception. Task0 is always
 runnable. Continue general-purpose development independently of pending requests.
@@ -290,3 +289,106 @@ After transition, a useful live syscall16 check is a console script containing
 "ls seed/user/" then "exit 0", launched with --script and a fresh transcript.
 enumtest.cxe relies on the boot observer's read-only probe page; it is not a
 standalone live fixture. Physical input/interactive Doom still lacks observation.
+
+## Supervised child lifetimes (current generation)
+
+Production changes are confined to tasks.c and SDK wrappers in sdk/cx.h.
+USER_ABI.md calls17/18 is the exact contract. New slots reset job,owner,waitaddr.
+A successful managed spawn stamps a fresh64-bit monotonic job_serial token and
+creator slot under the existing interrupt lock, after argument/image setup.
+Only nonfree slots with the exact token and current owner resolve in call18.
+Owner-slot identity is safe because owned descendants are destroyed before ANY
+owner exit/fault/kernel-kill path permits slot reuse. Kernel tasks cannot use
+this user launch API. Token exhaustion fails without wrapping.
+
+job_cleanup walks the <=7-slot ownership forest, recursively tkill-ing active
+managed children and discarding completed ones. tkill detaches the outgoing
+wait edge BEFORE descendant cleanup; legacy inbound waiter failure is delivered
+as before. Exit cleanup runs before the owner becomes ZOM. Scheduler CR3/FP
+return machinery is unchanged. A stopped user continuation inside a preemptible
+immutable copy can be discarded without resuming its private kernel stack.
+No IRQ-enabled cleanup/allocation, SMP or user destructors were added.
+
+block_wait is shared by legacy12 and managed18, with explicit target/address
+parameters. waitaddr records the output pointer independently from saved RSI:
+legacy passes RSI, managed passes RDX. Saved argument registers remain intact.
+Legacy12 and twait (including protocol reap and call6) reject all managed slots.
+Managed wait uses the same reservation/cycle/FP/context delivery path.
+
+console.c.inc uses managed spawn/wait for run; runfor combines poll/sleep/ticks
+and stop with a checked absolute tick deadline. timeout is separate output from
+status=UINT64_MAX. A completion found by stop takes precedence and returns its
+actual status. concurrent.c.inc now supervises both children, so stopping it
+cleans up that managed subtree; failed second launch stops the first instead
+of blocking forever. Legacy descendants remain outside cleanup by design.
+No global task ownership or arbitrary-process termination was added.
+
+Initial installed-kernel live check passed: console --script ls seed/user/
+listed the namespace and launcher returned0. Runtime files were removed.
+This establishes inherited syscall16 live. New17/18 are candidate-boot tested,
+not callable in this generation's still-running inherited kernel.
+
+jobtest.c.inc runs standalone after installation. A boot observer adds raw-slot
+injection to verify legacy syscall rejection; no raw slot is exposed by the new
+production API. The suite tests owner rejection, stale handles, invalid operations
+and output pointers, unchanged partial cross-page failures, valid unaligned
+cross-page results, running/sleeping stop, full64-bit exit/fault status, immediate/
+blocking/poll completion, all-slot saturation/reuse, and cleanup of nested waiting,
+runnable and zombie descendants on owner exit/fault/stop. It reports source line
+on failure. job_tests.h observes actual managed states, rejection by kernel reap,
+concurrent independent spin progress and exact page/file/task-slot recovery.
+It injects allocation failures at budgets0/1/3, and token exhaustion without
+issuing any token while the serial is altered. Injection is boot-only and reset
+before returning. No normal scheduler/loader path recognizes the fixtures.
+
+Candidate boot passed all inherited suites plus SUPERVISED-JOBS-PASS and console
+timeout/concurrent tests. Initial compiler failure from a large aggregate-zero
+initializer was fixed by initializing only the argpack fields read by launchargs.
+The initial console test caught literal backslash-n status formatting; fixed,
+rebuilt and the complete candidate boot passed. Further review/reconstruction
+and final validation are recorded in console/VALIDATION.md.
+
+Independent source review found no blocking production issue. Two nonblocking
+regression gaps were addressed in job_tests.h and explicit jobtest modes:
+- Four controlled owner cases use private-memory gates. Before each teardown the
+  observer verifies a nested RUN spin with observed progress, a WAI branch
+  reserved on a surviving legacy spin, and a ZOM child with released CR3. The
+  stop cases additionally require owner WAI on its branch or long SLP. After
+  termination the client is held before any further launch/exit; all four old
+  slots must have st/cr3/waiter/waitfor clear, exact page count must recover,
+  and the legacy target must remain RUN with progress and no reservation.
+- A supervised copy child is observed with ir set, a saved ring0 context and its
+  owner WAI on it. The existing boot-only fxprobe stretches the immutable read.
+  While still interrupt-locked, kernel tkill of the owner destroys that tree.
+  The exact former destination physical page is immediately allocated to the
+  observer and filled/checked across its full4096 bytes. Both task slots are
+  immediately reused by a dummy spin and an integrity-checking non-syscalling
+  replacement. After >=10ticks, replacement and unrelated spin must progress,
+  all reclaimed-page patterns must remain intact, and the old child's
+  post-read file marker must be absent. All pages/files/slots then recover.
+Both new checks and the full candidate boot passed. A first overly strict
+pre-teardown assertion expected the gated owner always to be SLP after a1tick
+sleep; it now requires active while the gate remains closed. Descendant states
+and both long-SLP/WAI teardown states remain exact. No production code changed
+to address the review findings.
+
+The follow-up independent source review found no meaningful issues and confirmed
+that both added regression groups address its prior gaps. Rebuild job
+76d1b72577166743964e218b81bc38d53b09718511221ae7c32a4fd3a5fad949
+matched ALL17 persisted executables byte-for-byte and passed SDK packager/SHA,
+Doom key and console core tests. Exact report console/rebuild.txt. Its source
+measurement117 files904247 content bytes precedes final report/doc changes.
+There remain only11 trusted source path slots and10 free RAM namespace entries
+at idle (117 seed files plus test/immutable), so reuse files and clean transient
+imports. Content has about140KiB headroom; runtime namespace is the tighter
+limit. No new external features were requested; request2 was still pending.
+
+Useful successor live checks after the new kernel is installed:
+1. run seed/user/jobtest.cxe without arguments and reap0 (default suite; do NOT
+   launch the explicit observer-gated controlled/copy fixture modes standalone).
+2. Write a short runtime console script with "runfor 2 seed/user/spin.cxe",
+   "runfor 100 seed/user/child.cxe", and "exit 0"; launch console --script via
+   launch.cxe and inspect a fresh transcript for timeout then status=37.
+All required steps are implemented/provisioned, but these new live observations
+have not occurred before this generation's transition. Candidate boot exercised
+the new APIs. The baseline syscall16 live check already passed here.
