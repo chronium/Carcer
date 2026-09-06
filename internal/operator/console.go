@@ -488,7 +488,7 @@ func (c *PlainConsole) reportInterviewOutcome(outcome TurnOutcome) {
 	if outcome.Result.TurnStatus == "interrupted" {
 		c.printLine("Exit interview turn interrupted.")
 	} else if outcome.Result.FinalMessage != "" && c.outputHandler == nil {
-		c.printLine("Sol:")
+		c.printLine("Astra:")
 		c.printIndented(outcome.Result.FinalMessage)
 	}
 }
@@ -620,7 +620,7 @@ func (c *PlainConsole) beginInterview() error {
 	}
 	if !c.controller.ExitInterviewAvailable() {
 		c.printLine("No live generation session is available for an exit interview.")
-		c.printLine("Only generations completed after exit-interview support was active can retain their original Sol thread.")
+		c.printLine("Only generations completed after exit-interview support was active can retain their original Astra thread.")
 		return nil
 	}
 	if c.interviews == nil {
@@ -783,7 +783,7 @@ func (c *PlainConsole) printHelp() {
 		"agent       start or continue the generation's Codex session",
 		"interview   enter a retained post-generation exit interview",
 		"ask TEXT    ask one retrospective exit-interview question",
-		"end-interview  end the interview and close retained Sol",
+		"end-interview  end the interview and close retained Astra",
 		"git-record  reconcile local generation Git provenance",
 		"pause       pause the running generation",
 		"resume      resume the paused generation",
@@ -1354,32 +1354,32 @@ func (c *PlainConsole) CodexActivity() (string, string) {
 		if phase == "" {
 			phase = "review handoff"
 		}
-		return "Sol", phase
+		return "Astra", phase
 	case agent.ReviewYieldAwaitingReview, agent.ReviewYieldReviewing:
-		return "Luna", "review"
+		return "Astra", "review"
 	case agent.ReviewYieldFailed:
-		return "Luna", "review failed"
+		return "Astra", "review failed"
 	case agent.ReviewYieldAwaitingContinuation, agent.ReviewYieldResuming:
-		return "Sol", "review continuation"
+		return "Astra", "review continuation"
 	}
 	if c.exitInterviewState() == "answering" {
-		return "Sol", "interview"
+		return "Astra", "interview"
 	}
 	phase := c.controller.ActiveTurnPhase()
 	if phase == "continuation" {
 		phase = "implementation"
 	}
 	if phase != "" {
-		return "Sol", phase
+		return "Astra", phase
 	}
 	if turn := c.currentTurn(); turn != nil && !turn.interview {
 		switch turn.phase {
 		case "initial", "planning":
-			return "Sol", "planning"
+			return "Astra", "planning"
 		case "continuation":
-			return "Sol", "implementation"
+			return "Astra", "implementation"
 		default:
-			return "Sol", "starting"
+			return "Astra", "starting"
 		}
 	}
 	return "", ""

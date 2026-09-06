@@ -116,7 +116,7 @@ func TestModelToolsPreserveDetailFeatureStatusAndReviewerDeduplication(t *testin
 	model.Consume(modelEvent(6, observability.ActivityToolStarted, review, observability.ActivityReviewer, "review"))
 	model.Consume(modelEvent(7, observability.ActivityToolCompleted, map[string]any{"tool": "review", "arguments": review["arguments"], "result": reviewText}, observability.ActivityReviewer, "review"))
 	completedReview := model.Entries()[4].Presentation.(ToolPresentation)
-	if completedReview.Detail != nil || completedReview.ResultNote != "result returned to Sol" || strings.Count(model.RenderText(), reviewText) != 1 {
+	if completedReview.Detail != nil || completedReview.ResultNote != "result returned to Astra" || strings.Count(model.RenderText(), reviewText) != 1 {
 		t.Fatalf("review presentation = %#v; transcript = %q", completedReview, model.RenderText())
 	}
 

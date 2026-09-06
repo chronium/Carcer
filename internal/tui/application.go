@@ -1495,7 +1495,7 @@ func (a *Application) headerText() string {
 	agent := oneLine(SafeDisplayText(a.status.ActiveAgent, SummaryDisplayBytes))
 	phase := oneLine(SafeDisplayText(a.status.ActivePhase, SummaryDisplayBytes))
 	if agent == "" && a.status.SolState != "idle" && a.status.SolState != "stopped" {
-		agent = "Sol"
+		agent = "Astra"
 	}
 	if phase == "" {
 		phase = oneLine(SafeDisplayText(a.status.SolState, SummaryDisplayBytes))
@@ -1521,17 +1521,17 @@ func (a *Application) headerText() string {
 	}
 	switch a.status.Interview {
 	case InterviewAnswering:
-		activity = "Sol interview"
+		activity = "Astra interview"
 	case InterviewIdle:
 		activity = "interview ready"
 	case InterviewAvailable:
 		activity = "exit interview available"
 	}
-	full := fmt.Sprintf(" CodexOS  run %s · gen %s · %s · %s · external pending %d · OS active %d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, operatorState)
+	full := fmt.Sprintf(" Project Carcer  run %s · gen %s · %s · %s · external pending %d · OS active %d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, operatorState)
 	if ansi.StringWidth(full) <= a.width {
 		return full
 	}
-	compact := fmt.Sprintf(" %s · g%s · %s · %s · p%d · OS%d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, strings.TrimPrefix(operatorState, "operator "))
+	compact := fmt.Sprintf("%s · g%s · %s · %s · p%d · OS%d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, strings.TrimPrefix(operatorState, "operator "))
 	return ansi.Truncate(compact, max(1, a.width), "…")
 }
 

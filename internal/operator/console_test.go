@@ -449,11 +449,11 @@ func TestPlainConsolePauseResumeTracksTheSameSession(t *testing.T) {
 	if state := console.CodexTurnState(); state != "implementation" {
 		t.Fatalf("live implementation state = %q", state)
 	}
-	if agentName, phase := console.CodexActivity(); agentName != "Sol" || phase != "implementation" {
+	if agentName, phase := console.CodexActivity(); agentName != "Astra" || phase != "implementation" {
 		t.Fatalf("live implementation activity = %q/%q", agentName, phase)
 	}
 	status := tuiStatus(console)
-	if status.ActiveAgent != "Sol" || status.ActivePhase != "implementation" || status.SolState == "planning" {
+	if status.ActiveAgent != "Astra" || status.ActivePhase != "implementation" || status.SolState == "planning" {
 		t.Fatalf("live implementation TUI status = %#v", status)
 	}
 	pid := waitOperatorSessionPID(t, console.controller, 3*time.Second)
@@ -498,7 +498,7 @@ func TestPlainConsoleActivityAttributesReservedTurnPhase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if agentName, phase := console.CodexActivity(); agentName != "Sol" || phase != test.wantPhase {
+		if agentName, phase := console.CodexActivity(); agentName != "Astra" || phase != test.wantPhase {
 			t.Fatalf("reserved %s activity = %q/%q", test.reservedPhase, agentName, phase)
 		}
 		console.releaseReservedTurn(turn)
@@ -527,6 +527,9 @@ func TestPlainConsolePersistsCompletedExitInterviewAndRetiresSession(t *testing.
 	waitConsoleIdle(t, console, 4*time.Second)
 	executeConsoleLine(t, console, "end")
 	waitOperatorProcessExit(t, pid, 3*time.Second)
+	if !strings.Contains(output.String(), "Astra:\n") || !strings.Contains(output.String(), "Retrospective answer.") {
+		t.Fatalf("interview presentation = %s", output.String())
+	}
 
 	artifact := filepath.Join(repository, "artifacts", "interviews", filepath.Base(runtime.root), "generation-0012.md")
 	contents, err := os.ReadFile(artifact)
@@ -664,5 +667,25 @@ func TestFeatureDecisionNotesCommandAndPresentation(t *testing.T) {
 				t.Fatalf("presentation: %q", text)
 			}
 		})
+	}
+}
+
+func TestInterviewLabelsUseAstraForPlainAndTUIOutput(t *testing.T) {
+	for _, tuiOutput := range []bool{false, true} {
+		runtime := newConsoleTestRuntime(t)
+		runtime.state = string(experiment.RuntimeStateAwaitingNextGeneration)
+		runtime.pending = &experiment.PendingGenerationFinish{HandoffMessage: "Sol and Luna described CodexOS."}
+		var output bytes.Buffer
+		console := newTestPlainConsole(t, runtime, strings.NewReader(""), &output, nil)
+		if tuiOutput {
+			console.outputHandler = func(line string) { output.WriteString(line + "\n") }
+		}
+		executeConsoleLine(t, console, "help")
+		executeConsoleLine(t, console, "interview")
+		for _, label := range []string{"close retained Astra", "original Astra thread"} {
+			if !strings.Contains(output.String(), label) {
+				t.Fatalf("TUI=%v missing %q: %s", tuiOutput, label, output.String())
+			}
+		}
 	}
 }
