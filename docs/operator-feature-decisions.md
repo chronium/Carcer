@@ -45,9 +45,8 @@ Historical generation archives and handoffs are not rewritten.
 
 ## Compatibility
 
-This is a Go-only format extension. Existing records and cross-run ledgers without
-notes retain their canonical representation and Python/Go conformance. The unchanged
-Python reference and older Go readers reject records containing `decision_note`;
-a run that uses notes must be reopened or inherited with a Go harness supporting
+Existing records and cross-run ledgers without notes retain their canonical
+representation. Older readers reject records containing `decision_note`; a run
+that uses notes must be reopened or inherited with a harness supporting
 this extension. No guest wire protocol changes: `request_feature` continues to
 accept only the guest-authored title and description.

@@ -3,7 +3,6 @@ package experiment
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -625,54 +624,52 @@ func TestSymlinkAndCollisionAreRejectedWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestGoArchiveIsReadableByPython(t *testing.T) {
-	repository := experimentRepositoryRoot(t)
-	run := filepath.Join(t.TempDir(), "run")
-	snapshot := testSnapshot(t, "Go source\n")
-	if _, err := WriteCompletedArchive(run, CompletedArchive{
-		Generation: 0, Transition: "initial", Hardware: testHardware(t), BootISO: []byte("boot"),
-		Handoff: "Go handoff λ.\n", SourceSnapshot: snapshot, KernelELF: []byte("kernel"), SuccessorISO: []byte("successor"),
-	}); err != nil {
+func TestLegacyCompletedArchiveInspectionAndGateReopen(t *testing.T) {
+	run := t.TempDir()
+	archive := filepath.Join(run, "generation-0000")
+	hardware, err := qemu.EncodeHardwareManifest(testHardware(t))
+	if err != nil {
 		t.Fatal(err)
 	}
-	script := "import json, pathlib, sys\n" +
-		"archive = pathlib.Path(sys.argv[1]) / 'generation-0000'\n" +
-		"assert json.loads((archive / 'metadata.json').read_text()) == {'generation': 0, 'outcome': 'completed', 'parent_generation': None, 'transition': 'initial'}\n" +
-		"assert (archive / 'handoff.txt').read_text() == 'Go handoff λ.\\n'\n" +
-		"assert (archive / 'source' / 'seed' / 'kernel.c').read_bytes() == b'Go source\\n'\n" +
-		"assert (archive / 'successor' / 'codexos.iso').read_bytes() == b'successor'\n"
-	command := exec.Command("python3", "-c", script, run)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("Python archive verification failed: %v\n%s", err, output)
+	// Deliberately omit later optional harness, source-capacity, and bootstrap
+	// records: existing archives remain readable without rewriting them.
+	files := map[string][]byte{
+		"metadata.json": []byte(`{"generation":0,"outcome":"completed","parent_generation":null,"transition":"initial"}`),
+		"hardware.json": hardware, "source.snapshot": testSnapshot(t, "Legacy source\n"),
+		"source/seed/kernel.c": []byte("Legacy source\n"), "handoff.txt": []byte("Legacy handoff λ.\n"),
+		"boot/codexos.iso": []byte("boot"), "successor/kernel.elf": []byte("kernel"),
+		"successor/codexos.iso": []byte("successor"), "qemu.stdout": {}, "qemu.stderr": {},
 	}
-	_ = repository
-}
-
-func TestPythonArchiveIsReadableByGo(t *testing.T) {
-	repository := experimentRepositoryRoot(t)
-	run := filepath.Join(t.TempDir(), "run")
-	script := "import importlib.util, json, pathlib, sys, types\n" +
-		"root = pathlib.Path(sys.argv[1]); run = pathlib.Path(sys.argv[2])\n" +
-		"package = types.ModuleType('harness'); package.__path__ = [str(root / 'harness')]; sys.modules['harness'] = package\n" +
-		"modules = {}\n" +
-		"for name in ('source_snapshot', 'hardware'):\n" +
-		"  spec = importlib.util.spec_from_file_location('harness.' + name, root / 'harness' / (name + '.py')); module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module); modules[name] = module\n" +
-		"archive = run / 'generation-0000'; (archive / 'boot').mkdir(parents=True); (archive / 'source').mkdir(); (archive / 'successor').mkdir()\n" +
-		"(archive / 'metadata.json').write_text(json.dumps({'generation': 0, 'outcome': 'completed', 'parent_generation': None, 'transition': 'initial'}, indent=2, sort_keys=True) + chr(10))\n" +
-		"manifest = modules['hardware'].TEST_HARDWARE_PROFILE.manifest('QEMU emulator version test'); (archive / 'hardware.json').write_text(json.dumps(manifest.as_json_object(), indent=2, sort_keys=True) + chr(10))\n" +
-		"snapshot = modules['source_snapshot'].encode_source_snapshot((modules['source_snapshot'].SnapshotFile('seed/kernel.c', b'Python source\\n'),)); (archive / 'source.snapshot').write_bytes(snapshot)\n" +
-		"(archive / 'source' / 'seed').mkdir(); (archive / 'source' / 'seed' / 'kernel.c').write_bytes(b'Python source\\n'); (archive / 'handoff.txt').write_text('Python handoff λ.\\n')\n" +
-		"(archive / 'boot' / 'codexos.iso').write_bytes(b'boot'); (archive / 'successor' / 'kernel.elf').write_bytes(b'kernel'); (archive / 'successor' / 'codexos.iso').write_bytes(b'successor'); (archive / 'qemu.stdout').write_bytes(b''); (archive / 'qemu.stderr').write_bytes(b'')\n"
-	command := exec.Command("python3", "-c", script, repository, run)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("Python fixture failed: %v\n%s", err, output)
+	for name, contents := range files {
+		path := filepath.Join(archive, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, contents, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	before := archiveBytes(t, archive)
 	archives, err := LoadArchivedGenerations(run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(archives) != 1 || archives[0].Handoff == nil || *archives[0].Handoff != "Python handoff λ.\n" {
+	if len(archives) != 1 || archives[0].Handoff == nil || *archives[0].Handoff != "Legacy handoff λ.\n" {
 		t.Fatalf("archives = %#v", archives)
+	}
+	opened, err := NewCodexOSRun(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = opened.ReopenAtGate(); err != nil {
+		t.Fatal(err)
+	}
+	pending, ok := opened.PendingGenerationFinish()
+	if !ok || pending.HandoffMessage != "Legacy handoff λ.\n" || !bytes.Equal(pending.SourceSnapshot, files["source.snapshot"]) {
+		t.Fatalf("reopened successor = %#v", pending)
+	}
+	if !sameArchiveBytes(before, archiveBytes(t, archive)) {
+		t.Fatal("inspection or gate reopening changed legacy archive")
 	}
 }
 
@@ -741,13 +738,4 @@ func sameArchiveBytes(left, right map[string][]byte) bool {
 		}
 	}
 	return true
-}
-
-func experimentRepositoryRoot(t *testing.T) string {
-	t.Helper()
-	_, current, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate experiment test")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(current), "../.."))
 }

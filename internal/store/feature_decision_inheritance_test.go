@@ -9,7 +9,7 @@ import (
 func TestCrossRunFeatureDecisionNotesPreservedAndProtected(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	s, err := NewFeatureRequestStore(source)
@@ -54,7 +54,7 @@ func TestCrossRunFeatureDecisionNotesPreservedAndProtected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Archive a disposable destination generation before deciding its pending request.
-	if err := createPythonCrossRunHistory(dest, repositoryRootForCrossRunTest(t), 0, -1); err != nil {
+	if err := createCrossRunHistory(dest, 0, -1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := inherited.Deny(pending.ID, "Unavailable for now. λ"); err != nil {

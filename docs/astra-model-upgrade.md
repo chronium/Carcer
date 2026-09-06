@@ -2,7 +2,7 @@
 
 Verified on 2026-09-05 against implementation commit `6bed42f`, branched from
 `main` at `9f1b56d`. The preceding AGENTS.md updates are preserved in that base.
-This report covers the Go harness only; Python serving defaults remain unchanged.
+This report covers the Go harness serving settings.
 
 ## Installed app-server evidence
 
@@ -66,4 +66,4 @@ Opt-in real-image acceptance and live-experiment trials were not run. Feature #3
 remains pending. This change provisions no compiler, changes no guest source,
 capacity, or readability rules, and introduces no PRISON/2 or async-tool redesign.
 See [agent-contract.md](agent-contract.md#serving-settings) for all role settings
-and provenance semantics. Live Go cutover remains a separate operator decision.
+and provenance semantics. Starting a generation remains a separate operator decision.

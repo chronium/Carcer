@@ -5,8 +5,8 @@ was accepted at `7ef9163`; the final storage-only change has fresh focused, full
 Go, race and vet verification. The original design's
 [feasibility evidence](feasibility/tcc-bootstrap-2026-09-05.md) remains separate.
 This record covers the production Go worker/collector/service and disposable
-storage fixtures, not the feasibility tar collector. No live run, permanent seed,
-Python implementation or feature-request status was changed.
+storage fixtures, not the feasibility tar collector. No live run, permanent seed
+or feature-request status was changed.
 
 ## Inputs and environment
 
@@ -197,4 +197,4 @@ commands above, with `CODEXOS_BOOTSTRAP_TCC_TAR` set so the new operator accepta
 runs rather than skips. Rootless container acceptance was not rerun for these
 runtime/provisioning changes; the original real-container evidence remains above.
 Dedicated-account access still requires operator verification. No live capability,
-feature decision, Python code or permanent seed was changed.
+feature decision or permanent seed was changed.

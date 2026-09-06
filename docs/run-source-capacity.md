@@ -111,15 +111,14 @@ boots generation zero of the new run. Execute it only when explicitly choosing
 to start that experiment. No source run or archive is modified by provisioning
 the destination.
 
-Unprovisioned default archives retain the legacy layout and interoperability.
-The extra setting/archive file is a Go-only extension; the unchanged Python
-harness cannot operate provisioned archives. Use Go for provisioned runs.
+Unprovisioned default archives retain the legacy layout. Provisioned archives
+require a harness version that supports the extra setting/archive file.
 
 ## Post-merge Experiment 4 procedure
 
-These are operator actions after merge and any separately required Go-cutover
-approval. Development does not perform them. Use Experiment 4's existing run
-path, Git repository/base ref, and provided-assets configuration. Do not substitute
+These are separately authorized operator actions after merge. Development does
+not perform them. Use Experiment 4's existing run path, Git repository/base ref,
+and provided-assets configuration. Do not substitute
 a new initial ISO or inheritance opening mode when reopening an existing gate.
 
 1. Let the existing generation reach its inactive gate. In its console, end any
@@ -191,7 +190,7 @@ Verified on 2026-09-05. The initial full/race suites and vet ran at implementati
 | Complete race suite | All 13 packages passed |
 | `go vet` | No diagnostics |
 | Process-leak audit | No new surviving Codex/QEMU/test processes or marked verification children |
-| Documentation/diff | Local links resolve; whitespace checks pass; Python and seed unchanged |
+| Documentation/diff | Local links resolve; whitespace checks pass; seed unchanged |
 
 Commands were run sequentially with bounded test/process concurrency:
 

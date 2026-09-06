@@ -15,7 +15,7 @@ advertised guest import helper, and adds optional operator feature-decision note
 | Decision persistence | Approve and deny, 4096-byte Unicode boundary, malformed/oversized notes, cancellation, atomic status/note publication, restart and finalized-decision protection |
 | Presentation and context | Escaped operator notes appear separately in request inspection/history; `list_requests` includes approved/denied notes and fresh approved context carries its labeled note |
 | Lifecycle and inheritance | Reopen and successor continuation preserve notes; chained cross-run initialization preserves notes and descriptions, protects finalized inherited notes, and permits a pending inherited request's decision at a destination gate |
-| Legacy compatibility | Existing five-field records and canonical cross-run ledgers retain Python/Go conformance; note-bearing records require the updated Go reader |
+| Legacy compatibility | Existing five-field records and canonical cross-run ledgers retain their representation; note-bearing records require a reader supporting decision notes |
 
 Generation 9's helper argument contract was inspected read-only. Tests forward
 through disposable runtime/app-server fixtures; they do not execute imports in a
@@ -49,7 +49,7 @@ Podman, conmon, crun or fake helper processes; zero processes matching those cla
 remained. The import app-server regression also explicitly closes each server and
 waits for its PID to exit.
 
-Only Go harness code, Go tests and documentation changed. Python, guest source,
+Only Go harness code, Go tests and documentation changed. Guest source,
 the permanent seed, finalized interviews, archives, handoffs and live request
 statuses were unchanged. No live capability was provisioned and no live generation
 was started. Decision notes have no provisioning or enforcement effect.

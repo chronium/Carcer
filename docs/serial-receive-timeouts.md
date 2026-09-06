@@ -29,7 +29,7 @@ lock before declaring a timeout.
 Receive events record header identity, advertised wire size, and observed wire
 bytes at the first complete header and then at 64 KiB intervals. Timeout events
 record the outstanding request ID, partial wire byte count, and reason. These
-records contain no payload. Python and the wire format are unchanged.
+records contain no payload. The wire format is unchanged.
 
 ## Experiment-004, generation 11: 2026-09-05
 

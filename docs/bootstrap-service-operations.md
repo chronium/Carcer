@@ -11,7 +11,7 @@ SDK/runtime and any native guest port remain implementor-owned.
 This document describes post-review operator actions. Development/acceptance uses
 only disposable state. Installing the worker, provisioning a run and starting a
 generation are separate actions; none is performed by the PR or by feature
-approval. Python, permanent seed and live experiment state are unchanged.
+approval. The permanent seed and live experiment state are unchanged.
 
 ## Prerequisites and dedicated account
 

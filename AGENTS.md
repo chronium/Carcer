@@ -17,7 +17,7 @@ CodexOS is experimental infrastructure, not a reusable framework or product plat
   covers necessary edits and checks; do not ask for it again.
 * Prepare a concrete, reviewable change before requesting any required approval.
   The experiment gates below still apply; development authorization does not start
-  a generation, provision a capability, or approve live Go cutover.
+  a generation or provision a capability.
 * Explicit user instructions take precedence over repository workflow preferences
   and skill guidance, subject to system and developer instructions.
 * If an instruction blocks work, cite its file and exact wording, explain its
@@ -28,21 +28,19 @@ CodexOS is experimental infrastructure, not a reusable framework or product plat
 ## Repository map
 
 * `cmd/codexos/` and `internal/`: Go harness entry point and implementation.
-* `harness/`: Python reference implementation and current live entry point.
 * `seed/`: minimal generation-zero C guest; `Makefile` builds its bootable ISO.
 * `protocol/`: shared wire and host-service contracts.
-* `tests/`: Python tests; Go tests live beside their packages.
+* Go tests live beside their packages.
 * `artifacts/interviews/`: human-facing research provenance, never guest context.
 
 Contextual references:
 
 * Package ownership and lifecycle design: [docs/go-architecture.md](docs/go-architecture.md).
-* Python/Go compatibility: [docs/go-migration-parity.md](docs/go-migration-parity.md).
-* Live cutover and acceptance evidence: [docs/go-cutover-readiness.md](docs/go-cutover-readiness.md).
+* Verification and acceptance: [docs/verification.md](docs/verification.md).
 
-Python remains the reference during migration; Go cutover requires separate operator approval.
-Preserve cross-language wire and persisted-state compatibility when changing those
-boundaries. Read the relevant `protocol/` specification before changing a protocol.
+Go is the maintained harness implementation. Preserve wire and persisted-state
+compatibility, including support for existing experiment archives, when changing
+those boundaries. Read the relevant `protocol/` specification before changing a protocol.
 
 ## Engineering and scope
 
@@ -74,14 +72,13 @@ to the repository root.
 * Go formatting: `gofmt`.
 * Go package tests: `go test ./internal/<package>`; race detection: `go test -race ./internal/<package>`.
 * Full Go suite: `go test ./...`; static analysis: `go vet ./...`.
-* Python: `uv run --frozen python -m unittest tests.test_<module>` for affected
-  modules; `uv run --frozen python -m unittest discover -v` for the full reference suite.
 * Seed/build: `make seed`. It requires the pinned Limine submodule,
   `x86_64-elf-gcc`, `x86_64-elf-ld`, a host C compiler, Python, and `xorriso`.
 
-Go requires the version in `go.mod`; Python requirements are in `pyproject.toml`
-and `uv.lock`. Some integration tests require Linux, QEMU, KVM, or the cross-toolchain.
-Use disposable test state. See `docs/go-cutover-readiness.md` for resource-limited
+Go requires the version in `go.mod`. The seed source-table generator uses only
+the Python standard library. Some integration tests require Linux, QEMU, KVM,
+or the cross-toolchain.
+Use disposable test state. See `docs/verification.md` for resource-limited
 commands and opt-in real-image acceptance. Report missing prerequisites and skipped
 checks accurately; never validate against a live run as a substitute.
 

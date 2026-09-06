@@ -5,7 +5,7 @@ The harness writes the authoritative structured activity record to
 The optional `--otlp-endpoint` console argument exports metrics only, using
 OTLP/HTTP at `<endpoint>/v1/metrics`.
 
-OpenTelemetry log export is intentionally not used by Python. A separately
+OpenTelemetry log export is intentionally not used by the harness. A separately
 managed local Grafana Alloy can discover and tail the durable JSONL files,
 convert the Loki entries to OpenTelemetry logs, and forward them over OTLP/HTTP
 to a configurable central Alloy ingress. For example:

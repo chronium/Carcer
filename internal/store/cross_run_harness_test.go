@@ -12,7 +12,7 @@ import (
 func TestCrossRunBootstrapCarriesSourceAndDestinationHarnessIdentity(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	sourceIdentity := crossRunHarnessTestIdentity("a", "b")
@@ -58,7 +58,7 @@ func TestCrossRunBootstrapCarriesSourceAndDestinationHarnessIdentity(t *testing.
 func TestCrossRunBootstrapPreservesUnavailableLegacySourceHarnessIdentity(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunFixture(source, repositoryRootForCrossRunTest(t)); err != nil {
+	if err := createCrossRunFixture(source); err != nil {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(root, "repository")
@@ -83,7 +83,7 @@ func TestCrossRunBootstrapPreservesUnavailableLegacySourceHarnessIdentity(t *tes
 func TestCrossRunInspectionRetainsAbortReasonWithoutInheritingFeedback(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
-	if err := createPythonCrossRunHistory(source, repositoryRootForCrossRunTest(t), 2, -1); err != nil {
+	if err := createCrossRunHistory(source, 2, -1); err != nil {
 		t.Fatal(err)
 	}
 	aborted := filepath.Join(source, "generation-0001")

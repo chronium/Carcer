@@ -24,8 +24,7 @@ The current installed protocol provides agent-message text and explicit
 reasoning-summary text/deltas. Opaque/private reasoning state and raw reasoning
 content are ignored; the harness does not decode, infer, or reconstruct hidden
 reasoning. The Go implementor uses Astra high and its reviewer uses Astra low;
-the Python reference retains Sol high and Luna high. Both roles explicitly request the
-separate `auto` reasoning-summary mode.
+both roles explicitly request the separate `auto` reasoning-summary mode.
 
 ## Interactive operator interface
 
