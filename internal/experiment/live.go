@@ -521,7 +521,7 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	if err != nil {
 		return nil, qemu.HardwareManifest{}, err
 	}
-	qemu.EnableLiveDisplay(hardware.QEMUArguments)
+	qemu.EnableDisplay(hardware.QEMUArguments)
 	workspace, err := os.MkdirTemp(r.runDirectory, fmt.Sprintf(".generation-%04d-", number))
 	if err != nil {
 		return nil, qemu.HardwareManifest{}, &GenerationRuntimeError{Reason: "could not create generation workspace", Err: err}
@@ -595,7 +595,7 @@ func (r *CodexOSRun) bootLiveGeneration(ctx context.Context, number uint64, imag
 	if err != nil {
 		return nil, qemu.HardwareManifest{}, err
 	}
-	qemu.EnableLiveDisplay(arguments)
+	qemu.EnableDisplay(arguments)
 	if err := generation.controller.Start(qemu.QEMUStartOptions{
 		Arguments: arguments, StdoutPath: generation.stdoutPath, StderrPath: generation.stderrPath,
 	}); err != nil {

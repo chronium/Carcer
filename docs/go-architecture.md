@@ -196,9 +196,10 @@ pause/resume, completion, paused abort, boot-first continuation, and rollback.
 Run-owned cancellation interrupts blocked guest/build work before shutdown
 joins resources, while failed cleanup retains ownership and diagnostics for a
 retry.
-Go live generations automatically open a local GTK window for the existing VGA
-output; candidate validation remains headless. The QEMU menu and window-close
-action are disabled so lifecycle control stays in the operator console. Hardware
+Go live generations and candidate build validation automatically open local GTK
+windows for the existing VGA output. Candidate windows close when validation
+finishes, including failure or cancellation. The QEMU menu and window-close
+action are disabled so lifecycle control stays in the harness. Hardware
 manifests record the frontend. Go accepts historical headless and live GTK
 settings; the unchanged Python reader does not accept GTK manifests. This adds
 no guest observation/input service and does not provision feature request #2.

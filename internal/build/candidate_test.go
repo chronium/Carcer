@@ -54,6 +54,13 @@ func TestCandidateBootValidationUsesPausedControlsAndReapsQEMU(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := validator.Validate(context.Background(), iso, nil, nil)
+			arguments, err := os.ReadFile(os.Getenv("CODEXOS_GO_CANDIDATE_PID") + ".args")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(arguments), "-display\x00gtk,show-menubar=off,window-close=off\x00") || !strings.Contains(string(arguments), "-S\x00") {
+				t.Fatalf("candidate did not launch with a GTK window and paused controls: %q", arguments)
+			}
 			if result.Status != test.wantStatus {
 				t.Fatalf("status = %s, diagnostics = %s", result.Status, result.Diagnostics)
 			}
@@ -314,6 +321,9 @@ func TestCandidateQEMUHelper(t *testing.T) {
 	defer serialListener.Close()
 	pidPath := os.Getenv("CODEXOS_GO_CANDIDATE_PID")
 	if pidPath != "" {
+		if err := os.WriteFile(pidPath+".args", []byte(strings.Join(os.Args, "\x00")+"\x00"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 			t.Fatal(err)
 		}

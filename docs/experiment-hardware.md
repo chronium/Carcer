@@ -13,7 +13,7 @@ The first autonomous experiment uses one fixed nested-guest hardware profile,
 | Control | QMP Unix socket |
 | Guest/harness transport | COM1 serial Unix socket |
 | Graphics | One standard VGA device |
-| Display frontend | None (headless) |
+| Display frontend | Go: local GTK window; Python reference: headless |
 | Network interfaces | None |
 | Writable block devices | None |
 | Audio | None |
@@ -37,9 +37,11 @@ including no scratch disk. Writable guest storage would introduce lineage state
 that the current generation archives and rollback operation do not snapshot.
 Adding such storage requires explicit archive and rollback semantics first.
 
-The VGA device is guest-visible from generation 0 while QEMU remains headless.
-A future spectator frontend can display that same baseline device without
-requiring guest-visible graphics hardware to appear accidentally later.
+The VGA device is guest-visible from generation 0. Go displays that same device
+in local GTK windows for live generations and candidate build validation;
+candidate windows close after validation. This adds no guest-visible hardware
+or trusted guest observation/input capability. The Python reference remains
+headless.
 
 Every completed or aborted generation archive contains `hardware.json`, which
 records the trusted profile values and the actual QEMU version used for that
