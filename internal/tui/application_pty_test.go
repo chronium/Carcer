@@ -166,7 +166,7 @@ func TestApplicationRetainedLayoutThroughPseudoTerminal(t *testing.T) {
 	waitForApplication(t, time.Second, func() bool { return len(strings.Split(app.View().Content, "\n")) == 14 })
 	view := app.View()
 	assertFixedFrame(t, view.Content, 52, 14)
-	if view.Cursor == nil || !strings.Contains(ansi.Strip(strings.Split(view.Content, "\n")[0]), "Sol implementation") {
+	if view.Cursor == nil || !strings.Contains(ansi.Strip(strings.Split(view.Content, "\n")[0]), "Astra implementation") {
 		t.Fatalf("retained PTY frame has no cursor or live phase:\n%s", ansi.Strip(view.Content))
 	}
 	app.viewMu.Lock()

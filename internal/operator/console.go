@@ -620,7 +620,11 @@ func (c *PlainConsole) beginInterview() error {
 	}
 	if !c.controller.ExitInterviewAvailable() {
 		c.printLine("No live generation session is available for an exit interview.")
-		c.printLine("Only generations completed after exit-interview support was active can retain their original Sol thread.")
+		name := "Sol"
+		if c.outputHandler != nil {
+			name = "Astra"
+		}
+		c.printLine("Only generations completed after exit-interview support was active can retain their original " + name + " thread.")
 		return nil
 	}
 	if c.interviews == nil {
@@ -764,6 +768,10 @@ func (c *PlainConsole) printHarnessIdentity(identity *provenance.HarnessIdentity
 }
 
 func (c *PlainConsole) printHelp() {
+	name := "Sol"
+	if c.outputHandler != nil {
+		name = "Astra"
+	}
 	for _, line := range []string{
 		"help        show these commands",
 		"bootstrap [provision TCC_ASSET_ID|recover|gc]  inspect/provision the optional Linux job service",
@@ -783,7 +791,7 @@ func (c *PlainConsole) printHelp() {
 		"agent       start or continue the generation's Codex session",
 		"interview   enter a retained post-generation exit interview",
 		"ask TEXT    ask one retrospective exit-interview question",
-		"end-interview  end the interview and close retained Sol",
+		"end-interview  end the interview and close retained " + name,
 		"git-record  reconcile local generation Git provenance",
 		"pause       pause the running generation",
 		"resume      resume the paused generation",

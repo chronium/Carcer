@@ -666,3 +666,25 @@ func TestFeatureDecisionNotesCommandAndPresentation(t *testing.T) {
 		})
 	}
 }
+
+func TestInterviewLabelsUseAstraOnlyForTUIOutput(t *testing.T) {
+	for _, tuiOutput := range []bool{false, true} {
+		runtime := newConsoleTestRuntime(t)
+		runtime.state = string(experiment.RuntimeStateAwaitingNextGeneration)
+		runtime.pending = &experiment.PendingGenerationFinish{HandoffMessage: "Sol and Luna described CodexOS."}
+		var output bytes.Buffer
+		console := newTestPlainConsole(t, runtime, strings.NewReader(""), &output, nil)
+		want := "Sol"
+		if tuiOutput {
+			want = "Astra"
+			console.outputHandler = func(line string) { output.WriteString(line + "\n") }
+		}
+		executeConsoleLine(t, console, "help")
+		executeConsoleLine(t, console, "interview")
+		for _, label := range []string{"close retained " + want, "original " + want + " thread"} {
+			if !strings.Contains(output.String(), label) {
+				t.Fatalf("TUI=%v missing %q: %s", tuiOutput, label, output.String())
+			}
+		}
+	}
+}

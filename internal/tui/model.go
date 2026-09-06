@@ -584,7 +584,7 @@ func (m *OperatorActivityModel) consumeTool(event observability.ActivityEvent) {
 		identity := makeTextIdentity(result)
 		if identity == *m.latestReviewerMessage {
 			detail = nil
-			resultNote = "result returned to Sol"
+			resultNote = "result returned to Astra"
 		}
 	}
 	turnPhase, _ := event.Data["turn_phase"].(string)
@@ -1376,10 +1376,8 @@ func presentationText(presentation ActivityPresentation) string {
 
 func roleName(role observability.ActivityRole) string {
 	switch role {
-	case observability.ActivityImplementor:
-		return "Sol"
-	case observability.ActivityReviewer:
-		return "Luna"
+	case observability.ActivityImplementor, observability.ActivityReviewer:
+		return "Astra"
 	case observability.ActivityHarness:
 		return "Harness"
 	default:

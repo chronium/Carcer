@@ -65,7 +65,7 @@ func TestApplicationViewUsesV2FullScreenAndTypedTranscriptRows(t *testing.T) {
 	if view.MouseMode != tea.MouseModeCellMotion {
 		t.Fatalf("mouse mode = %v, want cell motion", view.MouseMode)
 	}
-	for _, want := range []string{"run-1", "g7", "p2", "Sol", "Luna", "read", "missing", "details"} {
+	for _, want := range []string{"run-1", "g7", "p2", "Astra", "read", "missing", "details"} {
 		if !strings.Contains(view.Content, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, view.Content)
 		}
@@ -115,7 +115,7 @@ func TestApplicationRendersAgentMessagesAsSafeMarkdown(t *testing.T) {
 	}
 	rendered := app.renderEntry(messageEntry)
 	plain := ansi.Strip(rendered)
-	for _, want := range []string{"Sol · planning", "Result", "Final Markdown", "docs (https://example.test)", "code", "old", "• item", `\x1b[2J`} {
+	for _, want := range []string{"Astra · planning", "Result", "Final Markdown", "docs (https://example.test)", "code", "old", "• item", `\x1b[2J`} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("rendered Markdown missing %q:\n%s", want, plain)
 		}
@@ -729,7 +729,7 @@ func TestApplicationRetainedRegionsStayPinnedDuringHighVolumeOutput(t *testing.T
 	view := app.View()
 	assertFixedFrame(t, view.Content, 48, 14)
 	rows := strings.Split(ansi.Strip(view.Content), "\n")
-	if !strings.Contains(rows[0], "run-fixed") || !strings.Contains(rows[0], "Sol implementation") {
+	if !strings.Contains(rows[0], "run-fixed") || !strings.Contains(rows[0], "Astra implementation") {
 		t.Fatalf("top row = %q", rows[0])
 	}
 	separator := beforeLayout.header + beforeLayout.transcript
@@ -854,7 +854,7 @@ func TestApplicationHeaderUsesLiveImplementationPhaseOverStaleState(t *testing.T
 	}})
 	app.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
 	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
-	if !strings.Contains(header, "Sol implementation") || strings.Contains(header, "Sol planning") {
+	if !strings.Contains(header, "Astra implementation") || strings.Contains(header, "Astra planning") {
 		t.Fatalf("implementation header = %q", header)
 	}
 }
@@ -871,7 +871,7 @@ func TestApplicationHeaderTracksPlanningReviewAndImplementationTransitions(t *te
 	} {
 		app.SetStatus(StatusSnapshot{RunName: "phase", RuntimeState: "running", ActiveAgent: transition.agent, ActivePhase: transition.phase})
 		header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
-		if !strings.Contains(header, transition.agent+" "+transition.phase) {
+		if !strings.Contains(header, "Astra "+transition.phase) {
 			t.Fatalf("%s/%s header = %q", transition.agent, transition.phase, header)
 		}
 	}
@@ -880,7 +880,7 @@ func TestApplicationHeaderTracksPlanningReviewAndImplementationTransitions(t *te
 		ActiveAgent: "Luna", ActivePhase: "review failed",
 	})
 	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
-	if !strings.Contains(header, "Luna review failed") {
+	if !strings.Contains(header, "Astra review failed") {
 		t.Fatalf("failed review header = %q", header)
 	}
 }
@@ -1010,5 +1010,68 @@ func TestHeaderDistinguishesOperatorRequestsFromExternalApprovals(t *testing.T) 
 	app.width = 90
 	if header = app.headerText(); !strings.Contains(header, "OS3") {
 		t.Fatalf("compact header = %q", header)
+	}
+}
+
+func TestAstraPresentationPreservesRolesColorsAndAuthoredText(t *testing.T) {
+	const authored = "Sol and Luna described CodexOS."
+	app := testApplication(t, ApplicationOptions{})
+	var headings []string
+	for _, role := range []observability.ActivityRole{observability.ActivityImplementor, observability.ActivityReviewer} {
+		for _, kind := range []observability.ActivityKind{observability.ActivityAgentMessage, observability.ActivityAgentReasoningSummary, observability.ActivityToolStarted} {
+			data := map[string]any{"text": authored, "summary": []string{authored}, "tool": "read", "arguments": map[string]any{"path": "Sol/Luna/CodexOS"}, "turn_phase": "planning"}
+			event := modelEvent(uint64(len(app.model.Entries())+1), kind, data, role, string(role)+string(kind))
+			app.model.Consume(event)
+			entries := app.model.Entries()
+			entry := entries[len(entries)-1]
+			rendered := app.renderEntry(entry)
+			plain := ansi.Strip(rendered)
+			if !strings.Contains(plain, "Astra · planning") {
+				t.Fatalf("heading: %q", plain)
+			}
+			if kind == observability.ActivityToolStarted {
+				if !strings.Contains(plain, "Sol/Luna/CodexOS") {
+					t.Fatalf("tool path rewritten: %q", plain)
+				}
+			} else if !strings.Contains(plain, authored) {
+				t.Fatalf("authored text rewritten: %q", plain)
+			}
+			if event.Role != role || event.Data["text"] != authored {
+				t.Fatal("source event changed")
+			}
+			if kind == observability.ActivityAgentMessage {
+				message := entry.Presentation.(AgentMessagePresentation)
+				if message.Role != role || message.Text != authored {
+					t.Fatal("canonical role or text changed")
+				}
+				headings = append(headings, strings.Split(rendered, "\n")[0])
+			}
+		}
+	}
+	if headings[0] == headings[1] || ansi.Strip(headings[0]) != ansi.Strip(headings[1]) {
+		t.Fatalf("roles must share a name but retain distinct colors: %q", headings)
+	}
+}
+
+func TestProjectCarcerHeaderFitsWideAndNarrowTerminals(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{Status: func() StatusSnapshot {
+		return StatusSnapshot{RunName: "Sol", RuntimeState: "running", ActiveAgent: "Luna", ActivePhase: "review"}
+	}})
+	for _, width := range []int{200, 80, 48, 28, 8, 1} {
+		app.Update(tea.WindowSizeMsg{Width: width, Height: 8})
+		view := app.View()
+		assertFixedFrame(t, view.Content, width, 8)
+		header := strings.Split(ansi.Strip(view.Content), "\n")[0]
+		if width == 200 && !strings.HasPrefix(header, " Project Carcer  run Sol") {
+			t.Fatalf("wide title or run name: %q", header)
+		}
+		if width >= 48 && !strings.Contains(header, "Astra review") {
+			t.Fatalf("narrow activity: %q", header)
+		}
+	}
+	app.SetStatus(StatusSnapshot{RunName: "Sol", RuntimeState: "paused", Interview: InterviewAnswering})
+	app.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	if header := app.headerText(); !strings.Contains(header, "Astra interview") {
+		t.Fatalf("interview heading: %q", header)
 	}
 }
