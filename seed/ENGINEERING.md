@@ -243,3 +243,50 @@ cover malformed and width-truncated tokens, suppression, complete tokens followe
 by delimiters and earlier successful conversions. Final binaries were rebuilt,
 candidate-tested and exercised in the live600-frame concurrent run again.
 Both reviews were source-only; physical input and interactive play remain open.
+
+## Console and namespace snapshot generation
+
+See console/README.md and console/VALIDATION.md for the current userland console,
+ABI, tests, build IDs and observed live results. USER_ABI.md documents syscall16.
+The production kernel adds only bounded atomic namespace enumeration; no command
+parser, font, foreground policy or Doom-specific behavior was added to the kernel.
+
+Live installed keyboard driver availability is now observed: keylog returned0
+with an empty5-second log; Doom's600-frame concurrent run reported input=1.
+There is still no observed physical event delivery or trusted VGA/input injection.
+The earlier statements in this file that syscall14/15 are only candidate-tested
+are historical. They are installed now. Syscall16 remains candidate-only until
+this generation's transition. Live console script used inherited calls14/15 and
+ordinary spawn/wait; enumtest and console ls ran in candidate boot regressions.
+
+The new console is an ordinary CXE2 program, with interactive and script modes,
+ASCII rendering, bounded line editing, file commands and foreground execution.
+It has no child terminal streams, cancellation, job control or display ownership.
+Input history is discarded at console command boundaries and Doom startup so
+launch keystrokes are not replayed as new commands/game controls. Caps/modifier
+state starts fresh; it is not a physical key-state snapshot.
+
+First candidate regression passed enumeration under a non-syscalling spin loop,
+including full128-file table, exact255-byte UTF-8 names with embedded NUL, spare
+capacity, sorted/zero-padded records and unchanged output on invalid memory.
+Console integration passed quoted paths, file effects, full64-bit/fault results,
+errors and exact renderer-versus-mapped-framebuffer comparison, recovering files
+and pages. Later sticky line-overflow hardening passed host core tests; final
+build/review status is in console/VALIDATION.md. Broader inherited regressions stay.
+
+New console files consume additional source/file-table budget. Before adding
+more programs, count seed source bytes and files plus transient runtime files;
+the128-entry RAM namespace is shared with source files. No writable persistent
+block storage, SMP, IPC, stable handles or process ownership was added.
+
+Final review updates: no blockers. The console now flushes/checks command echoes
+before dispatch, with actual1MiB-cap and file-write-error regressions proving
+unchanged mutation targets. The framebuffer observer now checks the substantive
+file/status script's retained capture. All revised boot suites passed. Separate
+rebuild matched all16 persisted binaries; details and hashes in console/rebuild.txt
+and console/VALIDATION.md. verify.sh reproduces the complete comparison using
+only the existing approved bootstrap service and declared immutable Doom source.
+After transition, a useful live syscall16 check is a console script containing
+"ls seed/user/" then "exit 0", launched with --script and a fresh transcript.
+enumtest.cxe relies on the boot observer's read-only probe page; it is not a
+standalone live fixture. Physical input/interactive Doom still lacks observation.

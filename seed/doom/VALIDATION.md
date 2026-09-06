@@ -107,3 +107,14 @@ also included Doom frames1 and100. The final349099-byte binary is the one retain
 All supplied original assets are unchanged. The binary, source adaptations and
 library are separate guest-authored outputs. This result is a rendering/userland
 milestone; interactive Doom and physical keyboard/VGA validation are not claimed.
+
+## Successor generation live check
+
+The source-built adapter now discards retained launch-era history at startup.
+A live ordinary console -> generic concurrent supervisor -> Doom/CPU run returned0.
+Doom reported input=1 and600 frames; benchmark ticks109206..109464 overlap Doom
+frame1 at109213 and frame100 at109411. Benchmark output matched the independently
+computed recurrence. Details, final binary IDs and transcript are recorded in
+console/VALIDATION.md. The historical input=0 results above describe the earlier
+live kernel. Physical delivery/interactive play are still unverified; request2
+remains pending. Supplied assets remain immutable and kernel scheduling generic.

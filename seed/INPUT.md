@@ -44,3 +44,10 @@ the complete controller-decoder/history state is restored, and hardware polling
 is suppressed only while this fixture is active. It includes rejected read-only
 second pages and checks resource recovery under a non-syscalling spin competitor.
 This fixture neither accepts external key injection nor claims physical delivery.
+
+Post-transition live check: keylog returned0 after5 seconds, with an empty log.
+Doom subsequently reported input=1 during a successful600-frame concurrent run.
+Physical key delivery remains unobserved. console/README.md documents the
+ordinary userland US keyboard line editor and its bounded history-drain policy.
+Doom's adapter also starts after the retained launch-era history at DG_Init.
+Neither policy grants exclusive input ownership or a current-held-key snapshot.

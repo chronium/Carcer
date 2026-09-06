@@ -7,7 +7,7 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history; 16 namespace snapshot.
 
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
@@ -90,3 +90,25 @@ RDI=writable event array, RSI=capacity1..64, RDX=readable/writable uint64 cursor
 The event and cursor ranges must not overlap. Failure changes neither range;
 successful empty reads preserve event bytes and update the cursor. Each caller
 owns its cursor; reading does not consume events for another caller.
+
+## Namespace snapshot (16)
+
+RDI=destination array of272-byte records; RSI=capacity in records.
+RSI=0 returns the current file count and ignores the destination. Otherwise
+capacity must be1..128 and fit the entire current namespace. Returns record
+count or UINT64_MAX. Other registers are ignored. A query followed by a read is
+not a transaction; capacity128 accommodates the current fixed namespace limit.
+
+Each record: LE32 size,LE32 attributes,LE16 path length,LE16 zero,LE32 zero,
+256 path bytes. Path length is1..255; unused path bytes are zero, including
+path[length]. Paths are exact UTF-8 byte spans and may contain embedded NUL.
+Attributes bit0 is immutable. Records use unsigned-byte lexical path order.
+The snapshot has no kernel pointers or stable file identity/handle.
+
+The entire written span (count*272 bytes) is prevalidated writable, including
+cross-page boundaries, before any record is written. Failure writes nothing;
+spare capacity remains untouched and is not validated. A zero-file snapshot
+writes nothing. The snapshot copies names/metadata atomically under the existing
+single scheduling CPU's syscall interrupt lock. Contents and future namespace
+operations are not part of the snapshot. No directory tree or access-control
+model is added. sdk/cx.h defines cx_file_record and cx_files.

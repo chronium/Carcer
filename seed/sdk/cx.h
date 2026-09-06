@@ -80,6 +80,19 @@ static inline uint64_t cx_input_available(void) {return cx_call(15,0,0,0,0,0,0);
 static inline uint64_t cx_keys(struct cx_key_event *events,size_t capacity,uint64_t *cursor) {
     return cx_call(15,(uintptr_t)events,capacity,(uintptr_t)cursor,0,0,0);
 }
+/* Snapshot all names in unsigned-byte lexical order. Zero capacity queries
+ * count. Otherwise capacity must be <=128 and fit the whole current namespace.
+ * Failure leaves output unchanged; success writes only the returned records. */
+struct cx_file_record {
+    uint32_t size,attributes;
+    uint16_t length,reserved;
+    uint32_t reserved2;
+    unsigned char path[256];
+};
+_Static_assert(sizeof(struct cx_file_record)==272,"file record ABI");
+static inline uint64_t cx_files(struct cx_file_record *records,size_t capacity) {
+    return cx_call(16,(uintptr_t)records,capacity,0,0,0,0);
+}
 void *memcpy(void *,const void *,size_t);
 void *memmove(void *,const void *,size_t);
 void *memset(void *,int,size_t);

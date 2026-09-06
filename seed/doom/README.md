@@ -60,3 +60,10 @@ this is not a physical input test. There is no mouse or sound driver.
 The build uses -fwrapv and -fno-strict-aliasing for the upstream engine's historical
 integer/pointer conventions; these are workload compiler choices, not kernel
 changes. Normal compilation of other user programs is unaffected.
+
+Current adapter refinement: DG_Init drains retained keyboard history before
+starting its persistent cursor, preventing console launch keystrokes from being
+replayed as game input. Fresh presses are required after launch. The installed
+driver now reports input=1 in a live600-frame run; no physical input events or
+interactive play have been observed. See console/VALIDATION.md for the latest
+ordinary console -> concurrent supervisor -> Doom/CPU run and rebuild hashes.

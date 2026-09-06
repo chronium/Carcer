@@ -6,9 +6,17 @@
 static struct cx_display display;
 static unsigned frames,limit;
 static const char *capture;
-static uint64_t start_ticks;
+static uint64_t start_ticks,key_cursor;
 void DG_Init(void) {
     if(cx_display_info(&display)!=sizeof(display)||display.width<DOOMGENERIC_RESX||display.height<DOOMGENERIC_RESY)exit(81);
+    /* A newly launched client starts with fresh input, not launch keystrokes. */
+    if(cx_input_available()==1){
+        struct cx_key_event old[64];
+        for(unsigned i=0;i<5;i++){
+            uint64_t n=cx_keys(old,64,&key_cursor);
+            if(n==CX_ERROR||!n)break;
+        }
+    }
     start_ticks=cx_ticks();
     printf("CX start_ticks=%lu input=%lu\n",(unsigned long)start_ticks,(unsigned long)(cx_input_available()==1));
 }
@@ -31,13 +39,12 @@ uint32_t DG_GetTicksMs(void) {return (uint32_t)(cx_ticks()*10);}
 int DG_GetKey(int *pressed,unsigned char *key) {
     static struct dg_keys state;
     static struct cx_key_event events[32];
-    static uint64_t cursor;
     static unsigned at,count;
     for(;;) {
         if(dg_release(&state,pressed,key))return 1;
         if(at==count){
             if(cx_input_available()!=1)return 0;
-            uint64_t n=cx_keys(events,32,&cursor);
+            uint64_t n=cx_keys(events,32,&key_cursor);
             if(n==CX_ERROR||!n)return 0;
             at=0;count=(unsigned)n;
             if(events[0].flags&CX_KEY_LOST){dg_lost(&state);continue;}
