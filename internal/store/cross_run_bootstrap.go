@@ -256,9 +256,8 @@ func initializeCrossRunBootstrap(
 	if gitBaseRef == "" {
 		return nil, &CrossRunBootstrapError{Reason: "Git base ref must not be empty"}
 	}
-	// Constructing the Python source runtime validates any bootstrap already
-	// attached to that run. Preserve the same fail-closed behavior before
-	// treating its latest archive as an inheritance source.
+	// Validate any bootstrap already attached to the source run before treating
+	// its latest archive as an inheritance source.
 	sourceBootstrap, err := LoadCrossRunBootstrap(source)
 	if err != nil {
 		return nil, wrapCrossRunSourceError(err)

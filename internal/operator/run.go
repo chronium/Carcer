@@ -21,7 +21,7 @@ import (
 )
 
 // StartupError identifies a failure before the selected operator frontend was
-// ready. The process entry point uses it to preserve Python's startup message
+// ready. The process entry point uses it to preserve the startup message
 // and exit behavior.
 type StartupError struct {
 	Err error
@@ -63,7 +63,7 @@ func (e *ExecutionError) Unwrap() error {
 }
 
 // Run opens and supervises one operator process using the real standard
-// streams. The Python entry point remains unchanged and operational.
+// streams.
 func Run(ctx context.Context, options Options) error {
 	return runWithIO(ctx, options, os.Stdin, os.Stdout)
 }
