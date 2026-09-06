@@ -370,7 +370,8 @@ func (s *GenerationSession) runReviewSnapshot(ctx context.Context, yield *review
 	}()
 	runtime := &snapshotReviewRuntime{base: generationReviewRuntime{GenerationRuntime: s.runtime}, files: snapshot.Files()}
 	return reviewer.RunReview(ctx, runtime, ReviewOptions{
-		Objective: s.options.Objective, Focus: yield.focus, Request: yield.request, Proposal: yield.proposal,
+		OperatorRequestInput: s.operatorRequestReviewInput(),
+		Objective:            s.options.Objective, Focus: yield.focus, Request: yield.request, Proposal: yield.proposal,
 		SourceSnapshot: provenance.FileIdentity{SHA256: snapshot.SHA256(), Size: snapshot.Size()},
 		Model:          s.options.ReviewerModel, ReasoningEffort: s.options.ReviewerReasoningEffort,
 		ReasoningSummary: s.options.ReviewerReasoningSummary, ServiceTier: s.options.ReviewerServiceTier,

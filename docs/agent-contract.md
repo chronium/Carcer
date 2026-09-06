@@ -12,7 +12,15 @@ workloads, and resistance to workload-specific overfitting. These are observable
 capabilities, not requirements for Unix, POSIX, a process abstraction, a scheduler
 design, a kernel organization, or any implementation sequence.
 
-Go contract version 9 clarifies that a source-built Doom port, including
+Go contract version 10 adds labelled advisory operator OS requests at supported
+implementor turn boundaries, with revision snapshots and attributed dispositions.
+Sol may pursue, defer, or decline them; they neither change the objective nor
+block generation completion or grant capabilities. Completion claims and explicit
+operator verification remain distinct. The reviewer receives the originating
+turn's advisory context. See [operator OS requests](operator-os-requests.md) for
+commands, persistence, lineage, inheritance, and a disposable example.
+
+Go contract version 9 clarified that a source-built Doom port, including
 DoomGeneric, can satisfy the milestone. The exact supplied DOS executable is
 not required, and its availability creates no DOS/4G compatibility requirement.
 Supplied originals remain immutable; guest-authored adaptations and build outputs
@@ -49,7 +57,8 @@ the turns, and later `agent` commands remain ordinary continuation turns.
 
 Planning is read-mostly. Sol may inspect source, request state, and provided
 assets; request an independent read-only review; run baseline trusted build
-validation; and record an advisory external feature request. Persistent source
+validation; record an advisory external feature request; and record an explained
+operator OS-request disposition. Persistent source
 mutation and generation completion are denied by the trusted bridge until the
 implementation turn. The planning turn also uses a read-only, no-network Codex
 permission profile. A failed or interrupted plan does not automatically start

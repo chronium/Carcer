@@ -168,6 +168,9 @@ func (c *PlainConsole) ExecuteLine(ctx context.Context, line string) (bool, erro
 	if len(words) == 0 {
 		return false, nil
 	}
+	if words[0] == "os-request" || words[0] == "os-requests" {
+		return false, c.executeOperatorRequest(commandLine, words)
+	}
 	if c.interviewOpen() {
 		switch {
 		case len(words) == 1 && (words[0] == "end" || words[0] == "end-interview"):
@@ -768,6 +771,11 @@ func (c *PlainConsole) printHelp() {
 		"status      show current runtime state",
 		"history     show archived generation lineage",
 		"inspect N   show archived generation N",
+		"os-requests  list advisory operator OS requests",
+		"os-request N  inspect an OS request and its attributed history",
+		"os-request create TITLE | DESCRIPTION  record desired OS behavior",
+		"os-request withdraw N REASON  withdraw an OS request",
+		"os-request verify N REPORT_REVISION NOTE  attest an applicable completion report",
 		"features    list external feature requests",
 		"feature N   show external feature request N",
 		"feature-approve N [NOTE]  approve a pending request at the gate",

@@ -416,6 +416,9 @@ func initializeCrossRunBootstrap(
 	if !bytes.Equal(importedLedger, ledgerBytes) {
 		return nil, &CrossRunBootstrapError{Reason: "inherited feature-request ledger changed during initialization"}
 	}
+	if err := inheritOperatorRequests(source, candidate, sourceGeneration); err != nil {
+		return nil, err
+	}
 	manifest, err := crossRunManifestBytes(bootstrap, handoffBytes, len(requests))
 	if err != nil {
 		return nil, &CrossRunBootstrapError{Reason: "could not encode cross-run bootstrap manifest", Err: err}
@@ -520,6 +523,9 @@ func LoadCrossRunBootstrap(runDirectory string) (*CrossRunBootstrap, error) {
 		return nil, &CrossRunBootstrapError{Reason: "cross-run bootstrap feature ledger identity does not match"}
 	}
 	if err := validateCrossRunInheritedRequests(run, inherited); err != nil {
+		return nil, err
+	}
+	if _, err := readOperatorRequests(run); err != nil {
 		return nil, err
 	}
 	bootstrap.Handoff = string(handoffBytes)

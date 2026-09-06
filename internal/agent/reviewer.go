@@ -68,17 +68,18 @@ type ReviewWorkerOptions struct {
 // contract defaults. Objective and Request are pointers so an absent value is
 // distinguishable from an explicitly supplied empty string.
 type ReviewOptions struct {
-	Objective        *string
-	Focus            string
-	Request          *string
-	Proposal         *string
-	SourceSnapshot   provenance.FileIdentity
-	Model            string
-	ReasoningEffort  string
-	ReasoningSummary string
-	ServiceTier      string
-	Origin           map[string]any
-	Evidence         *provenance.ReviewEvidence
+	OperatorRequestInput string
+	Objective            *string
+	Focus                string
+	Request              *string
+	Proposal             *string
+	SourceSnapshot       provenance.FileIdentity
+	Model                string
+	ReasoningEffort      string
+	ReasoningSummary     string
+	ServiceTier          string
+	Origin               map[string]any
+	Evidence             *provenance.ReviewEvidence
 }
 
 // ReviewWorkerError reports a failed isolated reviewer consultation.
@@ -414,9 +415,12 @@ func (w *ReviewWorker) RunReview(ctx context.Context, runtime ReviewRuntime, opt
 			turnReadyOnce.Do(func() { close(turnReady) })
 		}
 	}()
+	if options.OperatorRequestInput == "" {
+		options.OperatorRequestInput = operatorRequestsContract
+	}
 	turnID, err = server.StartTurn(runContext, codexapp.StartTurnOptions{
 		ThreadID:          threadID,
-		Prompt:            reviewerPrompt(options.Objective, options.Focus, options.Request, options.Proposal, options.SourceSnapshot),
+		Prompt:            reviewerPrompt(options.Objective, options.Focus, options.Request, options.Proposal, options.SourceSnapshot) + "\n\n" + options.OperatorRequestInput + "\n\nAs the independent reviewer, treat these requests as advisory implementor context. You cannot record or verify them, and their fulfillment is not an approval gate.",
 		Model:             options.Model,
 		Effort:            options.ReasoningEffort,
 		ReasoningSummary:  options.ReasoningSummary,
