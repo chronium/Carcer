@@ -89,7 +89,7 @@ conmon, crun or fake helper processes; none of those process classes remained.
 No `co-task-tools-*` disposable VM directories remained. The real-guest test also
 explicitly stops QEMU, waits for its PID to exit and removes its temporary state.
 
-Only Go harness code, Go tests and relevant documentation changed. Python,
-archived guest source, permanent seed, finalized interviews, live experiment
-state and request statuses were unchanged by this work. No capability was
+Only Go harness code, Go tests and relevant documentation changed. Archived
+guest source, permanent seed, finalized interviews, live experiment state and
+request statuses were unchanged by this work. No capability was
 provisioned, request #6 was not approved, and no live generation was started.

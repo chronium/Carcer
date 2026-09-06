@@ -30,6 +30,6 @@ The Go harness additionally supports an explicitly provisioned per-run 1 MiB
 **content** budget, with framing allowed separately; it does not change this wire
 encoding. The maximum serialized size is the selected content budget plus 33,410
 bytes (`2 + 128 * (2 + 255 + 4)`). Each provisioned Go archive records the budget
-under which its snapshot is validated. Python and the seed retain their existing
-limits. See [Go run source capacity](../docs/run-source-capacity.md) for gate-only
+under which its snapshot is validated. The seed retains its existing limits.
+See [Go run source capacity](../docs/run-source-capacity.md) for gate-only
 provisioning, persistence, and request #4's serialized/content distinction.

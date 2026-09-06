@@ -1,7 +1,7 @@
 # Go bootstrap host services
 
 These optional services use the existing v1 host-service framing and correlation
-rules. They are not a Python or permanent-seed change. Provisioning is described
+rules. They require no permanent-seed change. Provisioning is described
 in [operator setup](bootstrap-service-operations.md). Request #3 remains separate
 from both provisioning and fulfillment of a guest-runnable compiler pipeline.
 

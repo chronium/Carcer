@@ -34,8 +34,8 @@ interpretations in older handoffs, guest notes, review requests or proposals, an
 objective wording, without prescribing a port or implementation approach or
 granting a capability. This is a recorded
 [operator intervention dated 2026-09-05](operator-interventions/2026-09-05-doom-milestone.md),
-applied to fresh sessions under the updated Go harness. The Python reference,
-historical handoffs, and archives are unchanged.
+applied to fresh sessions under the updated harness. Historical handoffs and
+archives are unchanged.
 
 Contract version 8 retains the version 7 behavioral contract and makes review
 requests explicit turn-yield boundaries. The requesting Sol turn is stopped and
@@ -179,15 +179,13 @@ thread/turn IDs correlate planning events with its response evidence. Interview
 metadata also preserves the implementor settings. Model-token metric labels remain
 exactly `model` and `role`, keeping the two Astra roles distinguishable.
 
-This is a Go-only serving change. The Python reference still uses `gpt-5.6-sol`
-high for implementation and `gpt-5.6-luna` high for review, both with `auto` and
-`priority`. Existing Sol/Luna display and transcript labels remain implementor/
+Existing Sol/Luna display and transcript labels remain implementor/
 reviewer role labels; recorded model metadata identifies the actual model.
 That serving update retained contract version 8, prompts, permissions, tool
 delivery checks, and the review yield/quiesce/resume lifecycle. The later Go
 version 9 objective clarification is described above. Historical events and
-archives are not backfilled. The Go serving update does not authorize live
-cutover or provision pending feature request #3.
+archives are not backfilled. The serving update does not start a generation
+or provision pending feature request #3.
 
 Installed-server observations, disposable runtime probes, and the Go test results
 are recorded in [astra-model-upgrade.md](astra-model-upgrade.md).
@@ -216,7 +214,7 @@ dynamic tool declarations on a later turn, so the trusted bridge also rejects
 every dynamic tool request during an interview before it can reach guest,
 build, feature-request, or reviewer services. Questions are wrapped only with a
 neutral retrospective/read-only boundary. Serving settings remain those of the
-implementor: Astra high in Go, Sol high in Python, with `summary=auto` and Fast/`priority`.
+implementor: Astra high, with `summary=auto` and Fast/`priority`.
 
 The plain console commands are `interview`, `ask <text>`, and
 `end-interview`; while interview mode is open, plain question text is also
@@ -276,7 +274,7 @@ codexos> git-record
 codexos> quit
 
 # Update and review the trusted harness, then open the same archived gate:
-.venv/bin/python -m harness.operator_console \
+bin/codexos \
   --run-directory /srv/codexos/experiment-002 \
   --resume-at-gate \
   --provided-assets /path/to/operator-assets \

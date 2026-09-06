@@ -91,7 +91,7 @@ and a file lock, then validate and atomically replace/fsync the complete ledger.
 The semantic history only appends: creation text and attribution are preserved.
 Repeated identical last store writes with the same actor and expected revision
 are idempotent; stale writes cannot overwrite another revision. Missing optional
-state means no requests; malformed existing state fails closed. Existing Python
+state means no requests; malformed existing state fails closed. Existing
 wire formats, feature states, archives, and source ancestry do not change.
 
 Requests and withdrawal history are run-wide and survive harness restarts, gate

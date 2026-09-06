@@ -1,14 +1,11 @@
 # Go harness architecture
 
-This is the ownership plan for the Go harness. It records concrete current
-responsibilities; packages are added only when their first working behavior is
-implemented. The Python implementation remains authoritative during migration.
+Go is the maintained harness implementation. This document records current
+package responsibilities and lifecycle ownership.
 
 ## Ownership
 
-`cmd/codexos` owns only process entry and exit. Cobra owns the compatible CLI
-surface. Viper will be used only if configuration or environment binding proves
-clearer than direct Cobra flag handling.
+`cmd/codexos` owns only process entry and exit. Cobra owns the CLI surface.
 
 `internal/operator` coordinates opening a run, line-oriented commands, operator
 confirmations, and shutdown order. `internal/tui` owns the Bubble Tea v2 model,
@@ -42,7 +39,7 @@ bounded metrics, optional OTLP export, and the non-persistent activity stream.
 
 ## State machine
 
-The authoritative Python run states are:
+The run states are:
 
 ```text
 STOPPED --start/reopen+continue--> RUNNING --pause--> PAUSED
@@ -67,16 +64,16 @@ read-only validation until the operator explicitly continues or rolls back.
 ## Persistence rules
 
 Readers validate complete schemas, canonical names, identities, ancestry, and
-hashes before accepting state. Writers follow the Python operation order: stage
-content in the target filesystem, flush file content when required, publish by
+hashes before accepting state. Writers stage content in the target filesystem,
+flush file content when required, publish by
 atomic rename, flush the containing directory when required, and recover only
 from independently verified immutable content. Existing complete records are
 never silently rewritten. Malformed or future state fails closed.
 
-Go must load Python-generated state before it is allowed to publish compatible
-state. Bidirectional fixtures will then prove that Python accepts Go output.
-Until those checks cover a format, its row in the parity matrix remains partial
-or not started.
+Existing experiment archives remain supported, including legacy records without
+new optional settings. Go regressions cover archive inspection and gate reopening
+without rewriting archived bytes, cross-run inheritance, and immutable Git
+provenance.
 
 ## Concurrency and cancellation
 
@@ -91,7 +88,7 @@ telemetry, activity, and TUI workers follow the same owned-shutdown rule.
 Pure codecs do not start goroutines and accept bounded byte slices. Transport
 owners apply deadlines and cancellation around blocking I/O.
 
-## Current implemented slice
+## Runtime behavior
 
 `internal/guest` currently provides the version 1 frame, source snapshot,
 host-service, and tool payload codecs, the raw serial connection, the sole-reader
@@ -117,11 +114,9 @@ refs, and leaves the configured developer worktree untouched. `internal/qemu`
 provides the fixed hardware profiles and archived manifest codec plus the
 synchronous, context-aware QMP client with bounded message reads. The QEMU
 controller owns one direct child, its parent log descriptors, and one bounded
-wait path; it deliberately matches Python by not creating a process group. Go
-tests cover exact
-encoding, bounds, malformed input, fragmentation/coalescing, canonical
-snapshots, persistence failure, and cross-language output. Black-box tests run
-the Python reference modules without importing optional production dependencies.
+wait path without creating a process group. Go tests cover exact encoding,
+bounds, malformed input, fragmentation/coalescing, canonical snapshots,
+persistence failure, and legacy archive compatibility.
 `internal/observability` owns a validated append-only event log with sequence
 recovery and a bounded in-memory activity stream that exposes only explicitly
 renderable app-server text. Its OpenTelemetry owner records the fixed metric
@@ -129,8 +124,7 @@ set with bounded low-cardinality attributes and optionally adds a bounded
 OTLP/HTTP exporter; telemetry failures never control the experiment.
 Synthetic Unix peers exercise QMP lifecycle and failure behavior. Candidate
 validation can start only a disposable QEMU, and reviewer tests contact only a
-synthetic app server. The side-by-side Go command does not change the Python
-default or access live experiment state.
+synthetic app server. Tests use disposable state.
 `internal/codexapp` owns an isolated one-shot app-server process, sole JSONL
 reader, ordered writer, concurrent request routing, bounded notification and
 server-request queues, catalog/policy validation, interrupts, and TERM/KILL
@@ -201,19 +195,18 @@ windows for the existing VGA output. Candidate windows close when validation
 finishes, including failure or cancellation. The QEMU menu and window-close
 action are disabled so lifecycle control stays in the harness. Hardware
 manifests record the frontend. Go accepts historical headless and live GTK
-settings; the unchanged Python reader does not accept GTK manifests. This adds
-no guest observation/input service and does not provision feature request #2.
-`internal/operator` defines the Cobra startup surface and validates the same
-opening-mode, Git-provenance, cross-run inheritance, and display-mode
-relationships as the Python entry point before invoking its concrete runner.
+settings. This adds no guest observation/input service and does not provision
+feature request #2.
+`internal/operator` defines the Cobra startup surface and validates opening-mode,
+Git-provenance, cross-run inheritance, and display-mode relationships before
+invoking its concrete runner.
 The same package checks both terminal streams and `TERM`, makes untrusted
 terminal controls inert, and parses the exact plain-console `ask TEXT` form
 without changing the question body. One console/controller owns all operator
 commands and the generation session for both frontends. The runner initializes
 cross-run state before observability, validates recorded Git identity before
 boot, constructs the live runtime, and shuts down runtime, event log, then
-metrics. `cmd/codexos` remains a thin side-by-side process entry point; Python
-remains the default and only approved live entry point.
+metrics. `cmd/codexos` remains a thin process entry point.
 `internal/tui` provides the frontend-independent operator activity model. It
 coalesces attributed message, reasoning, tool, feature-request, build,
 operator, interview, and abnormal-lifecycle events into typed immutable

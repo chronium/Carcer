@@ -57,7 +57,7 @@ The agent is encouraged to improve its own development environment. Inefficient 
 
 ## Virtual machine
 
-CodexOS begins on a reasonably capable x86-64 q35 virtual platform even though the seed kernel initially knows how to use almost none of it. Normal platform facilities such as PCI/PCIe, ACPI, the RTC, interrupt controllers, timers, and chipset hardware remain available. Standard VGA is present from generation zero, although the display frontend is initially headless.
+CodexOS begins on a reasonably capable x86-64 q35 virtual platform even though the seed kernel initially knows how to use almost none of it. Normal platform facilities such as PCI/PCIe, ACPI, the RTC, interrupt controllers, timers, and chipset hardware remain available. Standard VGA is present from generation zero, with a local GTK display window.
 
 External devices whose persistent or isolation semantics are not yet part of the experiment are deliberately absent from `experiment-v1`. In particular, the initial guest has no network interface and no writable block device. The detailed authoritative version-1 contract is documented in [`docs/experiment-hardware.md`](docs/experiment-hardware.md).
 
@@ -173,10 +173,30 @@ These are secondary metrics.
 
 Correctness and progress toward a capable general-purpose operating system remain the primary objectives.
 
+## Harness commands
+
+Build the maintained Go harness using the Go version in `go.mod`:
+
+```sh
+go build -o bin/codexos ./cmd/codexos
+bin/codexos --help
+```
+
+After the previous console has exited, reopen an existing archived gate with
+`bin/codexos --run-directory /path/to/run --resume-at-gate`, retaining the run's
+provided-assets and Git provenance options. Reopening does not boot a guest;
+`continue` and `agent` remain explicit operator actions. See the
+[operator contract](docs/agent-contract.md#adopting-harness-updates-at-a-generation-gate) for a complete update
+example and [verification guide](docs/verification.md) for development checks.
+
+`make seed` builds the initial guest ISO. Its source-table generator still needs
+Python 3 and uses only the standard library; the harness itself has no Python
+runtime or package dependencies.
+
 ## Repository layout
 
-`harness/`
-: Trusted external orchestration, VM control, build control, Codex integration, generation storage, and operator tooling.
+`cmd/codexos/` and `internal/`
+: Maintained Go harness: trusted external orchestration, VM control, build control, Codex integration, generation storage, and operator tooling. Go tests live beside their packages.
 
 `seed/`
 : Generation-zero guest implementation and initial RAM filesystem contents.
