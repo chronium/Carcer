@@ -139,3 +139,14 @@ ownership teardown before subsequent launches and cancellation of a suspended
 immutable-copy kernel continuation followed by slot and destination-page reuse.
 Only jobtest's default mode is a standalone user regression; the controlled,
 copy-owner and related probe modes are boot fixtures requiring their observer.
+
+## Stable stream update
+
+The transcript now uses a stable file handle through libc. Removing or renaming
+its pathname leaves the open transcript writable; replacing that pathname
+does not redirect output. If the transcript is unlinked, its bytes are reclaimed
+when the last handle closes and are unavailable for later path-based inspection.
+Scripts may continue after removing their own transcript. The output ceiling
+and failure-before-command-effects behavior still apply to actual stream errors.
+The console regression now tests this unlink behavior; its earlier pathname
+write-failure expectation is obsolete.

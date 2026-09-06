@@ -3,7 +3,7 @@
 #define FMC 128u
 #define FPL 255u
 #define FIM 1u
-struct file{uint8_t p[FPL];uint16_t n;uint8_t*d;uint32_t z,c,a;};
+struct file{uint8_t p[FPL];uint16_t n;uint8_t*d;uint32_t z,c,a,refs;uint64_t id;};
 struct embedded_file{const uint8_t*p;uint16_t n;const uint8_t*data,*end;};
 extern const struct embedded_file initial_files[];
 extern const uint32_t initial_file_count;
@@ -17,3 +17,15 @@ int ft(const uint8_t*,uint32_t,uint32_t);int fr(const uint8_t*,uint32_t);
 int fsl(const uint8_t*,uint32_t);
 int fcreate(const uint8_t*,uint32_t);
 int fmove(const uint8_t*,uint32_t,const uint8_t*,uint32_t);
+
+/* Identity survives sorted namespace movement. Callers hold the interrupt lock.
+ * At most FHC references per user task; detached storage is separately bounded. */
+#define FHC 16u
+struct file *fbyid(uint64_t);
+uint64_t fhold(struct file *);
+int fdrop(uint64_t);
+int fresize(struct file *,uint32_t);
+int fprepare(struct file *,uint32_t,uint32_t,uint8_t **);
+uint32_t forphans(void);
+
+int fobject_tests(void);

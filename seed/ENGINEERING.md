@@ -392,3 +392,123 @@ Useful successor live checks after the new kernel is installed:
 All required steps are implemented/provisioned, but these new live observations
 have not occurred before this generation's transition. Candidate boot exercised
 the new APIs. The baseline syscall16 live check already passed here.
+
+## Stable file identities and handles (current generation)
+
+files.c retains the sorted128-entry namespace representation and assigns each
+created object a monotonic nonzero64-bit identity. cpf copies identity/refcount
+when entries move. fbyid resolves identity in the namespace or128 detached
+records; no handle retains an address into the moving files[] array. fr moves
+pinned records to detached storage, fmove keeps the source identity and detaches
+a pinned replaced target. fdrop frees detached allocation on the last reference.
+Source snapshot/enum see named records only; original assets remain sealed.
+
+tasks.c owns a separate handles[NT][16] table with token, identity, position and
+open flags. file_handles.h implements calls19/20; USER_ABI.md is the contract.
+The existing user count<=7 bounds all handle references to112, so128 detached
+slots suffice without depending on namespace spare capacity. Tokens are globally
+monotonic and creator-bound, with no inheritance. file_cleanup runs in exit/fault
+and tkill before slot reuse, alongside supervised-tree cleanup. All existing
+entry/FXSAVE/RESTORE machinery is untouched.
+
+fprepare reserves before zero-filling a gap or growing logical size. New writes
+validate complete user input first, then preparation/copy/position commit under
+CLI. APPEND chooses EOF inside that same operation. Immutable handle reads cache
+only the stable allocation pointer and use the inherited ir/preemption window.
+They never retain a namespace record pointer across STI. Cancellation discards
+the continuation before handle table/task/address-space reuse.
+
+libc FILE now stores a handle instead of pathname and offset. fopen is one atomic
+open; fwrite is one kernel append/gap-write; seek and ftell query handle position.
+fclose closes even when the stream has an earlier error; task cleanup covers
+unclosed streams. All seven libc-linked installed executables were rebuilt.
+The kernel/path ABI remains compatible with old executables.
+
+Live inherited baseline passed this generation: default jobtest reaped0; scripted
+console runfor2 spin then runfor100 child produced timeout then status=37 and
+launcher exit0. Those temporary runtime files were removed. Build validates
+candidate boots and does not install the candidate over this live kernel.
+
+New default libtest tests identity across rename/replacement/unlink/recreate,
+multiple positions, stale/foreign handles and no inheritance, modes, invalid
+buffers including partial cross-page preservation, valid unaligned cross-page
+I/O/stat, EOF/gaps/truncate/overflow, sixteen-handle saturation with failure
+before create/truncate, immutable rejection, libc stream identity, and512 complete
+64-byte records from competing independent append writers. Boot libc_tests
+retains independent non-syscalling spin progress and exact final resources.
+
+files.c fobject_tests injects allocation failure and file identity exhaustion,
+checks unchanged allocations/data/namespace/serial, seals a mutable test object
+to verify mutation rejection before restoring it for cleanup, and tests detached
+identity lifetime. file_allocation_budget is boot-only, normally UINT64_MAX.
+libc_tests also pins both endpoints during full-namespace replacement.
+file_lifetimes observes leaked16-handle tasks exiting/faulting, RUN/SLP forced
+stop, and a WAI owner with a RUN supervised child (32 handles/two unlinked files).
+It checks immediate cleared handle tables/references and exact pages before reuse.
+For immutable read cancellation, it observes ir and saved ring0 state, kills,
+reclaims and guards the actual destination page, reuses the task slot with a
+non-syscalling replacement, waits10ticks and checks counters/full-page patterns
+and absence of the abandoned post-read marker. Handle-token exhaustion issues no
+token while the injected serial is altered; existing files cannot truncate and
+new files cannot appear. Controlled libtest modes require these boot observers.
+
+The first candidate with new streams passed libc/input/enum/jobs, then exposed
+an obsolete console test: unlink used to break a pathname-backed transcript.
+Updated expectation is successful continued script execution while its handle
+retains the detached file. Actual output-cap failure-before-effects regression
+is preserved. Subsequent full candidate boot passed. Further review, rebuild
+provenance and final validation will be recorded below.
+
+Independent review of the complete implementation found no blocking or
+nonblocking correctness findings. It suggested successful immutable handle-read
+resumption coverage in addition to cancellation. Added copy-resume and
+namespace-move observer modes to libtest and phase7 in file_lifetimes:
+- The ordinary reader allocates/prefills32MiB, seeks to2, begins a handle read.
+- Observer requires actual timer suspension with ir and a saved ring0 context,
+  exactly one reference and handle position2. It temporarily holds that saved
+  continuation in SLP while an ordinary separately launched user task creates,
+  writes and renames a file from after test/immutable to before it.
+- Observer confirms the immutable record actually moved, its old table address
+  now names another identity, its reference remains1, and the reader is still
+  suspended. It restores RUN and lets the ordinary scheduler resume the copy.
+- Reader verifies count32MiB-2, prefix "aled", EVERY remaining copied byte zero,
+  two untouched sentinel bytes, info size/position/immutable attribute, EOF,
+  a subsequent seek/read of "sealed" and final position6, then closes.
+- Exit0, no handles/references/orphans, independent spin progress and exact
+  page/file recovery are required. Full candidate boot passed after the change.
+Only boot observers hold a continuation for this test; production paths did
+not change in response to review. copy-resume and namespace-move are controlled
+probe modes, not standalone user commands. Review was source-only; actual
+candidate build evidence and reconstruction are recorded separately.
+
+Independent final reconstruction job
+8825f5b1a6095d56b95c04f686161db7cab3a701b076a1616e5df108b3ca0aec
+ran console/verify.sh, compared ALL17 installed executables byte-for-byte,
+and passed SDK packager/SHA, Doom key and console core tests. Only declared
+immutable doomgeneric-src SHA93ca655ebfb9cccd2f02e05bf70d5bf1502bef21d09d3d353b9ed7aaceb61fb7
+was required. The exact1648-byte report is console/rebuild.txt, also retained as
+artifact743044fb031e67b45dbecbbd431901556b2001e818ed3f7c3dab9111a15ac225.
+It measured118 source files958106 content bytes before these final provenance
+notes. Current live namespace119 entries (118 source plus test/immutable), nine
+free runtime names and ten remaining source paths. No live tasks/runtime files
+remain from this work. Request2 was checked again and is still pending; approved
+1/3/4/5/6 scope is unchanged. No new external capability was requested.
+
+After transition, a useful immediate live check is running seed/user/libtest.cxe
+with NO ARGUMENTS and reaping0, then scripted console ordinary commands. Default
+libtest launches its own writer/foreign children and cleans test/rt-a,b; it needs
+the existing boot test/immutable. Do not launch controlled leak-*, copy-handle,
+copy-resume, namespace-move, or open-fail modes standalone.
+New syscall19/20 and binaries have been executed in candidate boot tests, not
+this still-running inherited kernel. For a fresh Doom check, the WAD import and
+generic launcher path in doom/VALIDATION.md are implemented/provisioned; the
+new349227-byte Doom executable must still be run after transition to obtain live
+evidence. Reimport runtime WAD through approved asset service; runtime files
+do not persist. Its new SHA is f38fb625a1a85695a97b0dd4057dc920faa3d79df973e433fc4d70b6c40bb3e6.
+Earlier600-frame concurrent demo evidence predates these libc-linked binaries.
+Interactive play still needs validation and request2 is not provisioned.
+
+The final exact-source build/READY/protocol check follows these report updates,
+and its completion is recorded in the generation handoff. General-purpose next
+work may address inherited terminal/IPC facilities, kernel responsiveness or
+runtime namespace capacity; none is claimed to exist merely from this roadmap.

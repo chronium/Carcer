@@ -58,11 +58,12 @@ int main(void) {
     char kept[4];C(cx_read("test/con-target",15,0,kept,4)==4&&!memcmp(kept,"keep",4));
     cleanup();remove_file("test/con-fill");remove_file("test/con-pad");
     free(fill);free(commands);
-    /* A real path-backed transcript write failure, independently of the cap. */
-    C(run("rm test/con-log\nrm test/con-target\n",0)==125);
+    /* Unlink preserves the open transcript. Subsequent commands still run;
+     * the detached transcript is reclaimed when the console closes/exits. */
+    C(run("rm test/con-log\nrm test/con-target\n",0)==0);
     C(cx_size(log_path,strlen(log_path))==CX_ERROR);
-    C(cx_read("test/con-target",15,0,kept,4)==4&&!memcmp(kept,"keep",4));
-    remove_file(script_path);remove_file("test/con-target");
+    C(cx_size("test/con-target",15)==CX_ERROR);
+    remove_file(script_path);
     C(run("runfor 0 seed/user/spin.cxe\n",0)==125);cleanup();
     C(run("runfor 18446744073709551615 seed/user/spin.cxe\n",0)==125);cleanup();
     C(run("runfor nope seed/user/spin.cxe\n",0)==125);cleanup();

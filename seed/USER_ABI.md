@@ -7,7 +7,7 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history; 16 namespace snapshot; 17 supervised spawn with arguments; 18 supervised child control.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history; 16 namespace snapshot; 17 supervised spawn with arguments; 18 supervised child control; 19 open file; 20 file handle operations.
 
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
@@ -167,3 +167,78 @@ it does not add a general kernel-preemption or SMP design.
 
 SDK wrappers: cx_job_spawn, cx_job_poll, cx_job_wait, cx_job_stop.
 Console run and runfor and the generic concurrent launcher use supervision.
+
+## Stable open files (19 and 20)
+
+Call19: RDI=path address, RSI=path byte length, RDX=open flags. RCX/R8/R9
+are ignored. Returns an opaque nonzero64-bit handle, or UINT64_MAX on failure.
+Each task may hold16 handles. Tokens are globally monotonic within one boot,
+exclude UINT64_MAX, and never recur; token exhaustion fails without wrapping.
+Failed opens consume no handle. Tokens are task-owned, cannot be used by other
+tasks, and are not inherited by any spawn API. There is no transfer/duplicate API.
+
+Open flags: READ=1, WRITE=2, CREATE=4, EXCL=8, TRUNC=16, APPEND=32.
+At least READ or WRITE is required. CREATE/TRUNC/APPEND require WRITE;
+EXCL requires CREATE. Unknown bits fail. CREATE permits creating an absent
+file; EXCL requires it to be absent. Without CREATE the name must exist.
+TRUNC atomically reduces the opened file to zero bytes. Any WRITE open of an
+immutable file fails. Capacity, path, flag and token checks precede effects;
+a failed open leaves the namespace and existing contents unchanged.
+
+Each successful open creates an independent position, initially zero except
+APPEND opens start at the current size. Handles retain file identity through
+rename, namespace sorting, remove, and replacement by a different file. Removing
+a name hides it from lookup/enumeration/persistence immediately, but its open
+handles keep accessing that same object. Recreating the name creates a distinct
+object. Replacing a rename destination retains its old object for old handles.
+All opens of one object see its current contents, size and immutable attribute.
+A handle is not a snapshot. Sealing also prevents mutation through existing
+write handles; immutability cannot be bypassed by opening before sealing.
+
+Call20: RDI=handle, RSI=operation. R8/R9 are ignored for every operation.
+- op0 close: RDX/RCX ignored. Return0 and consume this handle. Repeated close
+  fails. Reclaim an unlinked object when its last reference closes.
+- op1 read: RDX=destination, RCX=requested bytes (<=UINT32_MAX). Requires READ.
+  Returns bytes copied, advances position by that number. Clamp to EOF; a
+  position at or beyond EOF returns0 without changing position. Validate only
+  the actual destination span. Zero actual length ignores the pointer.
+- op2 write: RDX=source, RCX=bytes (<=UINT32_MAX). Requires WRITE and a mutable
+  object. Validate the entire source and final size before changing anything.
+  Return the full byte count; no partial successful writes. A nonempty write
+  past EOF zero-fills the gap. Zero length ignores the pointer and returns0
+  without extending or moving position. APPEND selects the current EOF and
+  writes as one indivisible operation, regardless of the prior seek position.
+  Position becomes the end of the written bytes. Independent append handles
+  cannot overwrite each other's appends through an EOF/write race.
+- op3 seek: RDX=signed64-bit offset, RCX=0 start /1 current /2 current EOF.
+  Return the new position in [0,UINT32_MAX]. Underflow/overflow/unknown origin
+  fail. Seeking beyond EOF does not grow the file; INT64_MIN is handled without
+  signed overflow. APPEND still overrides the position for a later write.
+- op4 info: RDX=destination, RCX=capacity (>=24). Write and return24 bytes:
+  LE64 size, position, attributes (immutable bit0). Spare capacity is untouched
+  and not validated. Output is atomic and can be unaligned or cross pages.
+- op5 truncate: RDX=new size (<=UINT32_MAX), RCX ignored. Requires WRITE and a
+  mutable object. Return0, zero-fill extension, leave every open position
+  unchanged (including positions now beyond EOF).
+
+Unknown operations, invalid/foreign/closed handles, permissions, invalid
+written spans, arithmetic overflow and allocation failures return UINT64_MAX.
+Failed operations leave content, position and destinations unchanged. Read/write
+byte-count limits apply even at EOF or with invalid permissions. No finer error
+classification or filesystem access-control model is implied.
+
+Normal exit, fault and forced termination close all a task's handles before
+slot reuse. Supervised descendant cleanup closes each descendant's own handles.
+Unlinked contents and handle tokens do not survive a generation transition.
+The128-entry namespace is unchanged. Up to128 separate detached-object records
+retain removed open files; at most7 user tasks *16 handles =112 distinct pinned
+objects can exist through the user ABI, so remove does not need a spare namespace
+entry. Objects and tokens have separate monotonic identities.
+
+All operations run under the current single-CPU interrupt lock, except the
+existing preemptible immutable read copy window is also used for handle reads.
+Mutable I/O, allocation and gap filling can delay scheduling; no bounded latency,
+general kernel preemption, SMP synchronization, disk persistence or streams IPC
+is added. Pathname calls1..4/14 retain their previous contracts and resolve names
+on each invocation. sdk/cx.h provides cx_open/close/fread/fwrite/fseek/fstat/
+ftruncate; cx_file_info is24 bytes.

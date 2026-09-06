@@ -31,13 +31,26 @@ connects stdout/stderr to append streams; NULL leaves that stream unchanged.
 stdio errors use a small documented errno set, not fine-grained kernel error
 codes. There is no terminal, input stream connection API, TLS, signals, or threads.
 
-Streams store paths and offsets, not stable kernel handles. External remove or
-rename affects future stream operations, and replacement at the same path may
-retarget an open stream. Append's size lookup and write are separate syscalls;
-concurrent writers need external coordination. The same applies to seek-gap
-extension followed by writing. Exclusive create and each individual namespace
-operation are atomic on the single scheduling CPU. Immutable files reject all
-mutations. These limitations are explicit and are not claimed as Unix semantics.
+Streams own stable kernel handles and independent positions. Rename/removal
+does not redirect an open stream; removed/replaced objects remain available
+until their last handle closes. Append and seek-gap writes are single kernel
+operations. The kernel closes leaked handles on exit/fault/forced termination.
+The limit is16 handles per task, including streams and direct cx_open calls.
+Each I/O call is bounded by UINT32_MAX bytes and positions/sizes by UINT32_MAX.
+Immutable files reject write opens and all later mutations, including through
+a previously opened write handle. See USER_ABI.md calls19/20. Standard streams
+are still disconnected unless explicitly connected; this adds no terminal or
+inherited stream redirection. a+ retains the prior initial-EOF position policy.
+
+libtest's default mode additionally exercises stable identities, stale/foreign
+handles, invalid flags/buffers, EOF and gap rules, read-only/immutable failures,
+handle saturation, unaligned/cross-page I/O and info, libc rename/unlink, and two
+independent append writers with complete record-integrity/uniqueness checks.
+Boot observers check full-table rename with pinned endpoints, allocation/serial
+failure, exit/fault/stop/tree cleanup and immutable-copy cancellation with exact
+page/file/reference recovery. Explicit leak-*, copy-handle, copy-resume, namespace-move and open-fail modes
+are observer fixtures: do not launch them standalone. Default libtest can run
+normally when test/immutable is present and test/rt-a,b are absent.
 
 Build flags CX_USER_FLAGS apply only to workload sources; the SDK/library remains
 compiled with warnings as errors and x86-64 baseline ISA. The existing SDK mode
@@ -48,3 +61,9 @@ overflow, data preservation, formatting/parsing, seeks, partial-item EOF,
 truncation, zero gaps, append, exclusive creation, rename replacement, invalid
 syscall arguments and sealed inputs. libc_tests.h runs it while the inherited
 non-syscalling spin counter advances, then checks page/file recovery.
+
+Successful immutable-read resumption is also boot tested: after observing real
+kernel-context preemption, another ordinary user task reorders the namespace
+while the observer holds the reader suspended. The resumed reader checks all
+32MiB-2 bytes, unchanged tail sentinels, count, position, EOF and a later seek/read.
+Reference, handle, file and page counts recover exactly.

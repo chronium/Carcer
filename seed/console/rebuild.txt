@@ -1,20 +1,20 @@
 All 17 persisted CXE2 files matched reconstructed output.
 SDK packager/SHA, Doom keys, console core tests passed.
-Source files=117 content bytes=904247
+Source files=118 content bytes=958106
 52d0c2cb7ac451bc5a42bd12801f90b366524adcb4ea6487ce63b084b3aeafff  /work/out/argchild.cxe
 0b51b18dd881a306021c28f0e2eb8f4bda9b46ceef9abe0155fd3f4fb6435894  /work/out/argtest.cxe
 58990250f43452959b5a7fe5806ac8aa716d29e4933a1190816164b8a8271006  /work/out/child.cxe
-c65b6d8294e7817588200c3d4c5a35d4bc6f100bdc69646f4eedaa8a15c1da01  /work/out/concurrent.cxe
-405f3d7363688d82a139293d9c7bfc053afa6c940f358cd382b0b44cfc34b642  /work/out/console.cxe
-afff9fcfd5410bc79890e00b1190a3f0edf922b1fa60f8812d1deb23197d9b73  /work/out/consoletest.cxe
+23f0ee6c2726d772fbae5784b1f4c7a35420745619ccfa6f8df890e8b24334d2  /work/out/concurrent.cxe
+9a9a661312ce68616791834c7d7078cd134b12bce79e4c4183d5df26a5032c7d  /work/out/console.cxe
+6d05b71c6b36152ca6aaa7820e45ed3eb8679f0fceb7b4cb283ec089116e93dc  /work/out/consoletest.cxe
 3d6a134b86a3bac0468d987e6e69022f80ef0f3198971e7c53bc3ca2e116c301  /work/out/cpubench.cxe
-38bacca0d96137d576c79c8f91872c756790b3951e3166cc4791480b4c8e482b  /work/out/doom.cxe
+f38fb625a1a85695a97b0dd4057dc920faa3d79df973e433fc4d70b6c40bb3e6  /work/out/doom.cxe
 a013160a37559681b8b72d5c8586d55c3dd25643ecfae86d0af472fb66e0c5fe  /work/out/enumtest.cxe
-6990baa1e6af2aaf12f4922ab30773b5c2a06acc2c9376cfe1a6a3b454b6547c  /work/out/inputtest.cxe
+21b26854a6fc3d8e777fdca8b54365957c958bfc05dffd378e98043cc09e04a3  /work/out/inputtest.cxe
 bfb8b1a5d7bf2045865f8bae8f20e12aa4a41e60614dcd8d2c6a508333ea2d1f  /work/out/jobtest.cxe
-45e87c7aca20d40242f9381b1220ee23380c8ab40fe80ec9143c601ba7785714  /work/out/keylog.cxe
+18aae51843b59e98c67f52e4bbe25ddd8ffa6837567fa3d660429a762086166e  /work/out/keylog.cxe
 730b22c785ebf9d4d4403da175854b51df3e813d1377456125b63435966eb293  /work/out/launch.cxe
-77397d5aae1d6201ab120afaca143736ddcbeba8199e8f1b1fc1c69c55b8bd0c  /work/out/libtest.cxe
+3f3ba10bd80eb495af31762f904602be9c4bcdc3a203db5a99bfa5caed0688ad  /work/out/libtest.cxe
 bb85378c45f3932c5cc7f2bc770c72bf12e369ceb2b945a88435e8cd13dd88cc  /work/out/report.cxe
 9c07a27a129521043502ac87806568032a9a6ce21105caf4c259bc2be13203e8  /work/out/sha256.cxe
 2b9fa777d498e946db0fbaf47da7eea039299c3bdf552d8cb8459c1aa4c5d4be  /work/out/spin.cxe

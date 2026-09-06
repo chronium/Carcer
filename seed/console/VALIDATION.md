@@ -185,3 +185,47 @@ these report/document updates and requires successful compile/link, canonical
 READY and development protocol before generation completion. Its result is
 recorded in the generation handoff. Physical VGA/input verification remains
 unavailable under pending request2; no approval or future arrival is assumed.
+
+## Stable file handle generation
+
+The inherited default jobtest ran live and reaped0. An inherited live scripted
+console ran runfor2 spin followed by runfor100 child, recording timeout then
+status=37; launcher reaped0. Its three runtime files were removed.
+
+All seven libc-linked installed programs were rebuilt for new calls19/20:
+Doom, libtest, inputtest, keylog, concurrent, console and consoletest. This includes
+the ordinary Doom port and does not modify the supplied immutable archive/assets.
+New programs execute in validated candidate boots; build does not update the
+still-running kernel. The rebuilt Doom itself has not been executed in this
+generation, so inherited concurrent demo evidence remains historical evidence
+for the earlier executable. Physical interactive Doom remains unverified.
+
+Stable stream semantics required one console regression update: a script that
+removes its transcript now continues successfully and can remove its next
+target. The transcript's unnamed object is reclaimed at close/exit. The previous
+expectation that pathname removal causes a stream write failure is obsolete.
+The1MiB output-cap test continues to require failure before dispatching a mutating
+command whose echo cannot finish. All existing render/transcript/foreground/
+timeout/supervision and other boot suites pass with the new streams.
+
+New libtest and boot observer evidence is documented in ENGINEERING.md's stable
+handle sections and sdk/libc/README.md. Tests cover competing independent append
+writers with512 complete records, stable file identity, limits/failure behavior,
+cleanup on every task termination route, full namespace pinned replacement, and
+both cancellation and successful resumption of preempted immutable handle reads.
+The resumption test proves a separate ordinary task actually reordered the
+namespace before the reader completed. Count, every copied byte, position and
+complete resource recovery are checked.
+
+Independent source review found no correctness issues and suggested the
+successful-resumption companion test; implemented it and passed the full
+candidate boot. Review does not prove execution or external provisioning.
+Final reproducibility report and final build status follow below.
+
+Final reconstruction job8825f5b1a6095d56b95c04f686161db7cab3a701b076a1616e5df108b3ca0aec
+matched ALL17 installed executables byte-for-byte. Packager/SHA, Doom keys and
+console core tests passed. console/rebuild.txt is the exact report, with hashes
+for every binary and the118-file958106-byte source measurement before final
+provenance notes. Report artifact743044fb031e67b45dbecbbd431901556b2001e818ed3f7c3dab9111a15ac225,
+1648 bytes. No artifact is required to boot: all programs persist under seed/user.
+Final report updates are included in the final trusted build before transition.

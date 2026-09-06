@@ -1,5 +1,5 @@
 #include "cxlib.h"
-struct cx_stream { char path[256]; uint64_t pos; unsigned read,write,append,eof,error,owned; };
+struct cx_stream { uint64_t handle; unsigned read,write,eof,error,owned; };
 static FILE in_stream,out_stream,err_stream;
 FILE *stdin=&in_stream,*stdout=&out_stream,*stderr=&err_stream;
 static size_t pathlen(const char *p){if(!p)return 0;size_t n=0;while(n<256&&p[n])++n;return n&&n<256?n:0;}
@@ -14,65 +14,58 @@ FILE *fopen(const char *p,const char *mode) {
         else {errno=EINVAL;return NULL;}
     }
     FILE *f=calloc(1,sizeof(*f));if(!f)return NULL;
-    strcpy(f->path,p);f->owned=1;f->read=mode[0]=='r'||plus;f->write=mode[0]!='r'||plus;f->append=mode[0]=='a';
+    f->owned=1;f->read=mode[0]=='r'||plus;f->write=mode[0]!='r'||plus;
+    uint64_t flags=(f->read?CX_OPEN_READ:0)|(f->write?CX_OPEN_WRITE:0);
+    if(mode[0]!='r')flags|=CX_OPEN_CREATE;
+    if(mode[0]=='w')flags|=CX_OPEN_TRUNC;
+    if(mode[0]=='a')flags|=CX_OPEN_APPEND;
+    if(exclusive)flags|=CX_OPEN_EXCL;
+    f->handle=cx_open(p,n,flags);
+    if(f->handle!=CX_ERROR)return f;
+    /* Kernel failures remain coarse; these lookups only refine diagnostics. */
     uint64_t size=cx_size(p,n),attr=cx_attributes(p,n);
-    if(f->write && attr!=CX_ERROR && (attr&1)){errno=EACCES;goto fail;}
-    if(exclusive) {
-        if(cx_create(p,n)!=0){errno=size==CX_ERROR?EIO:EEXIST;goto fail;}
-        size=0;
-    } else if(size==CX_ERROR) {
-        if(mode[0]=='r'){errno=ENOENT;goto fail;}
-        if(cx_write(p,n,0,NULL,0)!=0){errno=EIO;goto fail;}size=0;
-    }
-    if(mode[0]=='w' && size && cx_truncate(p,n,0)!=0){errno=EIO;goto fail;}
-    if(f->append)f->pos=size;
-    return f;
-fail:
+    errno=attr!=CX_ERROR&&(attr&1)&&f->write?EACCES:
+          exclusive&&size!=CX_ERROR?EEXIST:
+          mode[0]=='r'&&size==CX_ERROR?ENOENT:EIO;
     free(f);return NULL;
 }
-int fclose(FILE *f){if(!f){errno=EINVAL;return EOF;}int r=f->error?EOF:0;if(f->owned)free(f);else memset(f,0,sizeof(*f));return r;}
+int fclose(FILE *f){
+    if(!f){errno=EINVAL;return EOF;}
+    int r=f->error?EOF:0;
+    if(f->handle&&cx_close(f->handle)!=0){errno=EIO;r=EOF;}
+    if(f->owned)free(f);else memset(f,0,sizeof(*f));
+    return r;
+}
 int fflush(FILE *f){return f&&f->error?EOF:0;}
 size_t fread(void *p,size_t size,size_t count,FILE *f) {
     if(!size||!count)return 0;
     if(!f||!f->read||!p||count>SIZE_MAX/size){errno=EINVAL;if(f)f->error=1;return 0;}
-    uint64_t z=cx_size(f->path,strlen(f->path));
-    if(z==CX_ERROR){f->error=1;errno=EIO;return 0;}
     size_t want=size*count;
-    if(f->pos>=z){f->eof=1;return 0;}
-    uint64_t n=cx_read(f->path,strlen(f->path),f->pos,p,want);
+    uint64_t n=cx_fread(f->handle,p,want);
     if(n==CX_ERROR){f->error=1;errno=EIO;return 0;}
-    f->pos+=n;if(n<want)f->eof=1;
+    if(n<want)f->eof=1;
     return n/size;
 }
 size_t fwrite(const void *p,size_t size,size_t count,FILE *f) {
     if(!size||!count)return 0;
     if(!f||!f->write||!p||count>SIZE_MAX/size){errno=EINVAL;if(f)f->error=1;return 0;}
-    size_t n=size*count,pn=strlen(f->path);
-    uint64_t z=cx_size(f->path,pn);
-    if(z==CX_ERROR)goto fail;
-    if(f->append)f->pos=z;
-    if(f->pos>UINT32_MAX || n>UINT32_MAX-f->pos)goto fail;
-    if(f->pos>z && cx_truncate(f->path,pn,(uint32_t)f->pos)!=0)goto fail;
-    uint64_t written=cx_write(f->path,pn,f->pos,p,n);
-    if(written==CX_ERROR)goto fail;
-    f->pos+=written;
+    size_t n=size*count;
+    uint64_t written=cx_fwrite(f->handle,p,n);
+    if(written==CX_ERROR){f->error=1;errno=EIO;return 0;}
     if(written!=n){f->error=1;errno=EIO;}
     return written/size;
-fail:
-    f->error=1;errno=EIO;return 0;
 }
 int fseek(FILE *f,long offset,int whence) {
-    if(!f || !f->path[0]){errno=EINVAL;return -1;}
-    uint64_t base;
-    if(whence==SEEK_SET)base=0;
-    else if(whence==SEEK_CUR)base=f->pos;
-    else if(whence==SEEK_END){base=cx_size(f->path,strlen(f->path));if(base==CX_ERROR){errno=EIO;return -1;}}
-    else {errno=EINVAL;return -1;}
-    uint64_t magnitude=offset<0?0ull-(uint64_t)offset:(uint64_t)offset;
-    if((offset<0 && magnitude>base)||(offset>=0 && magnitude>UINT32_MAX-base)){errno=EINVAL;return -1;}
-    f->pos=offset<0?base-magnitude:base+magnitude;f->eof=0;return 0;
+    if(!f || !f->handle || whence<SEEK_SET || whence>SEEK_END){errno=EINVAL;return -1;}
+    if(cx_fseek(f->handle,offset,(uint64_t)whence)==CX_ERROR){errno=EINVAL;return -1;}
+    f->eof=0;return 0;
 }
-long ftell(FILE *f){if(!f){errno=EINVAL;return -1;}return (long)f->pos;}
+long ftell(FILE *f){
+    if(!f||!f->handle){errno=EINVAL;return -1;}
+    uint64_t pos=cx_fseek(f->handle,0,SEEK_CUR);
+    if(pos==CX_ERROR){errno=EIO;return -1;}
+    return (long)pos;
+}
 void rewind(FILE *f){if(!fseek(f,0,SEEK_SET))clearerr(f);}
 int fgetc(FILE *f){unsigned char c;return fread(&c,1,1,f)==1?c:EOF;}
 int fputc(int c,FILE *f){unsigned char b=(unsigned char)c;return fwrite(&b,1,1,f)==1?b:EOF;}

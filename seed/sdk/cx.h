@@ -119,4 +119,36 @@ int memcmp(const void *,const void *,size_t);
 size_t strlen(const char *);
 /* Monotonic, zero-initialized allocation. No free; do not mix with direct brk. */
 void *cx_alloc(size_t);
+
+/* Stable, task-private open file handles. No inheritance; closed tokens never
+ * recur during this boot. At most 16 handles per task. */
+#define CX_OPEN_READ 1u
+#define CX_OPEN_WRITE 2u
+#define CX_OPEN_CREATE 4u
+#define CX_OPEN_EXCL 8u
+#define CX_OPEN_TRUNC 16u
+#define CX_OPEN_APPEND 32u
+static inline uint64_t cx_open(const char *p,size_t n,uint64_t flags) {
+    return cx_call(19,(uintptr_t)p,n,flags,0,0,0);
+}
+static inline uint64_t cx_close(uint64_t h) {
+    return cx_call(20,h,0,0,0,0,0);
+}
+static inline uint64_t cx_fread(uint64_t h,void *b,size_t n) {
+    return cx_call(20,h,1,(uintptr_t)b,n,0,0);
+}
+static inline uint64_t cx_fwrite(uint64_t h,const void *b,size_t n) {
+    return cx_call(20,h,2,(uintptr_t)b,n,0,0);
+}
+static inline uint64_t cx_fseek(uint64_t h,int64_t off,uint64_t whence) {
+    return cx_call(20,h,3,(uint64_t)off,whence,0,0);
+}
+struct cx_file_info {uint64_t size,position,attributes;};
+static inline uint64_t cx_fstat(uint64_t h,struct cx_file_info *info) {
+    return cx_call(20,h,4,(uintptr_t)info,sizeof(*info),0,0);
+}
+static inline uint64_t cx_ftruncate(uint64_t h,uint64_t size) {
+    return cx_call(20,h,5,size,0,0,0);
+}
+
 #endif
