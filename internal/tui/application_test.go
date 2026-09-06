@@ -709,7 +709,7 @@ func TestApplicationRetainedRegionsStayPinnedDuringHighVolumeOutput(t *testing.T
 	app := testApplication(t, ApplicationOptions{
 		Activity: stream,
 		Status: func() StatusSnapshot {
-			return StatusSnapshot{RunName: "run-fixed", Generation: 8, HasGeneration: true, RuntimeState: "running", ActiveAgent: "Sol", ActivePhase: "implementation"}
+			return StatusSnapshot{RunName: "run-fixed", Generation: 8, HasGeneration: true, RuntimeState: "running", ActiveAgent: "Astra", ActivePhase: "implementation"}
 		},
 	})
 	app.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
@@ -850,7 +850,7 @@ func TestApplicationComposerPreservesLongMultilineDraft(t *testing.T) {
 
 func TestApplicationHeaderUsesLiveImplementationPhaseOverStaleState(t *testing.T) {
 	app := testApplication(t, ApplicationOptions{Status: func() StatusSnapshot {
-		return StatusSnapshot{RunName: "phase", RuntimeState: "running", SolState: "planning", ActiveAgent: "Sol", ActivePhase: "implementation"}
+		return StatusSnapshot{RunName: "phase", RuntimeState: "running", SolState: "planning", ActiveAgent: "Astra", ActivePhase: "implementation"}
 	}})
 	app.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
 	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
@@ -862,22 +862,16 @@ func TestApplicationHeaderUsesLiveImplementationPhaseOverStaleState(t *testing.T
 func TestApplicationHeaderTracksPlanningReviewAndImplementationTransitions(t *testing.T) {
 	app := testApplication(t, ApplicationOptions{})
 	app.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
-	for _, transition := range []struct {
-		agent, phase string
-	}{
-		{agent: "Sol", phase: "planning"},
-		{agent: "Luna", phase: "review"},
-		{agent: "Sol", phase: "implementation"},
-	} {
-		app.SetStatus(StatusSnapshot{RunName: "phase", RuntimeState: "running", ActiveAgent: transition.agent, ActivePhase: transition.phase})
+	for _, phase := range []string{"planning", "review", "implementation"} {
+		app.SetStatus(StatusSnapshot{RunName: "phase", RuntimeState: "running", ActiveAgent: "Astra", ActivePhase: phase})
 		header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
-		if !strings.Contains(header, "Astra "+transition.phase) {
-			t.Fatalf("%s/%s header = %q", transition.agent, transition.phase, header)
+		if !strings.Contains(header, "Astra "+phase) {
+			t.Fatalf("%s header = %q", phase, header)
 		}
 	}
 	app.SetStatus(StatusSnapshot{
 		RunName: "phase", RuntimeState: "running", SolState: "review failed",
-		ActiveAgent: "Luna", ActivePhase: "review failed",
+		ActiveAgent: "Astra", ActivePhase: "review failed",
 	})
 	header := strings.Split(ansi.Strip(app.View().Content), "\n")[0]
 	if !strings.Contains(header, "Astra review failed") {
@@ -1055,7 +1049,7 @@ func TestAstraPresentationPreservesRolesColorsAndAuthoredText(t *testing.T) {
 
 func TestProjectCarcerHeaderFitsWideAndNarrowTerminals(t *testing.T) {
 	app := testApplication(t, ApplicationOptions{Status: func() StatusSnapshot {
-		return StatusSnapshot{RunName: "Sol", RuntimeState: "running", ActiveAgent: "Luna", ActivePhase: "review"}
+		return StatusSnapshot{RunName: "Sol", RuntimeState: "running", ActiveAgent: "Astra", ActivePhase: "review"}
 	}})
 	for _, width := range []int{200, 80, 48, 28, 8, 1} {
 		app.Update(tea.WindowSizeMsg{Width: width, Height: 8})

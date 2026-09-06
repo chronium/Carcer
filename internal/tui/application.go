@@ -1493,9 +1493,6 @@ func (a *Application) headerText() string {
 	run := oneLine(SafeDisplayText(a.status.RunName, SummaryDisplayBytes))
 	state := oneLine(SafeDisplayText(a.status.RuntimeState, SummaryDisplayBytes))
 	agent := oneLine(SafeDisplayText(a.status.ActiveAgent, SummaryDisplayBytes))
-	if agent == "Sol" || agent == "Luna" {
-		agent = "Astra"
-	}
 	phase := oneLine(SafeDisplayText(a.status.ActivePhase, SummaryDisplayBytes))
 	if agent == "" && a.status.SolState != "idle" && a.status.SolState != "stopped" {
 		agent = "Astra"

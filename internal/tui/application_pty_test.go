@@ -101,7 +101,7 @@ func TestApplicationRetainedLayoutThroughPseudoTerminal(t *testing.T) {
 	app, err := NewApplication(ApplicationOptions{
 		Activity: stream,
 		Status: func() StatusSnapshot {
-			return StatusSnapshot{RunName: "pty-run", Generation: 2, HasGeneration: true, RuntimeState: "running", ActiveAgent: "Sol", ActivePhase: "implementation"}
+			return StatusSnapshot{RunName: "pty-run", Generation: 2, HasGeneration: true, RuntimeState: "running", ActiveAgent: "Astra", ActivePhase: "implementation"}
 		},
 		ActivityPoll: time.Hour,
 		StatusPoll:   time.Hour,
