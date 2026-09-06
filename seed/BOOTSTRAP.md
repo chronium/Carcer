@@ -96,7 +96,8 @@ Request #3 is approved with operator note "fulfilled within the documented
 freestanding scope." Guest-owned startup/syscall support, small runtime,
 compilation scripts and ELF-to-CXE2 packaging in sdk/ have produced boot-tested
 ordinary user binaries. This uses the provisioned host executor; it is not a
-guest-native compiler port or full libc. No supplied Doom executable has run.
+guest-native compiler port or full libc. The supplied DOS executable has not run;
+the operator permits a source port, and DoomGeneric now runs through this pipeline.
 
 Important observed host convention: outputs entries are relative to /work/out.
 For /work/out/spin.cxe declare "spin.cxe", not "out/spin.cxe". The latter compiled
@@ -108,13 +109,14 @@ for exact binary imports; do not assume an opaque ID encodes a content hash.
 
 Request #2 for display observation/input injection remains pending. The immutable
 DOS/4G/Watcom DOOM.EXE remains unsupported by CXE loaders. Any compatibility path
-must be generic userland work and preserve supplied executable/data bytes.
+would be optional generic userland work. It is not required for the Doom milestone;
+the source-built route and immutable inputs are documented in doom/README.md.
 
 Request #6 is approved: run/reap/import_provided_asset are callable in this
 session. Live run of the inherited compiled report returned a task slot; reap
 returned 42. A small supplied hello asset was imported and rejected mutation.
-New argument launch is validated by candidate boot tests; the current running
-kernel changes only on generation transition. LAUNCH.md documents a file-driven
+Argument launch has now been verified live with SHA and Doom demo workloads.
+New kernel calls14/15 remain candidate-tested until generation transition. LAUNCH.md documents a file-driven
 userland launch route that uses the existing run(path) binding.
 
 Operational note from the operator's abandoned-generation report: a progressing

@@ -112,15 +112,17 @@ Live external run of seed/user/report.cxe returned task 1, reap returned 42,
 and the expected binary result prefix was read before deleting the output.
 The hello provided asset was imported at runtime/supplied-hello.c; its exact
 105 bytes were read and an attempted write returned tool status 1. This immutable
-RAM import does not persist to the next generation. New syscall 13 is tested
-in candidate boots; build does not replace the inherited running kernel.
+RAM import does not persist to the next generation. This generation also verified
+syscall13 live: launcher/hash returned0 with the exact supplied hello SHA-256.
+Build validates a candidate; it does not replace the running kernel.
 
-Doom has not run. The immutable supplied DOOM.EXE is MZ-bound DOS/4G/Watcom and
-unsupported by the current loaders. DoomGeneric is source-only. A compiler
-service alone would not provide supplied-executable compatibility. Neither
-asset identity nor a future milestone supplies a missing trusted capability.
+DoomGeneric now runs as ordinary userland and has rendered the supplied WAD's
+embedded demo1. Source-built Doom is explicitly authorized by the operator;
+supplied DOS executable compatibility is not required. The original executable,
+WAD and source archive remain immutable. Interactive play remains unverified:
+physical input/display validation request2 is still pending. See doom/VALIDATION.md.
 
-Still absent: input/audio ABI, guest-native compiler/full userland runtime,
+Still absent: audio ABI, guest-native compiler/full userland runtime,
 environment variables, ownership/security model, stable generation-tagged task
 handles, wait timeouts, user cancellation, mmap/shared memory/threads, persistent
 storage and general kernel preemptibility. Most kernel work disables interrupts;
@@ -171,3 +173,73 @@ Independent source review found no correctness issues; its three suggested
 coverage additions are implemented above. Trusted candidate compile, boot and
 canonical protocol validation passed with those additions. Final artifact
 metadata/rebuild command and remaining limitations are in LAUNCH.md.
+
+## Current generation: reusable runtime, keyboard, source-built Doom
+
+The optional library, precise subset and concurrency limitations are documented
+in sdk/libc/README.md. malloc/free coalesce and reuse blocks; FILE streams are
+path-backed with per-stream offsets, not stable kernel handles. Namespace control
+syscall14 offers atomic exclusive creation, resize, removal and rename on the
+single scheduling CPU. Sealed source/destination files reject all mutations.
+Rename moves data allocations and works at a full128-file namespace. Appending
+and seek-gap writes still use multiple syscalls and require writer coordination.
+
+Syscall15 and input.c provide bounded PS/2 polling and a256-event sequence history
+with independent reader cursors. See INPUT.md. PIT polling adds no new assembly
+entry/return path; all FP and general-regs-only invariants remain. The Doom user
+adapter translates these generic events, combines left/right modifier state and
+releases remembered keys after history loss. keylog is an unrelated input client.
+No trusted physical key delivery or VGA observation was available this generation.
+
+New boot tests: libc_tests.h runs libtest under the non-syscalling spin workload,
+verifies full namespace rename without a spare slot and recovers file/page counts.
+input_tests.h runs compiled syscall15 boundaries under the same competing spin.
+A boot-only key_fixture in input.c snapshots/restores the complete backend under
+CLI and suppresses hardware polling only during that fixture; its ordinary user
+test uses the production syscall. It tests64/65 and huge capacities, writable
+cross-page event/cursor spans, unmapped/read-only second pages, cursor aliases,
+future cursors, independent views, empty reads and unchanged outputs on failure.
+The observer makes one fixture page read-only before the task can run.
+key_tests separately covers decoding/history. All inherited boot regressions pass.
+
+An independent source review found no blockers and identified scanf EOF and
+literal printf precision-overflow defects. Both are fixed with independent
+regressions; its input syscall boundary suggestions are implemented. Doom key
+mapping/modifier/overflow recovery tests also run as a host unit of userland code.
+No such synthetic test is claimed as physical input validation.
+
+Observed live: initial bounded demo120 returned0 and yielded a320x200 level frame.
+Final Doom600 run plus ordinary cpubench via generic concurrent supervisor returned0.
+The benchmark's2 billion-iteration volatile loop contains no kernel calls; its
+ticks195801..197404 overlap Doom frames1 and100 at195808 and197301. The computed
+final value4899245427888663553 matches independent modular arithmetic. Doom reached
+frame600 at198014. See doom/VALIDATION.md for exact hashes/artifacts/reproduction.
+
+The inherited live kernel has no syscalls14/15. The live Doom run therefore
+reported input=0 and exercised read access plus new output paths. Final candidate
+boot validates14/15, but build does not install those calls in the live guest.
+After transition, keylog can query/probe actual input availability. A working
+controller and adapter still require trusted physical validation for the
+interactive milestone. Source-built rendering alone is not milestone completion.
+
+The linker had an inherited256KiB .data assertion that blocked embedding Doom.
+It is now2MiB to accommodate the separately enforced1MiB content budget plus
+metadata and ordinary kernel data; no external source capacity was increased.
+Before these final documentation edits the snapshot measured98 files,726735
+content bytes and729164 framed bytes. All thirteen binaries rebuilt exactly in
+verification job79f713e9efa493fb53c27ba9549ea3d88825f0627015b95eab3eccf496f41cdb.
+Their bytes persist in seed/user. WAD, frame buffers and runtime files do not.
+
+Continue general-purpose development beyond Doom: directory enumeration, a
+terminal, stable file/task handles, cancellation, IPC, writable persistence,
+SMP and broader kernel preemptibility remain open. A complete libc or guest-native
+compiler is not provided. No future trusted capability is assumed.
+
+Second independent source review also found no blockers, but identified scanf's
+acceptance of incomplete numeric input items. The final scanner now identifies
+the width-bounded numeric item before conversion and rejects incomplete decimal
+exponents, signs and integer prefixes without assigning destinations. Regressions
+cover malformed and width-truncated tokens, suppression, complete tokens followed
+by delimiters and earlier successful conversions. Final binaries were rebuilt,
+candidate-tested and exercised in the live600-frame concurrent run again.
+Both reviews were source-only; physical input and interactive play remain open.

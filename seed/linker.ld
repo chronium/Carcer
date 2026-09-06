@@ -10,7 +10,8 @@ SECTIONS {
 .text : ALIGN(4096) { *(.text .text.*) } :text
 .rodata : ALIGN(4096) { *(.rodata .rodata.*) } :rodata
 .data : ALIGN(4096) { *(.data .data.*) } :data
-ASSERT(SIZEOF(.data) <= 256K, "embedded seed data exceeds 256 KiB")
+/* 1 MiB source content plus embedded-file metadata and ordinary kernel data. */
+ASSERT(SIZEOF(.data) <= 2M, "embedded data exceeds guest linker budget")
 .limine_requests : ALIGN(16) {
 KEEP(*(.limine_requests_start))
 KEEP(*(.limine_requests))

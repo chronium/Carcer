@@ -1,0 +1,15 @@
+Final scanner correction: all thirteen rebuilt binaries match persisted bytes; packager, SHA and key translation tests passed
+52d0c2cb7ac451bc5a42bd12801f90b366524adcb4ea6487ce63b084b3aeafff  /work/out/argchild.cxe
+0b51b18dd881a306021c28f0e2eb8f4bda9b46ceef9abe0155fd3f4fb6435894  /work/out/argtest.cxe
+58990250f43452959b5a7fe5806ac8aa716d29e4933a1190816164b8a8271006  /work/out/child.cxe
+5d4658009eba8163239bcadfe5630116f55242033788d6d6e1a9ca1fa9993fd8  /work/out/concurrent.cxe
+3d6a134b86a3bac0468d987e6e69022f80ef0f3198971e7c53bc3ca2e116c301  /work/out/cpubench.cxe
+10f3fab9ba8205d2d4bb2dbbb3317fb7515a5332d339653eebcae83bd852a523  /work/out/doom.cxe
+6990baa1e6af2aaf12f4922ab30773b5c2a06acc2c9376cfe1a6a3b454b6547c  /work/out/inputtest.cxe
+45e87c7aca20d40242f9381b1220ee23380c8ab40fe80ec9143c601ba7785714  /work/out/keylog.cxe
+730b22c785ebf9d4d4403da175854b51df3e813d1377456125b63435966eb293  /work/out/launch.cxe
+77397d5aae1d6201ab120afaca143736ddcbeba8199e8f1b1fc1c69c55b8bd0c  /work/out/libtest.cxe
+bb85378c45f3932c5cc7f2bc770c72bf12e369ceb2b945a88435e8cd13dd88cc  /work/out/report.cxe
+9c07a27a129521043502ac87806568032a9a6ce21105caf4c259bc2be13203e8  /work/out/sha256.cxe
+2b9fa777d498e946db0fbaf47da7eea039299c3bdf552d8cb8459c1aa4c5d4be  /work/out/spin.cxe
+source_files=98 content_bytes=726735 framed_bytes=729164

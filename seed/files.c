@@ -3,3 +3,28 @@
 #include "heap.h"
 typedef unsigned char u8;typedef unsigned short u16;typedef unsigned u32;typedef unsigned long u64;
 int fu(const u8*p,u32 n){u32 i=0;while(i<n){u8 f=p[i++];u32 c,m,r;if(f<=0x7f)continue;if(f>=0xc2&&f<=0xdf)c=f&31,m=0x80,r=1;else if(f>=0xe0&&f<=0xef)c=f&15,m=0x800,r=2;else if(f>=0xf0&&f<=0xf4)c=f&7,m=0x10000,r=3;else return 0;if(r>n-i)return 0;while(r--){u8 q=p[i++];if((q&0xc0)!=0x80)return 0;c=(c<<6)|(q&63);}if(c<m||c>0x10ffff||(c>=0xd800&&c<=0xdfff))return 0;}return 1;}int fpv(const u8*p,u32 n){return p&&n&&n<=FPL&&fu(p,n);}struct file files[FMC];u32 fc;static void cp(u8*d,const u8*s,u32 n){for(u32 i=0;i<n;++i)d[i]=s[i];}static void cpf(struct file*d,const struct file*s){cp(d->p,s->p,s->n);d->n=s->n;d->d=s->d;d->z=s->z;d->c=s->c;d->a=s->a;}static int eq(const u8*a,u32 n,const u8*b,u32 m){if(n!=m)return 0;for(u32 i=0;i<n;++i)if(a[i]!=b[i])return 0;return 1;}static int cmp(const u8*a,u32 n,const u8*b,u32 m){u32 z=n<m?n:m;for(u32 i=0;i<z;++i){if(a[i]<b[i])return-1;if(a[i]>b[i])return 1;}return n<m?-1:n>m;}static int reserve(struct file*f,u32 n){if(n<=f->c)return 1;u32 z=f->c;if(z<256)z=256;while(z<n){if(z>UINT32_MAX/2){z=n;break;}z*=2;}u8*p=ha(z);if(!p)return 0;cp(p,f->d,f->z);if(f->d&&!hf(f->d)){(void)hf(p);return 0;}f->d=p;f->c=z;return 1;}static int create(const u8*p,u32 n,const u8*d,u32 z){if(!fpv(p,n)||fc>=FMC)return 0;u32 at=0;while(at<fc){int q=cmp(files[at].p,files[at].n,p,n);if(!q)return 0;if(q>0)break;++at;}struct file f;f.n=(u16)n;f.d=0;f.z=f.c=f.a=0;cp(f.p,p,n);if(z){if(!reserve(&f,z))return 0;cp(f.d,d,z);f.z=z;}for(u32 i=fc;i>at;--i)cpf(&files[i],&files[i-1]);cpf(&files[at],&f);++fc;return 1;}static void discard(void){while(fc){--fc;if(files[fc].d)(void)hf(files[fc].d);}}int fi(void){fc=0;if(initial_file_count>FMC)return 0;for(u32 i=0;i<initial_file_count;++i){const struct embedded_file*f=&initial_files[i];uintptr_t n=(uintptr_t)f->end-(uintptr_t)f->data;if(n>UINT32_MAX||!create(f->p,f->n,f->data,(u32)n)){discard();return 0;}}return 1;}u32 fz(const struct file*f){return f->z;}const u8*fd(const struct file*f){return f->d;}u32 fa(const struct file*f){return f->a;}struct file*ff(const u8*p,u32 n){for(u32 i=0;i<fc;++i)if(eq(p,n,files[i].p,files[i].n))return&files[i];return 0;}int fpp(const struct file*f,const u8*p,u32 n){return n<=f->n&&eq(f->p,n,p,n);}static int resize(struct file*f,u32 n,int zero){u32 old=f->z;if(n==old)return 1;if(!n){if(f->d&&!hf(f->d))return 0;f->d=0;f->z=f->c=0;return 1;}if(!reserve(f,n))return 0;if(zero&&n>old)for(u32 i=old;i<n;++i)f->d[i]=0;f->z=n;return 1;}int fws(const u8*p,u32 n,u32 off,u32 z,u8**out){struct file*f=ff(p,n);if(!f){if(off||!create(p,n,0,0))return 0;f=ff(p,n);}if(!f||(f->a&FIM)||off>f->z||z>UINT32_MAX-off)return 0;if(z&&off+z>f->z&&!resize(f,off+z,0))return 0;*out=z?f->d+off:0;return 1;}int fw(const u8*p,u32 n,u32 off,const u8*d,u32 z){u8*q;if(!fws(p,n,off,z,&q))return 0;cp(q,d,z);return 1;}int ft(const u8*p,u32 n,u32 z){struct file*f=ff(p,n);return f&&!(f->a&FIM)&&resize(f,z,1);}int fr(const u8*p,u32 n){struct file*f=ff(p,n);if(!f||(f->a&FIM))return 0;u32 at=(u32)(f-files);if(f->d&&!hf(f->d))return 0;for(u32 i=at;i+1<fc;++i)cpf(&files[i],&files[i+1]);--fc;return 1;}int fsl(const u8*p,u32 n){struct file*f=ff(p,n);if(!f)return 0;f->a|=FIM;return 1;}
+
+/* Caller serializes namespace mutations. Rename transfers the allocation,
+ * including when the table is full; neither supplied endpoint may be sealed. */
+int fcreate(const u8 *p,u32 n) { return create(p,n,0,0); }
+int fmove(const u8 *p,u32 n,const u8 *q,u32 m) {
+    if(!fpv(q,m)) return 0;
+    struct file *src=ff(p,n),*dst=ff(q,m);
+    if(!src || (src->a&FIM) || (dst && (dst->a&FIM))) return 0;
+    if(src==dst) return 1;
+    if(dst && !fr(q,m)) return 0;
+    src=ff(p,n);
+    struct file saved;
+    cpf(&saved,src);
+    u32 at=(u32)(src-files);
+    for(u32 i=at;i+1<fc;++i) cpf(&files[i],&files[i+1]);
+    --fc;
+    saved.n=(u16)m;
+    cp(saved.p,q,m);
+    at=0;
+    while(at<fc && cmp(files[at].p,files[at].n,q,m)<0) ++at;
+    for(u32 i=fc;i>at;--i) cpf(&files[i],&files[i-1]);
+    cpf(&files[at],&saved);
+    ++fc;
+    return 1;
+}

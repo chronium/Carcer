@@ -58,34 +58,18 @@ input modifications are not detected. Sealed inputs remain stable; the utility
 never requests unsealing or writes its input. Callers needing concurrent file
 transactions will require a future generic exclusive-create/snapshot facility.
 
-## Live use after generation transition
+## Verified live use
 
-The trusted build validates a candidate without installing it in the currently
-running generation. The new argument syscall and utilities passed candidate
-boot integration. In the inherited running kernel, the launcher without a
-description returned 121. A valid description was also submitted, but its
-completion result was not retained across the review boundary. Do not claim
-live success for the new syscall in this generation.
+This generation imported hello to runtime/input, wrote the three-line SHA
+description, ran seed/user/launch.cxe, reaped0 and read the exact65-byte digest:
+98c93ebeed3327a8973b27c89d79dd4c464e73ce0f8954f708f13dc9c1f0128e plus LF.
+The digest matches trusted asset metadata. Argument launch is now observed live.
+Runtime imports/results are not source persistence.
 
-After transitioning to this source, the available end-to-end route is:
-
-1. import_provided_asset("hello", "runtime/input") imports the small immutable
-   supplied hello file. This imports source bytes as data; it does not compile it.
-2. Write runtime/launch.txt with the three example lines.
-3. run("seed/user/launch.cxe"), then reap the returned task ID until completed.
-4. Read runtime/digest with length 65. For that supplied hello input, the expected
-   hex digest is 98c93ebeed3327a8973b27c89d79dd4c464e73ce0f8954f708f13dc9c1f0128e.
-   The expected digest comes from trusted asset metadata.
-
-All steps above are implemented or explicitly provisioned; this exact live
-post-transition sequence has not yet been observed. Runtime imports/results
-are not source persistence. Existing runtime/launch.txt was removed after
-this generation's live checks. An immutable runtime/supplied-hello.c remains
-in the inherited running guest and disappears at transition.
-
-Live bindings were separately verified with seed/user/report.cxe: run returned
-a slot ID, reap returned 42, and the expected result bytes were read. A small
-hello asset import succeeded, matched supplied bytes, and rejected a write.
+The same launcher also ran a bounded DoomGeneric demo and a generic supervisor
+that launched Doom beside an unrelated CPU-bound program. See doom/VALIDATION.md.
+Kernel calls14/15 added this generation are candidate-tested; build does not
+replace the running generation, and live new-input behavior remains unobserved.
 
 ## Tests and reproducible artifacts
 
@@ -143,9 +127,11 @@ session's trusted tool responses.
 
 ## Remaining work
 
-Doom has not run; immutable DOS/4G executable compatibility remains substantial
-generic userland work. Display observation/input injection (request 2) remains
-pending. Requests 1, 3 (freestanding scope), 4, 5 and 6 are approved.
-No environment, terminal/stdio, directory enumeration syscall, ownership model,
-stable task handles, user cancellation, IPC/shared memory, persistent writable
-storage, full libc or guest-native compiler is added by this milestone.
+DoomGeneric source-built demo rendering now works; the operator explicitly
+permits that source route. Supplied DOS executable compatibility is not required.
+Physical display/input validation (request2) remains pending; interactive Doom
+is not yet verified. Requests1,3(freestanding scope),4,5,6 remain approved.
+There is now an optional path-backed stdio library and generic key-event ABI.
+Environment, terminal, directory enumeration, ownership, stable task/file handles,
+user cancellation, IPC/shared memory, persistent writable storage, full libc and
+guest-native compiler remain open general-purpose work.

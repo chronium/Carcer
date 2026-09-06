@@ -56,6 +56,30 @@ static inline uint64_t cx_sleep(uint64_t ticks) { return cx_call(11,ticks,0,0,0,
 static inline uint64_t cx_wait(uint64_t task,uint64_t *status) {
     return cx_call(12,task,(uintptr_t)status,0,0,0,0);
 }
+static inline uint64_t cx_create(const char *p,size_t n) {
+    return cx_call(14,(uintptr_t)p,n,0,0,0,0);
+}
+static inline uint64_t cx_truncate(const char *p,size_t n,uint32_t size) {
+    return cx_call(14,(uintptr_t)p,n,1,size,0,0);
+}
+static inline uint64_t cx_remove(const char *p,size_t n) {
+    return cx_call(14,(uintptr_t)p,n,2,0,0,0);
+}
+static inline uint64_t cx_rename(const char *p,size_t n,const char *q,size_t m) {
+    return cx_call(14,(uintptr_t)p,n,3,(uintptr_t)q,m,0);
+}
+struct cx_key_event {
+    uint64_t sequence,tick;
+    uint16_t code;
+    uint8_t pressed,flags;
+    uint32_t reserved;
+};
+#define CX_KEY_REPEAT 1u
+#define CX_KEY_LOST 2u
+static inline uint64_t cx_input_available(void) {return cx_call(15,0,0,0,0,0,0);}
+static inline uint64_t cx_keys(struct cx_key_event *events,size_t capacity,uint64_t *cursor) {
+    return cx_call(15,(uintptr_t)events,capacity,(uintptr_t)cursor,0,0,0);
+}
 void *memcpy(void *,const void *,size_t);
 void *memmove(void *,const void *,size_t);
 void *memset(void *,int,size_t);

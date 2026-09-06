@@ -4,6 +4,7 @@
 #include "interrupts.h"
 #include "memory.h"
 #include "video.h"
+#include "input.h"
 typedef unsigned char u8;typedef unsigned u32;typedef unsigned long u64;
 #define NT 8u
 #define KS (16u*1024u)
@@ -211,7 +212,50 @@ static int gp(struct ts*s,struct tc*f,u8*p){return f->rsi&&f->rsi<=FPL&&gu(s,p,f
     f->rax=id<0?UINT64_MAX:(u64)id;
     return f;
 }
-struct tc*tsys(struct tc*f){if(!ready||!f||!cur||!slots[cur].cr3){if(f)f->rax=UINT64_MAX;return f;}struct ts*s=&slots[cur];if(fxchecking)fxenv();if(f->rax==0){s->xs=f->rdi;s->st=ZOM;return tsched(f,0);}if(f->rax==12)return block_wait(f);if(f->rax==13)return spawnargs(f);if(f->rax==6){u64 status;int state=f->rdi<=UINT32_MAX&&vu(s,f->rsi,8,1)?twait((u32)f->rdi,&status):-1;if(state==1)(void)pu(s,f->rsi,(const u8*)&status,8);f->rax=state<0?UINT64_MAX:(u64)state;return f;}if(f->rax==7){if(!f->rdi)f->rax=s->brk;else f->rax=sb(s,f->rdi)?s->brk:UINT64_MAX;return f;}if(f->rax==8){f->rax=tnow();return f;}if(f->rax==11){u64 now=tnow();if(!f->rdi){f->rax=0;return f;}if(f->rdi>UINT64_MAX-now){f->rax=UINT64_MAX;return f;}f->rax=0;cc(&s->c,f);s->wake=now+f->rdi;s->st=SLP;return tsched(f,0);}if(f->rax==9){struct vinfo v;vinfo(&v);f->rax=f->rsi>=sizeof(v)&&pu(s,f->rdi,(const u8*)&v,sizeof(v))?sizeof(v):UINT64_MAX;return f;}if(f->rax==10){if(f->rdx>UINT32_MAX||f->rcx>UINT32_MAX||f->r8>UINT32_MAX||f->r9>UINT32_MAX){f->rax=UINT64_MAX;return f;}u32 pitch,z;u8*d=vtarget((u32)f->rdx,(u32)f->rcx,(u32)f->r8,(u32)f->r9,&pitch);if(!d||(z=(u32)f->r8*4u)>f->rsi){f->rax=UINT64_MAX;return f;}u64 a=f->rdi;for(u32 i=0;i<(u32)f->r9;++i){if(!vu(s,a,z,0)||(i+1u<(u32)f->r9&&f->rsi>UINT64_MAX-a)){f->rax=UINT64_MAX;return f;}a+=f->rsi;}a=f->rdi;for(u32 i=0;i<(u32)f->r9;++i){(void)gu(s,d+(u64)i*pitch,a,z);a+=f->rsi;}f->rax=0;return f;}if(f->rax<1||f->rax>5){f->rax=UINT64_MAX;return f;}u8 path[FPL];if(!gp(s,f,path)){f->rax=UINT64_MAX;return f;}if(f->rax==4){u64 z=f->r8;u8*d;if(f->rdx>UINT32_MAX||z>UINT32_MAX||(z&&!vu(s,f->rcx,z,0))||!fws(path,(u32)f->rsi,(u32)f->rdx,(u32)z,&d))f->rax=UINT64_MAX;else{if(z)(void)gu(s,d,f->rcx,(u32)z);f->rax=z;}return f;}if(f->rax==5){int id=tfile(path,(u32)f->rsi);f->rax=id<0?UINT64_MAX:(u64)id;return f;}struct file*file=ff(path,(u32)f->rsi);if(!file){f->rax=UINT64_MAX;return f;}if(f->rax==1){f->rax=fz(file);return f;}if(f->rax==3){f->rax=fa(file);return f;}u32 size=fz(file);const u8*content=fd(file);int immutable=fa(file)&FIM;if(f->rdx>size){f->rax=UINT64_MAX;return f;}u64 left=size-(u32)f->rdx,count=f->r8<left?f->r8:left;if(count>UINT32_MAX||!vu(s,f->rcx,count,1)){f->rax=UINT64_MAX;return f;}if(count){if(immutable){s->ir=1;__asm__ volatile("sti":::"memory");if(fxchecking)fxprobe();}(void)pu(s,f->rcx,content+(u32)f->rdx,(u32)count);if(immutable){__asm__ volatile("cli":::"memory");s->ir=0;}}f->rax=count;return f;}
+static struct tc *filectl(struct tc *f) {
+    struct ts *s=&slots[cur];
+    u8 path[FPL],dest[FPL];
+    int ok=0;
+    if(!gp(s,f,path)) goto done;
+    switch(f->rdx) {
+    case 0:
+        if(!f->rcx && !f->r8) ok=fcreate(path,(u32)f->rsi);
+        break;
+    case 1:
+        if(f->rcx<=UINT32_MAX && !f->r8)
+            ok=ft(path,(u32)f->rsi,(u32)f->rcx);
+        break;
+    case 2:
+        if(!f->rcx && !f->r8) ok=fr(path,(u32)f->rsi);
+        break;
+    case 3:
+        if(f->r8 && f->r8<=FPL &&
+           gu(s,dest,f->rcx,(u32)f->r8) && fpv(dest,(u32)f->r8))
+            ok=fmove(path,(u32)f->rsi,dest,(u32)f->r8);
+        break;
+    }
+done:
+    f->rax=ok?0:UINT64_MAX;
+    return f;
+}
+static struct tc *readkeys(struct tc *f) {
+    struct ts *s=&slots[cur];
+    if(!f->rsi){f->rax=(u64)key_available();return f;}
+    struct key_event events[KEY_BATCH];
+    u64 cursor,after,bytes=f->rsi*sizeof(struct key_event);
+    f->rax=UINT64_MAX;
+    if(!key_available() || f->rsi>KEY_BATCH ||
+       !vu(s,f->rdx,8,1) || !gu(s,(u8 *)&cursor,f->rdx,8) ||
+       !vu(s,f->rdi,bytes,1)) return f;
+    /* The cursor must not alias the output records. Ranges are bounded by ST. */
+    if(f->rdx<f->rdi+bytes && f->rdi<f->rdx+8) return f;
+    int n=key_read(cursor,events,(u32)f->rsi,&after);
+    if(n<0)return f;
+    (void)pu(s,f->rdi,(const u8 *)events,(u32)n*sizeof(struct key_event));
+    (void)pu(s,f->rdx,(const u8 *)&after,8);
+    f->rax=(u64)n;return f;
+}
+struct tc*tsys(struct tc*f){if(!ready||!f||!cur||!slots[cur].cr3){if(f)f->rax=UINT64_MAX;return f;}struct ts*s=&slots[cur];if(fxchecking)fxenv();if(f->rax==0){s->xs=f->rdi;s->st=ZOM;return tsched(f,0);}if(f->rax==12)return block_wait(f);if(f->rax==13)return spawnargs(f);if(f->rax==14)return filectl(f);if(f->rax==15)return readkeys(f);if(f->rax==6){u64 status;int state=f->rdi<=UINT32_MAX&&vu(s,f->rsi,8,1)?twait((u32)f->rdi,&status):-1;if(state==1)(void)pu(s,f->rsi,(const u8*)&status,8);f->rax=state<0?UINT64_MAX:(u64)state;return f;}if(f->rax==7){if(!f->rdi)f->rax=s->brk;else f->rax=sb(s,f->rdi)?s->brk:UINT64_MAX;return f;}if(f->rax==8){f->rax=tnow();return f;}if(f->rax==11){u64 now=tnow();if(!f->rdi){f->rax=0;return f;}if(f->rdi>UINT64_MAX-now){f->rax=UINT64_MAX;return f;}f->rax=0;cc(&s->c,f);s->wake=now+f->rdi;s->st=SLP;return tsched(f,0);}if(f->rax==9){struct vinfo v;vinfo(&v);f->rax=f->rsi>=sizeof(v)&&pu(s,f->rdi,(const u8*)&v,sizeof(v))?sizeof(v):UINT64_MAX;return f;}if(f->rax==10){if(f->rdx>UINT32_MAX||f->rcx>UINT32_MAX||f->r8>UINT32_MAX||f->r9>UINT32_MAX){f->rax=UINT64_MAX;return f;}u32 pitch,z;u8*d=vtarget((u32)f->rdx,(u32)f->rcx,(u32)f->r8,(u32)f->r9,&pitch);if(!d||(z=(u32)f->r8*4u)>f->rsi){f->rax=UINT64_MAX;return f;}u64 a=f->rdi;for(u32 i=0;i<(u32)f->r9;++i){if(!vu(s,a,z,0)||(i+1u<(u32)f->r9&&f->rsi>UINT64_MAX-a)){f->rax=UINT64_MAX;return f;}a+=f->rsi;}a=f->rdi;for(u32 i=0;i<(u32)f->r9;++i){(void)gu(s,d+(u64)i*pitch,a,z);a+=f->rsi;}f->rax=0;return f;}if(f->rax<1||f->rax>5){f->rax=UINT64_MAX;return f;}u8 path[FPL];if(!gp(s,f,path)){f->rax=UINT64_MAX;return f;}if(f->rax==4){u64 z=f->r8;u8*d;if(f->rdx>UINT32_MAX||z>UINT32_MAX||(z&&!vu(s,f->rcx,z,0))||!fws(path,(u32)f->rsi,(u32)f->rdx,(u32)z,&d))f->rax=UINT64_MAX;else{if(z)(void)gu(s,d,f->rcx,(u32)z);f->rax=z;}return f;}if(f->rax==5){int id=tfile(path,(u32)f->rsi);f->rax=id<0?UINT64_MAX:(u64)id;return f;}struct file*file=ff(path,(u32)f->rsi);if(!file){f->rax=UINT64_MAX;return f;}if(f->rax==1){f->rax=fz(file);return f;}if(f->rax==3){f->rax=fa(file);return f;}u32 size=fz(file);const u8*content=fd(file);int immutable=fa(file)&FIM;if(f->rdx>size){f->rax=UINT64_MAX;return f;}u64 left=size-(u32)f->rdx,count=f->r8<left?f->r8:left;if(count>UINT32_MAX||!vu(s,f->rcx,count,1)){f->rax=UINT64_MAX;return f;}if(count){if(immutable){s->ir=1;__asm__ volatile("sti":::"memory");if(fxchecking)fxprobe();}(void)pu(s,f->rcx,content+(u32)f->rdx,(u32)count);if(immutable){__asm__ volatile("cli":::"memory");s->ir=0;}}f->rax=count;return f;}
 static const u8 workup[]={0x48,0xb8,0,1,0x40,0,0,0,0,0,0x48,0xff,0,0xeb,0xfb},workdown[]={0x48,0xb8,0,1,0x40,0,0,0,0,0,0x48,0xff,8,0xeb,0xfb};static const u8 workhead[]={'C','X','E','1',0,0x20,0,0,0x80,0x10,0,0,0,0,0},cx[]={'C','X','E','1',9,0,0,0,0,0,0,0,0,0,0,0,0xbf,37,0,0,0,0x31,0xc0,0xcd,0x80};extern const u8 abiend[];__attribute__((naked,noinline,used))static void abitest(void){__asm__ volatile("mov $99,%eax\nint $0x80\ncmp $-1,%rax\njne 9f\n"
 "mov $1,%eax\nmov $0x400ff8,%edi\nmov $16,%esi\nint $0x80\ncmp $0x2010,%rax\njne 9f\n"
 "mov $2,%eax\nmov $0x401040,%edi\nmov $16,%esi\nxor %edx,%edx\nmov $0x400ff8,%ecx\nmov $16,%r8d\nint $0x80\ncmp $16,%rax\njne 9f\ncmpl $0x31455843,0x400ff8\njne 9f\ncmpl $0x2000,0x400ffc\njne 9f\n"
@@ -234,4 +278,6 @@ static int fxt(void){u8 base[512]__attribute__((aligned(16)));__asm__ volatile("
 #include "task_wait_tests.h"
 #include "sdk_tests.h"
 #include "args_tests.h"
-int tinit(void){if(!nxok())return 0;u64 f=lock();for(u32 i=0;i<NT;++i){cz(&slots[i].c);slots[i].st=slots[i].ir=slots[i].pr=0;slots[i].waiter=slots[i].waitfor=0;slots[i].cr3=slots[i].hb=slots[i].brk=slots[i].xs=slots[i].wake=0;}cur=0;itstack(stacks[0]+KS);slots[0].cr3=gc();slots[0].st=RUN;ready=1;unlock(f);kran=0;int kt=tnew(kfn);u64 kt_start=tnow();while(!kran&&tnow()-kt_start<THZ)__asm__ volatile("pause");if(kt<0||!kran)return 0;if(!imt()||!x2()||!slt()||!fxt()||!wait_tests())return 0;int first=tuser(workup,sizeof(workup),0),second=tuser(workdown,sizeof(workdown),0);if(first<0||second<0){if(first>0)(void)tkill((u32)first);return 0;}volatile u64*a=(volatile u64*)xl(slots[first].cr3,UB+0x100,1),*b=(volatile u64*)xl(slots[second].cr3,UB+0x100,1);u64 start=tnow();while((*a==0||*b==0)&&tnow()-start<THZ)__asm__ volatile("pause");int success=*a&&*b;(void)tkill((u32)first);(void)tkill((u32)second);if(!success)return 0;u64 av=mfc();int fault=tuser((const u8*)"\x0f\x0b",2,0);if(fault<0)return 0;u64 root=slots[fault].cr3;start=tnow();while(!dn((u32)fault,UINT64_MAX)&&tnow()-start<THZ)__asm__ volatile("pause");if(mfc()!=av)return 0;u64 ru=mpa();if(ru!=root){if(ru)(void)mpf(ru);return 0;}(void)mpf(ru);av=mfc();static const u8 path[]="bin/abi-test.cxe",made[]="test/user",child[]="bin/child.cxe";if(!fw(child,sizeof(child)-1,0,cx,sizeof(cx))||!fw(path,sizeof(path)-1,0,workhead,sizeof(workhead)))return 0;u32 iz=2u*PG,czs=(u32)(abiend-(const u8*)abitest);if(czs>PG-0x80u||!ft(path,sizeof(path)-1,EH+iz)||!fw(path,sizeof(path)-1,EH+0xff8,path,sizeof(path)-1)||!fw(path,sizeof(path)-1,EH+0x1040,path,sizeof(path)-1)||!fw(path,sizeof(path)-1,EH+0x1060,(const u8*)"test/immutable",14)||!fw(path,sizeof(path)-1,EH+0x1070,made,sizeof(made)-1)||!fw(path,sizeof(path)-1,EH+0x1010,child,sizeof(child)-1)||!fw(path,sizeof(path)-1,EH+0x1080,(const u8*)abitest,czs))return 0;int exiting=tfile(path,sizeof(path)-1);if(exiting<0)return 0;int busy=tuser(workup,sizeof(workup),0);if(busy<0)return 0;root=slots[exiting].cr3;start=tnow();while(!dn((u32)exiting,42)&&tnow()-start<THZ)__asm__ volatile("pause");ru=mpa();u32 vp;u8*vd=vtarget(0,0,2,1,&vp);int pixels=vd&&((u32*)vd)[0]==0x112233&&((u32*)vd)[1]==0x445566;if(vd)((u32*)vd)[0]=((u32*)vd)[1]=0;int rc=ru==root,frd=!ru||mpf(ru),co=slots[exiting].pr,so=tkill((u32)busy);int rm=fr(path,sizeof(path)-1),mr=fr(made,sizeof(made)-1),cr=fr(child,sizeof(child)-1);return pixels&&rc&&frd&&co&&so&&rm&&mr&&cr&&mfc()==av&&sdk_tests()&&args_tests();}
+#include "libc_tests.h"
+#include "input_tests.h"
+int tinit(void){if(!nxok())return 0;u64 f=lock();for(u32 i=0;i<NT;++i){cz(&slots[i].c);slots[i].st=slots[i].ir=slots[i].pr=0;slots[i].waiter=slots[i].waitfor=0;slots[i].cr3=slots[i].hb=slots[i].brk=slots[i].xs=slots[i].wake=0;}cur=0;itstack(stacks[0]+KS);slots[0].cr3=gc();slots[0].st=RUN;ready=1;unlock(f);kran=0;int kt=tnew(kfn);u64 kt_start=tnow();while(!kran&&tnow()-kt_start<THZ)__asm__ volatile("pause");if(kt<0||!kran)return 0;if(!imt()||!x2()||!slt()||!fxt()||!wait_tests())return 0;int first=tuser(workup,sizeof(workup),0),second=tuser(workdown,sizeof(workdown),0);if(first<0||second<0){if(first>0)(void)tkill((u32)first);return 0;}volatile u64*a=(volatile u64*)xl(slots[first].cr3,UB+0x100,1),*b=(volatile u64*)xl(slots[second].cr3,UB+0x100,1);u64 start=tnow();while((*a==0||*b==0)&&tnow()-start<THZ)__asm__ volatile("pause");int success=*a&&*b;(void)tkill((u32)first);(void)tkill((u32)second);if(!success)return 0;u64 av=mfc();int fault=tuser((const u8*)"\x0f\x0b",2,0);if(fault<0)return 0;u64 root=slots[fault].cr3;start=tnow();while(!dn((u32)fault,UINT64_MAX)&&tnow()-start<THZ)__asm__ volatile("pause");if(mfc()!=av)return 0;u64 ru=mpa();if(ru!=root){if(ru)(void)mpf(ru);return 0;}(void)mpf(ru);av=mfc();static const u8 path[]="bin/abi-test.cxe",made[]="test/user",child[]="bin/child.cxe";if(!fw(child,sizeof(child)-1,0,cx,sizeof(cx))||!fw(path,sizeof(path)-1,0,workhead,sizeof(workhead)))return 0;u32 iz=2u*PG,czs=(u32)(abiend-(const u8*)abitest);if(czs>PG-0x80u||!ft(path,sizeof(path)-1,EH+iz)||!fw(path,sizeof(path)-1,EH+0xff8,path,sizeof(path)-1)||!fw(path,sizeof(path)-1,EH+0x1040,path,sizeof(path)-1)||!fw(path,sizeof(path)-1,EH+0x1060,(const u8*)"test/immutable",14)||!fw(path,sizeof(path)-1,EH+0x1070,made,sizeof(made)-1)||!fw(path,sizeof(path)-1,EH+0x1010,child,sizeof(child)-1)||!fw(path,sizeof(path)-1,EH+0x1080,(const u8*)abitest,czs))return 0;int exiting=tfile(path,sizeof(path)-1);if(exiting<0)return 0;int busy=tuser(workup,sizeof(workup),0);if(busy<0)return 0;root=slots[exiting].cr3;start=tnow();while(!dn((u32)exiting,42)&&tnow()-start<THZ)__asm__ volatile("pause");ru=mpa();u32 vp;u8*vd=vtarget(0,0,2,1,&vp);int pixels=vd&&((u32*)vd)[0]==0x112233&&((u32*)vd)[1]==0x445566;if(vd)((u32*)vd)[0]=((u32*)vd)[1]=0;int rc=ru==root,frd=!ru||mpf(ru),co=slots[exiting].pr,so=tkill((u32)busy);int rm=fr(path,sizeof(path)-1),mr=fr(made,sizeof(made)-1),cr=fr(child,sizeof(child)-1);return pixels&&rc&&frd&&co&&so&&rm&&mr&&cr&&mfc()==av&&sdk_tests()&&args_tests()&&libc_tests()&&input_sys_tests();}

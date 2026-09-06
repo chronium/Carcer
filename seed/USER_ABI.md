@@ -7,7 +7,7 @@ Each task has a private address space, guarded 64 KiB RW+NX stack ending at 0x40
 
 `int 0x80`: RAX call; RDI, RSI, RDX, RCX, R8, R9 arguments; UINT64_MAX failure.
 0 exit; 1 file size; 2 file read; 3 attributes (immutable bit 0); 4 file write;
-5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments.
+5 spawn; 6 reap (0 active, 1 consumed); 7 brk; 8 monotonic ticks since boot (100 Hz); 9 display info; 10 display present; 11 sleep; 12 blocking wait; 13 spawn with arguments; 14 file control; 15 keyboard history.
 
 Sleep uses RDI=relative 100 Hz ticks. Zero returns immediately; a deadline overflow fails. A valid nonzero sleep blocks and later resumes with RAX=0. Reap reports runnable, sleeping, and waiting tasks as active unless their result is reserved by a blocking waiter. Paths are 1..255-byte UTF-8 spans; buffers may cross pages. Protocol run and syscall spawn share both loaders. Exits and faults become zombies and reserve slots until reap.
 
@@ -60,3 +60,33 @@ on legacy launch. In contrast, argument launch with zero arguments supplies a
 valid vector containing one NULL. Both main(void) and main(int,char **) are
 supported by SDK startup; no environment, TLS or shell syntax is implied.
 See LAUNCH.md for an ordinary userland file-driven launcher and checksum tool.
+
+## File control (14)
+
+RDI=path address, RSI=path byte length, RDX=operation. Return0 on success or
+UINT64_MAX on failure. Paths follow the existing byte-span UTF-8 rules.
+
+- Operation0: create a new empty mutable file exclusively; RCX=R8=0.
+  Existing paths (including sealed ones) fail without changing contents.
+- Operation1: resize an existing mutable file to RCX bytes (0..UINT32_MAX);
+  R8=0. Growth is zero-filled. It does not create missing files.
+- Operation2: remove an existing mutable file; RCX=R8=0.
+- Operation3: rename source to destination span at RCX with length R8.
+  Both paths are snapshotted before mutation. An existing mutable destination
+  is replaced; a sealed source OR destination fails. Renaming a mutable path
+  to itself succeeds. Rename requires no spare namespace slot or data allocation.
+
+Unused R9 is ignored. Unsupported operations/reserved operand combinations,
+bad spans, missing sources, immutable endpoints and resource failure return
+failure. Each namespace operation is serialized with interrupts disabled.
+No ownership, stable open handles, directory hierarchy or disk persistence is
+implied. Existing path-backed stream readers follow their path after rename.
+
+## Keyboard history (15)
+
+See INPUT.md for the exact24-byte record, cursor, overflow and availability
+contract. RSI=0 queries availability and ignores other operands. Otherwise
+RDI=writable event array, RSI=capacity1..64, RDX=readable/writable uint64 cursor.
+The event and cursor ranges must not overlap. Failure changes neither range;
+successful empty reads preserve event bytes and update the cursor. Each caller
+owns its cursor; reading does not consume events for another caller.

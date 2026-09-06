@@ -39,8 +39,8 @@ does not replace the current running generation's kernel.
 
 ## ABI and runtime
 See ../USER_ABI.md for syscalls and image layout. cx.h supplies wrappers for all
-existing calls 0..13 using byte spans and UINT64_MAX as failure. No errno or file
-descriptor layer. The compiler convention is ordinary x86-64 System V C calls
+existing calls 0..15 using byte spans and UINT64_MAX as failure. These raw wrappers
+have no errno or file descriptor layer; optional libc supplies path-backed streams. The compiler convention is ordinary x86-64 System V C calls
 inside the program; the kernel int 0x80 interface is CodexOS-specific.
 Startup clears DF, aligns RSP to 16 and calls main preserving the entry RDI/RSI
 as argc/argv, then exits with main's return value zero-extended from 32 bits.
@@ -48,7 +48,7 @@ cx_exit accepts a full 64-bit status. Legacy launch supplies argc=0, argv=NULL;
 cx_spawn_args supplies a private argument vector. See ../USER_ABI.md for limits.
 Environment and TLS remain absent.
 
-Runtime: memcpy, memmove, memset, memcmp, strlen and cx_alloc.
+Default runtime: memcpy, memmove, memset, memcmp, strlen and cx_alloc.
 cx_alloc is a 16-byte-aligned monotonic allocator backed by page-aligned brk
 growth. It checks integer overflow and kernel failure. No free; all resources
 are reclaimed when the task exits. Do not mix this allocator with manual brk
@@ -119,3 +119,25 @@ Independent source review found no correctness issues in syscall constraints,
 startup alignment, ELF conversion, runtime or the boot preemption test. It did
 not execute anything. Its remaining evidence gap was the then-unexercised
 compile.sh refactor; the final job's rebuild/comparisons closed that gap.
+
+## Optional C subset and additional programs
+
+CX_LIBC=1 adds sdk/libc headers and source to the same generic compile/link path.
+See libc/README.md for exact semantics and limitations. It provides allocation
+reclamation, strings, seekable path-backed FILE streams and limited formatting/
+parsing, plus explicit file-backed stdout/stderr. Default SDK mode remains
+unchanged. CX_USER_FLAGS supplies additional flags only for workload compilation;
+SDK/library code remains warnings-as-errors, freestanding and baseline x86-64.
+
+New ordinary programs are libtest, inputtest, keylog, concurrent, cpubench and
+doom. Doom's build uses the immutable supplied source archive plus the generic
+SDK/library; see ../doom/README.md. keylog accepts output-path and duration.
+concurrent accepts a first executable (legacy launch), then the second executable's
+complete argv; it launches both with ordinary calls, waits for both, requires the
+first result0 and propagates the second full64-bit result. It has no cancellation
+or wait timeout. cpubench performs a fixed finite CPU loop and writes32 bytes
+to runtime/cpu-result. No program name or instruction stream changes scheduling.
+
+Final rebuild job79f713e9efa493fb53c27ba9549ea3d88825f0627015b95eab3eccf496f41cdb
+ran both sdk/build.sh and doom/build.sh, passed packager/SHA/key mapping tests,
+and cmp verified all thirteen output binaries against persisted seed/user bytes.
