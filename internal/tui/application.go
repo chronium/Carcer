@@ -67,16 +67,17 @@ const (
 // operator/runtime integration.  TUI state such as Busy is overwritten by the
 // application while a command is in flight.
 type StatusSnapshot struct {
-	RunName         string
-	Generation      uint64
-	HasGeneration   bool
-	RuntimeState    string
-	SolState        string
-	ActiveAgent     string
-	ActivePhase     string
-	PendingFeatures int
-	Interview       InterviewState
-	Busy            bool
+	RunName                string
+	Generation             uint64
+	HasGeneration          bool
+	RuntimeState           string
+	SolState               string
+	ActiveAgent            string
+	ActivePhase            string
+	PendingFeatures        int
+	ActiveOperatorRequests int
+	Interview              InterviewState
+	Busy                   bool
 }
 
 // ConfirmationFunc is passed to the command runner for operations which
@@ -1524,11 +1525,11 @@ func (a *Application) headerText() string {
 	case InterviewAvailable:
 		activity = "exit interview available"
 	}
-	full := fmt.Sprintf(" CodexOS  run %s · gen %s · %s · %s · pending %d · %s ", run, generation, state, activity, a.status.PendingFeatures, operatorState)
+	full := fmt.Sprintf(" CodexOS  run %s · gen %s · %s · %s · external pending %d · OS active %d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, operatorState)
 	if ansi.StringWidth(full) <= a.width {
 		return full
 	}
-	compact := fmt.Sprintf(" %s · g%s · %s · %s · p%d · %s ", run, generation, state, activity, a.status.PendingFeatures, strings.TrimPrefix(operatorState, "operator "))
+	compact := fmt.Sprintf(" %s · g%s · %s · %s · p%d · OS%d · %s ", run, generation, state, activity, a.status.PendingFeatures, a.status.ActiveOperatorRequests, strings.TrimPrefix(operatorState, "operator "))
 	return ansi.Truncate(compact, max(1, a.width), "…")
 }
 

@@ -27,6 +27,7 @@ import (
 	"codexos/internal/provenance"
 	"codexos/internal/qemu"
 	"codexos/internal/sourcecapacity"
+	"codexos/internal/store"
 )
 
 const (
@@ -120,11 +121,13 @@ func (e *GenerationRuntimeError) Unwrap() error { return e.Err }
 // process-free archive/gate model; NewLiveCodexOSRun attaches concrete QEMU,
 // serial, build, and guest-tool ownership to the same durable contract.
 type CodexOSRun struct {
-	sourceCapacity sourcecapacity.Budget
-	gateMu         sync.Mutex
-	runDirectory   string
-	state          RuntimeState
-	live           *liveRun
+	operatorRequests       *store.OperatorRequestStore
+	activeOperatorRequests int
+	sourceCapacity         sourcecapacity.Budget
+	gateMu                 sync.Mutex
+	runDirectory           string
+	state                  RuntimeState
+	live                   *liveRun
 
 	generationNumber        *uint64
 	previousHandoff         *string
@@ -153,7 +156,22 @@ func NewCodexOSRun(runDirectory string) (*CodexOSRun, error) {
 	if err != nil {
 		return nil, err
 	}
+	requests, err := store.NewOperatorRequestStore(run)
+	if err != nil {
+		return nil, err
+	}
+	ledger, err := requests.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	active := 0
+	for _, request := range ledger.Requests {
+		if request.Active() {
+			active++
+		}
+	}
 	return &CodexOSRun{
+		operatorRequests: requests, activeOperatorRequests: active,
 		sourceCapacity: budget,
 		runDirectory:   run,
 		state:          RuntimeStateStopped,
@@ -210,6 +228,7 @@ type RunPresentationSnapshot struct {
 	Generation             uint64
 	HasGeneration          bool
 	PendingFeatureRequests int
+	ActiveOperatorRequests int
 	HarnessTransition      *provenance.HarnessGateTransition
 }
 
@@ -223,6 +242,7 @@ func (r *CodexOSRun) PresentationSnapshot() RunPresentationSnapshot {
 	snapshot := RunPresentationSnapshot{RunDirectory: r.runDirectory}
 	r.gateMu.Lock()
 	snapshot.State = r.state
+	snapshot.ActiveOperatorRequests = r.activeOperatorRequests
 	snapshot.SourceCapacity = r.sourceCapacity
 	if r.generationNumber != nil {
 		snapshot.Generation = *r.generationNumber

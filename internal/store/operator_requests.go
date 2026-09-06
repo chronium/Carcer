@@ -75,6 +75,26 @@ type OperatorRequestLedger struct {
 	Requests      []OperatorRequest           `json:"requests"`
 }
 
+// Context is the exact revision projection delivered at an implementor turn
+// boundary. Completion reports are claims; Verification identifies a separate
+// operator attestation of the exact report, never automatic acceptance.
+type OperatorRequestContext struct {
+	RunID          string                `json:"run_id"`
+	LedgerRevision uint64                `json:"ledger_revision"`
+	Requests       []OperatorRequestView `json:"requests"`
+}
+
+type OperatorRequestView struct {
+	ID           uint64                   `json:"id"`
+	Title        string                   `json:"title"`
+	Description  string                   `json:"description"`
+	Revision     uint64                   `json:"revision"`
+	Active       bool                     `json:"active"`
+	Author       OperatorRequestActor     `json:"author"`
+	Report       *OperatorRequestRevision `json:"implementor_report,omitempty"`
+	Verification *OperatorRequestRevision `json:"operator_verification,omitempty"`
+}
+
 // One concrete owner serializes operator commands and agent reports. The file
 // lock also prevents lost updates when independently opened owners overlap.
 type OperatorRequestStore struct {

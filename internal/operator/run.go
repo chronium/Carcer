@@ -365,14 +365,15 @@ func tuiStatus(console *PlainConsole) tui.StatusSnapshot {
 	agentName, phase := console.CodexActivity()
 	runtime := console.runtime.PresentationSnapshot()
 	status := tui.StatusSnapshot{
-		RunName:         filepath.Base(runtime.RunDirectory),
-		Generation:      runtime.Generation,
-		HasGeneration:   runtime.HasGeneration,
-		RuntimeState:    runtimeStateName(runtime.State),
-		SolState:        console.CodexTurnState(),
-		ActiveAgent:     agentName,
-		ActivePhase:     phase,
-		PendingFeatures: runtime.PendingFeatureRequests,
+		RunName:                filepath.Base(runtime.RunDirectory),
+		Generation:             runtime.Generation,
+		HasGeneration:          runtime.HasGeneration,
+		RuntimeState:           runtimeStateName(runtime.State),
+		SolState:               console.CodexTurnState(),
+		ActiveAgent:            agentName,
+		ActivePhase:            phase,
+		PendingFeatures:        runtime.PendingFeatureRequests,
+		ActiveOperatorRequests: runtime.ActiveOperatorRequests,
 	}
 	switch console.ExitInterviewState() {
 	case "available":

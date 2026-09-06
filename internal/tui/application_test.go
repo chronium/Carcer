@@ -997,3 +997,18 @@ func assertFixedFrame(t *testing.T, content string, width, height int) {
 		}
 	}
 }
+
+func TestHeaderDistinguishesOperatorRequestsFromExternalApprovals(t *testing.T) {
+	app := testApplication(t, ApplicationOptions{Status: func() StatusSnapshot {
+		return StatusSnapshot{RunName: "example", RuntimeState: "running", PendingFeatures: 2, ActiveOperatorRequests: 3}
+	}})
+	app.width = 240
+	header := app.headerText()
+	if !strings.Contains(header, "external pending 2") || !strings.Contains(header, "OS active 3") {
+		t.Fatalf("header = %q", header)
+	}
+	app.width = 90
+	if header = app.headerText(); !strings.Contains(header, "OS3") {
+		t.Fatalf("compact header = %q", header)
+	}
+}
